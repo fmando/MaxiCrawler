@@ -98,3 +98,27 @@ def test_network_settings_round_trip_through_toml(tmp_path: Path) -> None:
     path.write_text(original.to_toml(), encoding="utf-8")
 
     assert Settings.from_toml(path) == original
+
+
+def test_the_library_path_has_a_documented_default() -> None:
+    assert Settings().library_path == Path("library")
+
+
+def test_the_library_path_loads_from_toml(tmp_path: Path) -> None:
+    path = tmp_path / "settings.toml"
+    path.write_text('[maxicrawler]\nlibrary_path = "archive/downloads"\n', encoding="utf-8")
+
+    assert Settings.from_toml(path).library_path == Path("archive/downloads")
+
+
+def test_an_empty_library_path_is_rejected() -> None:
+    with pytest.raises(ValueError, match="library_path must not be empty"):
+        Settings(library_path=Path(" "))
+
+
+def test_the_library_path_round_trips_through_toml(tmp_path: Path) -> None:
+    path = tmp_path / "settings.toml"
+    original = Settings(library_path=Path("archive/downloads"))
+    path.write_text(original.to_toml(), encoding="utf-8")
+
+    assert Settings.from_toml(path) == original

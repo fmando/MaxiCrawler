@@ -1,6 +1,12 @@
 """Tests for the built-in provider composition."""
 
-from mega_fixtures import RecordingTransport, file_answer, file_url, mega_classification
+from mega_fixtures import (
+    RecordingTransport,
+    StubStreamTransport,
+    file_answer,
+    file_url,
+    mega_classification,
+)
 
 from maxicrawler.domain import ProviderCapability
 from maxicrawler.providers import (
@@ -55,3 +61,21 @@ def test_the_default_registry_accepts_an_explicit_cipher_and_schedule() -> None:
     )
 
     assert MEGA_PROVIDER_NAME in registry
+
+
+def test_a_registry_without_a_stream_cannot_download() -> None:
+    registry = create_default_provider_registry(transport=RecordingTransport())
+
+    assert registry.with_capability(ProviderCapability.DOWNLOAD) == ()
+
+
+def test_a_registry_with_a_stream_can_download() -> None:
+    registry = create_default_provider_registry(
+        transport=RecordingTransport(),
+        stream=StubStreamTransport(),
+        cipher=CryptographyCipherBackend(),
+    )
+
+    assert [info.name for info in registry.with_capability(ProviderCapability.DOWNLOAD)] == [
+        MEGA_PROVIDER_NAME
+    ]
