@@ -12,7 +12,9 @@ what the project deliberately will not do.
 
 ## Features
 
-- Clear package boundaries for crawling, extraction, downloads, databases, plugins, GUI, and API layers.
+- Clear package boundaries for crawling, extraction, downloads, storage, plugins, GUI, and API layers.
+- A provider-independent download manager: a new host is a plugin and a provider, nothing else.
+- A self-describing library: one directory per resource, with versioned JSON metadata beside it.
 - Typed interfaces and strict static checking with mypy.
 - Fast formatting and linting with Ruff.
 - Test-first baseline with pytest.
@@ -53,6 +55,12 @@ Ask what a share link points at, without downloading it:
 uv run maxicrawler info "https://mega.nz/file/<handle>#<key>"
 ```
 
+Download it:
+
+```bash
+uv run maxicrawler download "https://mega.nz/file/<handle>#<key>"
+```
+
 Run the test suite and checks:
 
 ```bash
@@ -62,20 +70,31 @@ uv run ruff check .
 uv run mypy src
 ```
 
-## Two extension layers
+## The chain
 
-MaxiCrawler learns about a new host in two independent steps, and it is worth
-knowing which one you are looking at:
+```text
+Website / URL → Discovery → Plugin → Provider → Download Manager → Library
+```
 
-| Layer | Package | Question | Network |
+Each station answers exactly one question, and that is what keeps them
+replaceable:
+
+| Station | Package | Question | Network |
 | --- | --- | --- | --- |
+| Discovery | `maxicrawler.crawler` | *"Which URLs exist?"* | never |
 | Plugin | `maxicrawler.plugins` | *"Can I classify this URL?"* | never |
 | Provider | `maxicrawler.providers` | *"What can I do with this resource?"* | allowed |
+| Download Manager | `maxicrawler.downloader` | *"How are downloads executed?"* | delegates |
+| Library | `maxicrawler.library` | *"How are resources stored?"* | never |
 
 A plugin decides from the URL string alone, so it runs on every URL discovery
 finds and can never block. A provider takes the plugin's verdict and asks the
 host what the resource actually is. Only commands that say so contact a
-provider: `discover` stays entirely offline, `info` is the one that reaches out.
+provider: `discover` stays entirely offline, `info` and `download` are the ones
+that reach out.
+
+**Adding a host means adding a plugin and a provider.** The download manager
+and the library do not change — they contain no provider name at all.
 
 ## Architecture
 
@@ -87,7 +106,8 @@ responsibility and communicates through typed, small interfaces.
 | `crawler` | Coordinates the discovery lifecycle and orchestration services. |
 | `documents` | Reads local files into a format-independent representation. |
 | `extractors` | Converts documents and responses into structured content. |
-| `downloader` | Fetches resources and applies transport policies. |
+| `downloader` | Plans, queues, and executes downloads; knows no provider. |
+| `library` | Stores downloaded resources and their metadata. |
 | `database` | Persistence abstractions and implementations. |
 | `plugins` | Plugin protocol, registry, resolution, and discovery. |
 | `providers` | Provider protocol, registry, transport, retries, and crypto. |
@@ -391,13 +411,16 @@ The exit code carries the verdict, so link checking is scriptable:
 Rate limiting is deliberately **not** reported as "unavailable": a throttled
 lookup says nothing about whether the resource still exists.
 
-### Nothing is downloaded
+### `info` downloads nothing
 
 For a Mega file share the provider sends `{"a":"g","p":<handle>}` and leaves the
 download flag unset. Mega then reports size and encrypted attributes without
 allocating a transfer URL, so no file content moves and no transfer quota is
 consumed. A folder share is one `{"a":"f","c":1,"r":1}` request that returns the
 whole node tree.
+
+Setting that flag is what allocates a transfer and starts costing the share's
+quota, which is why only `download` sets it (see Sprint 7 below).
 
 ### The decryption key never leaves your machine
 
@@ -485,6 +508,230 @@ class ResourceProvider(Protocol):
 Providers that do not encrypt anything — Pixeldrain, GoFile, MediaFire — simply
 leave `ResourceRef.secret` as `None` and never touch the cipher backend. No
 change to the protocol, the registry, or the CLI is required to add one.
+
+## Sprint 7: the download manager and the library
+
+Sprint 7 is the first one that actually downloads something. It is deliberately
+**not** a sprint about writing a Mega downloader: it introduces a
+provider-independent **Download Manager** and a long-lived **Library**, and
+Mega is simply the first provider that plugs into them.
+
+```bash
+uv run maxicrawler download "https://mega.nz/file/<handle>#<key>"
+```
+
+```text
+ubuntu.iso ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 5.8/5.8 GB 32.1 MB/s 0:00:00
+
+Downloaded: 1
+Skipped: 0
+Failed: 0
+Stored: 5.8 GB
+Library: library
+```
+
+### One command, any source
+
+There is one `download` command and one argument, because from the outside the
+difference between "a link" and "a file full of links" is not interesting —
+both answer the same question with a list of URLs.
+
+```bash
+uv run maxicrawler download "https://mega.nz/folder/<handle>#<key>"  # a share
+uv run maxicrawler download links.txt                                # a list
+uv run maxicrawler download reading-list.md                          # Markdown
+uv run maxicrawler download bookmarks.html                           # HTML
+uv run maxicrawler download ./documents                              # a folder
+```
+
+Documents are read with exactly the same rules as `discover`, so whatever
+`discover` finds in a file is what `download` will fetch from it. A folder
+share becomes one download per file it holds.
+
+| Option | Effect |
+| --- | --- |
+| `--output DIR` / `-o DIR` | Store into this library instead of the configured one |
+| `--dry-run` | Report what would be downloaded; transfer nothing |
+| `--no-progress` | Suppress the progress bars |
+| `--max-entries N` | Limit how many folder entries are considered |
+| `--config PATH` | Use a different TOML configuration |
+
+The exit code carries the verdict, so downloading is scriptable:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Everything the source asked for is in the library |
+| `4` | Something was not: a failed transfer, a revoked share, an unhandled link |
+
+A **skipped** download counts as success — the resource is present, it simply
+did not have to be fetched again.
+
+### The library layout
+
+Downloads do not land in a flat directory. Every resource gets its own
+directory, namespaced by provider:
+
+```text
+library/
+    library.json                     the store descriptor and its schema version
+    mega/
+        aabbccdd-1a2b3c4d5e/         one resource
+            metadata.json            what it is and where it came from
+            content/
+                ubuntu.iso           the payload, as the provider named it
+            .incomplete/             in-flight files; never a finished download
+```
+
+Four properties follow, and each is why a simpler layout was rejected:
+
+- **The file system is the source of truth.** Every entry describes itself, so
+  a library survives losing a database, can be moved with `rsync`, and stays
+  readable with a text editor.
+- **The payload and the metadata cannot collide.** A provider is free to name a
+  file `metadata.json`; a separate `content/` makes that harmless.
+- **A partial download is never mistaken for a finished one.** Content is
+  written under `.incomplete/` and moved into place only once it is whole.
+- **An entry is addressed by identity, not by name.** The directory key comes
+  from the reference alone, so a renamed remote file — or one read through a
+  link that carries no key — still finds the same entry.
+
+The key is `<slug>-<digest>`: a readable stem plus a ten-character digest over
+provider, container, and resource. The stem alone would merge `AbCdEfGh` and
+`abcdefgh` on a case-insensitive volume, which is the default on Windows and
+macOS.
+
+The alternatives that were considered and rejected — mirroring the remote
+folder tree, a content-addressed blob store, hash-sharded directories, a SQLite
+index as the source of truth, date-based buckets — are recorded with their
+reasons in [docs/architecture.md](docs/architecture.md#why-this-layout-and-not-another).
+
+### The metadata document
+
+```json
+{
+  "schema": 1,
+  "provider": "mega",
+  "key": "aabbccdd-1a2b3c4d5e",
+  "resource_id": "AaBbCcDd",
+  "parent_id": null,
+  "kind": "file",
+  "name": "ubuntu.iso",
+  "source_url": "https://mega.nz/file/AaBbCcDd",
+  "source_document": "docs/links.md",
+  "status": "completed",
+  "discovered_at": "2026-08-02T09:00:00+00:00",
+  "downloaded_at": "2026-08-02T09:05:12+00:00",
+  "attempts": 1,
+  "error": null,
+  "content": {
+    "filename": "ubuntu.iso",
+    "path": "content/ubuntu.iso",
+    "size": 5800000000,
+    "checksums": [{"algorithm": "sha256", "value": "…"}]
+  }
+}
+```
+
+It is built to survive: a document written by a **newer** MaxiCrawler is
+refused rather than misread, and members this release does not recognise are
+preserved verbatim across a round trip, so a future field survives passing
+through today's code.
+
+`source_url` never carries a fragment, so a library directory is safe to share,
+back up, or paste into an issue — the decryption key is not in it.
+
+### Existing files are skipped
+
+Re-running a download is cheap and safe. The manager asks the library whether
+it already holds the resource, and that question needs no network request at
+all, so a second run over two hundred already-downloaded links contacts nobody.
+
+```text
+Downloaded: 0
+Skipped: 200
+Failed: 0
+```
+
+Both the record and the payload file are checked, so a library whose file was
+deleted repairs itself by simply running again. Nothing is ever overwritten
+automatically; overwrite options can be added later.
+
+### What this sprint deliberately does not do
+
+**Resume** is not implemented. The architecture is shaped so it can be added
+rather than retrofitted: content is already staged under `.incomplete/`, the
+stream transport already takes a URL and returns chunks, and the metadata
+record already versions itself and preserves unknown members.
+
+**Parallel downloads** are not enabled. The queue is thread-safe and hands out
+one job at a time, and the worker holds no state between jobs, so what remains
+is a thread pool around the drain loop.
+
+### Nothing in the manager knows about Mega
+
+That is the point of the sprint, and it is checkable by reading: grep
+`src/maxicrawler/downloader/` for `mega` and the only hits are none. Where
+behaviour differs between hosts, it is asked for through the provider protocol:
+
+```python
+class ResourceProvider(Protocol):
+    ...
+
+    def download(self, ref: ResourceRef, sink: DownloadSink) -> ContentDescriptor: ...
+```
+
+A provider streams bytes into a `DownloadSink` it does not own, so it never
+learns where they land; the manager owns the staging file, the digest, and the
+progress bar, so it never learns how the bytes were obtained. A provider that
+cannot transfer content omits `ProviderCapability.DOWNLOAD` and says so instead
+of failing when asked.
+
+### Configuration
+
+```toml
+[maxicrawler]
+library_path = "library"   # where downloads are stored; --output overrides it
+network_timeout = 30.0
+network_retries = 3
+max_entries = 1000
+```
+
+### Using the download manager from Python
+
+```python
+from maxicrawler.downloader import DownloadManager
+from maxicrawler.library import Library
+from maxicrawler.providers import (
+    UrllibStreamTransport,
+    UrllibTransport,
+    create_default_provider_registry,
+)
+
+providers = create_default_provider_registry(
+    transport=UrllibTransport(user_agent="MaxiCrawler/0.1.0"),
+    stream=UrllibStreamTransport(user_agent="MaxiCrawler/0.1.0"),
+)
+manager = DownloadManager(providers, Library("library"))
+
+report = manager.download("links.txt")
+
+print(len(report.completed), len(report.skipped), len(report.failed))
+for outcome in report.completed:
+    print(outcome.label, outcome.path)
+```
+
+`plan()` and `run()` are separate, so a caller can inspect what would happen
+before it happens:
+
+```python
+plan = manager.plan("https://mega.nz/folder/<handle>#<key>")
+print(len(plan.jobs), plan.total_size)
+report = manager.run(plan)
+```
+
+Without a `stream=` transport the registry produces inspection-only providers,
+which is what keeps `info` unable to download by construction rather than by
+convention.
 
 ## Documentation
 

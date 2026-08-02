@@ -13,13 +13,22 @@ does not embed parsing or storage details.
 ```text
 config, utils
    ↑
-downloader → crawler → extractors → documents
-                    ↘ plugins (protocol, registry, resolver)
-                    ↘ repository port ← database implements it structurally
-providers → plugins (pure URL parsing only); never the reverse
+downloader → providers → plugins (pure URL parsing only); never the reverse
+          ↘ library → domain
+          ↘ documents, extractors (reused for reading a source of links)
+crawler → extractors → documents
+       ↘ plugins (protocol, registry, resolver)
+       ↘ repository port ← database implements it structurally
 plugins depend on the domain only; concrete plugins extend the protocol
-cli composes crawler, documents, extractors, plugins, providers and database
+cli composes crawler, documents, extractors, plugins, providers,
+    downloader, library and database
 api and gui adapt the core for users
+```
+
+The processing chain the packages implement runs left to right:
+
+```text
+Website / URL → Discovery → Plugin → Provider → Download Manager → Library
 ```
 
 The crawler depends on the plugin *abstractions*, never on a concrete
@@ -39,8 +48,8 @@ SQLite metadata storage, plugin discovery, and a CLI. The `crawler`,
 `downloader`, and `extractors` packages are explicit placeholders; no network
 or crawling behavior is implemented yet.
 
-`downloader` is still a placeholder. The `crawler` and `extractors` packages
-were filled in by later sprints, as described below.
+The `crawler` and `extractors` packages were filled in by later sprints, and
+`downloader` by Sprint 7, as described below.
 
 Sprint 2 introduces a pure domain layer and synchronous events. The discovery
 pipeline is an in-memory application service: it accepts caller-provided URL
@@ -62,6 +71,11 @@ form; no request is made to the provider.
 Sprint 6 adds the provider layer, described under
 [The provider layer](#the-provider-layer). This is the first sprint that
 performs network access — from one command only, and never to download.
+
+Sprint 7 adds the download manager and the library, described under
+[The download layer](#the-download-layer) and [The library](#the-library).
+This is the first sprint that transfers content and writes files outside the
+metadata database.
 
 ## Plugin architecture
 
@@ -264,13 +278,48 @@ class ResourceProvider(Protocol):
     def supports(self, classification: UrlClassification) -> bool: ...
     def reference(self, classification: UrlClassification) -> ResourceRef: ...
     def inspect(self, ref: ResourceRef) -> ResourceInspection: ...
+    def download(self, ref: ResourceRef, sink: DownloadSink) -> ContentDescriptor: ...
 ```
 
 The contract splits into a pure half and an I/O half on purpose. `supports`
 and `reference` are side-effect free, so references can be built, stored, and
-compared offline — which is exactly what `info --offline` does. `inspect` is
-the single place a request happens, which keeps the network on one testable
-seam and gives downloading a natural home later.
+compared offline — which is exactly what `info --offline` does. `inspect` and
+`download` are the only places a request happens, which keeps the network on
+two testable seams.
+
+Three shapes in `download` are deliberate:
+
+1. **A container is not a transfer.** Folders are enumerated with `inspect`
+   and their entries downloaded individually, so *"what does one transfer
+   mean?"* has the same answer for every provider.
+2. **Unreachability raises**, which is the opposite of `inspect`. There is no
+   partial answer to give for a transfer, and the caller has a failed download
+   to record either way.
+3. **Downloading is optional.** A provider that cannot move content omits
+   `ProviderCapability.DOWNLOAD` and raises `UnsupportedResourceError`. The
+   Mega provider computes that capability from what it was actually given, so
+   an inspection-only composition advertises the truth rather than failing when
+   asked.
+
+### Two transports, not one
+
+```python
+class HttpTransport(Protocol):
+    def post_json(self, url, payload, *, params=None, headers=None) -> object: ...
+
+
+class StreamTransport(Protocol):
+    def stream(self, url, *, chunk_size=...) -> Generator[bytes, None, None]: ...
+```
+
+An API call is a small JSON document read into memory whole; a transfer is
+unbounded and must never be. Keeping them apart preserves the response-size
+bound that protects the first, and means a provider composed for metadata alone
+has no way to move content — which is what keeps `info` unable to download by
+construction rather than by convention.
+
+`stream` returns a generator on purpose: a caller that abandons a transfer
+closes it and the socket goes with it.
 
 ### Errors versus availability
 
@@ -310,33 +359,53 @@ the allowlist. Widening that allowlist requires editing the test on purpose.
 
 ### The Mega provider
 
-```text
-providers/mega/
-    api.py       MegaApiClient — the /cs wire protocol, and nothing else
-    crypto.py    key unpacking and attribute decryption, entirely local
-    mapping.py   Mega node types and status codes → domain models
-    provider.py  MegaProvider — orchestration of the three above
-```
-
 Mega publishes no specification for this endpoint; the request shapes follow
 its own open-source clients. Confining that knowledge to `api.py` means a
 change on Mega's side has one place to be fixed, and a response that no longer
 fits raises `ProviderProtocolError` rather than being guessed at.
 
-Two requests exist, and neither transfers content:
+```text
+providers/mega/
+    api.py       MegaApiClient — the /cs wire protocol, and nothing else
+    crypto.py    key unpacking and attribute decryption, entirely local
+    download.py  AES-128-CTR decryption of content, entirely local
+    mapping.py   Mega node types and status codes → domain models
+    provider.py  MegaProvider — orchestration of the four above
+```
 
-| Link | Request | Answer |
+Four requests exist, and only the last two transfer content:
+
+| Purpose | Request | Answer |
 | --- | --- | --- |
-| File share | `{"a":"g","p":<handle>}` | size and encrypted attributes |
-| Folder share | `{"a":"f","c":1,"r":1}` with `?n=<handle>` | the whole node tree |
+| Describe a file share | `{"a":"g","p":<handle>}` | size and encrypted attributes |
+| Describe a folder share | `{"a":"f","c":1,"r":1}` with `?n=<handle>` | the whole node tree |
+| Transfer a file share | `{"a":"g","g":1,"p":<handle>}` | the above plus a transfer URL |
+| Transfer a folder entry | `{"a":"g","g":1,"n":<node>}` with `?n=<handle>` | the same |
 
-The `g` download flag is deliberately unset, so no transfer URL is allocated
-and no quota is consumed. Sizes, timestamps, and structure arrive unencrypted;
-only names need the key, so a share published without one is still fully
-enumerable.
+For inspection the `g` download flag is deliberately unset, so no transfer URL
+is allocated and no quota is consumed. Setting it is what starts costing the
+share's quota, which is why it appears only in `download`.
 
-A file inside a shared folder is described from the folder listing rather than
-by asking about it directly, because its per-node key is published only there.
+Sizes, timestamps, and structure arrive unencrypted; only names need the key,
+so a share published without one is still fully enumerable — but not
+downloadable, because its content stays sealed. That is reported as an
+unsupported reference rather than attempted.
+
+A file inside a shared folder is described *and* keyed from the folder listing
+rather than by asking about it directly, because its per-node key is published
+only there. The listing is fetched before the transfer is allocated, so a link
+whose key cannot be resolved never costs the owner any quota.
+
+Content is AES-128-CTR with the counter block set to the eight-byte nonce
+followed by eight zero bytes. Counter mode turns the block cipher into a stream
+cipher, so a download is decrypted as it arrives, at whatever chunk boundaries
+the network produced, and written straight to disk. Nothing is buffered: a
+fifty-gigabyte share costs the same memory as a fifty-kilobyte one.
+
+Two wire details would otherwise be read as success. A transfer answer states
+its URL in `g`, occasionally wrapped in an array; and an exhausted quota is
+reported as `{"e": -17}` inside an otherwise valid result, which without a
+check would arrive as an empty file.
 
 ### Why the parser is reused, not duplicated
 
@@ -347,11 +416,253 @@ providers → plugins and never the reverse, so no cycle is possible.
 
 ### Adding a provider
 
-Nothing in the protocol, the registry, or the CLI is Mega-specific. A provider
-for Pixeldrain, GoFile, or MediaFire implements the same four members, leaves
-`ResourceRef.secret` as `None` because those hosts do not encrypt names, and
-never touches the cipher backend. Registering it in
-`create_default_provider_registry` is the only wiring required.
+Nothing in the protocol, the registry, the download manager, the library, or
+the CLI is Mega-specific. A provider for Pixeldrain, GoFile, or MediaFire
+implements the same five members, leaves `ResourceRef.secret` as `None` because
+those hosts do not encrypt names, and never touches the cipher backend.
+Registering it in `create_default_provider_registry` is the only wiring
+required.
+
+## The download layer
+
+Sprint 7 adds the station that answers *"how are downloads executed?"*.
+
+### Layers
+
+| Element | Module | Layer |
+| --- | --- | --- |
+| `DownloadStatus`, `ContentDescriptor`, `Checksum` | `maxicrawler.domain.downloads` | Domain |
+| `DownloadSink` | `maxicrawler.providers.protocol` | Domain-facing contract |
+| `DownloadJob`, `DownloadOutcome`, `DownloadPlan`, `DownloadReport` | `maxicrawler.downloader.models` | Application |
+| `SourceResolver` | `maxicrawler.downloader.sources` | Application |
+| `DownloadPlanner` | `maxicrawler.downloader.planner` | Application |
+| `DownloadQueue` | `maxicrawler.downloader.queue` | Application |
+| `DownloadWorker`, `DownloadManager` | `maxicrawler.downloader.manager` | Application |
+| `LibrarySink` | `maxicrawler.downloader.sink` | Infrastructure |
+| `ProgressReporter`, `RichProgressReporter` | `maxicrawler.downloader.progress` | Interface adapter |
+
+### The rule that keeps it provider-independent
+
+**Nothing in `maxicrawler.downloader` branches on a provider name.** Where
+behaviour differs between hosts it is asked for through `ResourceProvider` or
+declared through `ProviderCapability`. That is a rule you can check by reading:
+grep the package for `"mega"` and the only hit is a test.
+
+`DownloadSink` is the seam that makes it work. A provider streams bytes into a
+sink it does not own, so it never learns where they land; the manager owns the
+destination, the staging file, the hashing, and the progress bar, so it never
+learns how the bytes were obtained.
+
+### Pipeline
+
+```text
+source string
+  → SourceResolver.resolve()     a URL, a document, or a directory → SourceItem[]
+  → DownloadPlanner.plan()       classify, resolve a provider, expand containers
+  → DownloadQueue                ordered, duplicate-free backlog
+  → DownloadWorker.execute()     skip, or provider.download() → LibrarySink
+  → Library                      metadata.json + content/
+```
+
+### One command, one argument
+
+From the outside, the difference between "a link" and "a file full of links" is
+not interesting: both answer *"what should I download?"* with a list of URLs.
+`SourceResolver` settles it once, and reuses the discovery readers and
+extractor to do it — so whatever `discover` finds in a file is exactly what
+`download` will fetch from it, rather than a second, subtly different scanner.
+
+A Windows path such as `C:\links.txt` parses as a URL with the scheme `c`, so
+the scheme is checked against `http` and `https` rather than merely being
+required to exist.
+
+### Planning is separate from running
+
+Every decision that can go wrong — an unclassifiable URL, a provider that
+cannot transfer, a revoked share, a folder holding no files — is made and
+reported before a byte moves. That makes `--dry-run` the same code path minus
+its last stage rather than a second implementation that can drift.
+
+A failure during planning becomes an `UnresolvedSource`, never an exception:
+one dead link in a list of two hundred must not stop the other hundred and
+ninety-nine. The same applies during execution, where every job ends in a
+`DownloadOutcome` whatever happened to it.
+
+### The queue is built for workers it does not yet have
+
+Only one worker drains the queue today, and that is deliberate: parallel
+transfers to the same host are a policy question, not a performance trick. The
+two things that make concurrency painful to retrofit are nevertheless already
+handled, because both are structural rather than incidental:
+
+1. **Mutable state without a lock.** Every queue operation is guarded, so
+   adding a second worker changes no invariant.
+2. **Workers that own their work.** Jobs are handed out one at a time through
+   `pop()`, so a worker never holds a slice of the backlog and workers never
+   have to agree on who takes what.
+
+What is left to add is a thread pool around the drain loop in
+`DownloadManager.run`, plus whatever ordering guarantee the report should keep.
+
+Deduplication is by resource identity — provider, container, resource — rather
+than by URL, so the same file reached through a link with a key and a link
+without one queues a single time.
+
+### Existing files
+
+The worker asks the library whether it already holds the resource, and that
+question needs no network request at all: re-running over a list of two hundred
+already-downloaded links contacts nobody. Both the metadata record and the
+payload file are checked, so a library whose file was deleted repairs itself by
+simply running again.
+
+Nothing is overwritten automatically. Overwrite options can be added later as
+an argument to that check; the check itself is one function.
+
+### Why resume is not implemented yet
+
+It was deliberately left out, and the architecture was shaped so it can be
+added rather than retrofitted:
+
+- content is already staged under `.incomplete/`, which is where a partial file
+  would have to live;
+- `StreamTransport.stream` already takes a URL and returns chunks, so a byte
+  offset is one parameter;
+- `ResourceRecord` already versions itself and preserves unknown members, so a
+  resumed-offset field costs no migration.
+
+### Progress reporting
+
+`ProgressReporter` is a protocol rather than a print statement, so the manager
+stays usable from a script, a future GUI, and a future API without any of them
+inheriting a terminal. `NullProgressReporter` is the default: a library caller
+that asks for nothing gets nothing.
+
+Rich renders to **standard error**. Standard output then carries only the final
+report, which keeps `maxicrawler download … > report.txt` meaningful.
+
+## The library
+
+The last station answers *"how are resources stored and managed?"*. It knows
+nothing about providers, transfers, or queues: a Mega file, a Pixeldrain file,
+and a GoFile entry are stored by exactly the same rules.
+
+### Layout
+
+```text
+<root>/
+    library.json                 the store descriptor and its schema version
+    mega/                        one namespace per provider
+        aabbccdd-1a2b3c4d5e/     one directory per resource
+            metadata.json        what this resource is and where it came from
+            content/             the payload, as the provider named it
+                ubuntu.iso
+            .incomplete/         in-flight files; never a finished download
+```
+
+Four properties follow from it, and each is the reason a simpler layout was
+rejected:
+
+1. **The file system is the source of truth.** Every entry describes itself, so
+   a library survives losing a database, can be moved with `rsync`, and stays
+   readable with a text editor. An index may be added later as a cache, never
+   as the authority.
+2. **The payload and the metadata cannot collide.** A provider is free to name
+   a file `metadata.json`; putting the payload in its own directory makes that
+   harmless instead of destructive.
+3. **A partial download is never mistaken for a finished one.** Content is
+   written under `.incomplete/` and moved into place only once it is whole, so
+   an interrupted run leaves nothing a later run would skip over.
+4. **An entry is addressed by identity, not by name.** The directory key is
+   derived from the reference alone, so renaming a remote file, or reading it
+   through a link that carries no key, still finds the same entry.
+
+### The entry key
+
+```text
+<slug>-<digest>       e.g.  aabbccdd-1a2b3c4d5e
+```
+
+Both halves are needed. The slug alone would not do: a Mega handle is
+case-sensitive base64url, so `AbCdEfGh` and `abcdefgh` are different resources
+that a case-insensitive volume — the default on Windows and macOS — would map
+onto one directory, silently merging two downloads. The digest alone would do,
+but nobody could read the result; keeping the stem means `ls` on a provider
+directory still says something.
+
+The digest is `sha256(provider \0 parent \0 resource)` truncated to ten hex
+characters. The credential is deliberately not part of the input, so two links
+to the same resource — one with a key, one without — address the same entry.
+
+### Why this layout and not another
+
+| Rejected | Why |
+| --- | --- |
+| A flat directory of files | Name collisions, nowhere to put metadata, no provider namespacing. |
+| Mirroring the provider's own folder tree | Names are encrypted or absent for some links, remote trees get renamed and moved, Windows path limits are reached quickly, and two links to the same node yield two copies. The remote path is *recorded* in metadata instead, so a browsable view can be generated later. |
+| A content-addressed store (`blobs/<sha256>`) | Perfect deduplication, but you cannot name a file before you have downloaded it, and the result is unbrowsable. The recorded SHA-256 leaves the door open for a deduplication pass later. |
+| Hash-sharded directories (`mega/3f/3fa9…`) | Solves a problem the project does not have — millions of entries in one directory — at the cost of readability. Adding a shard level later is a rename of directories, which the `library.json` schema version makes tractable. |
+| A SQLite index as the source of truth | A library must survive losing its database and be inspectable by hand. SQLite can still be added as a rebuildable cache. |
+| Date-based buckets (`2026/08/…`) | Download date is not identity; re-downloading or repairing an entry would move it. |
+
+### Every foreign name is sanitized
+
+A payload name is decrypted from a remote host and is treated as hostile.
+`maxicrawler.library.naming` is the single place a name becomes a path
+component, and it guarantees three things:
+
+- a component never escapes its directory, whatever the input contained —
+  directory parts are stripped under both POSIX and Windows rules, so a name
+  produced on one platform is stripped the same way on the other;
+- two distinct resources never collide, not even on a case-insensitive volume;
+- a component is legal on Windows, macOS, and Linux alike — reserved
+  characters and device names are neutralised, trailing dots and spaces
+  removed, and long names shortened while keeping their extension.
+
+### The metadata document
+
+```json
+{
+  "schema": 1,
+  "provider": "mega",
+  "key": "aabbccdd-1a2b3c4d5e",
+  "resource_id": "AaBbCcDd",
+  "parent_id": null,
+  "kind": "file",
+  "name": "ubuntu.iso",
+  "source_url": "https://mega.nz/file/AaBbCcDd",
+  "source_document": "docs/links.md",
+  "status": "completed",
+  "discovered_at": "2026-08-02T09:00:00+00:00",
+  "downloaded_at": "2026-08-02T09:05:12+00:00",
+  "attempts": 1,
+  "error": null,
+  "content": {
+    "filename": "ubuntu.iso",
+    "path": "content/ubuntu.iso",
+    "size": 5800000000,
+    "checksums": [{"algorithm": "sha256", "value": "…"}]
+  }
+}
+```
+
+Two properties make the format survivable for years:
+
+1. **A schema version.** A document written by a newer MaxiCrawler is refused
+   rather than misread, so an old binary can never quietly discard fields it
+   does not understand.
+2. **Unknown members are preserved.** Anything the current release does not
+   recognise is kept in `ResourceRecord.extra` and written back unchanged, so a
+   future field survives a round trip through today's code.
+
+`source_url` is `ResourceRef.url`, which already has its fragment removed, so a
+library directory is safe to share, back up, or paste into an issue.
+
+The SHA-256 is computed while writing rather than by re-reading the file, which
+costs nothing extra on a stream that is being written anyway. It is
+provider-independent on purpose: a host that offers its own integrity check —
+Mega's meta-MAC, for instance — would add to this rather than replace it, so
+resources from different providers stay comparable.
 
 ## Design rules
 
@@ -371,7 +682,7 @@ never touches the cipher backend. Registering it in
 10. Keep provider vocabulary inside the provider package; the domain carries
     it only as untyped attributes.
 11. Classification never performs I/O; only a provider may reach a host, and
-    only through `HttpTransport`.
+    only through `HttpTransport` or `StreamTransport`.
 12. Report what a resource *is* as a value and what *we* failed at as an
     exception.
 13. A credential from a URL is wrapped in a `ResourceSecret` and unwrapped in
@@ -379,3 +690,14 @@ never touches the cipher backend. Registering it in
     fragment.
 14. Providers may depend on plugins for pure URL parsing; plugins never depend
     on providers.
+15. The download manager never branches on a provider name. Ask through the
+    provider protocol, or declare through `ProviderCapability`.
+16. A provider transfers into a sink it does not own; only the library decides
+    a path.
+17. Every name that arrives from a remote answer passes through
+    `maxicrawler.library.naming` before it becomes a path component.
+18. Content becomes visible only once it is whole. Stage it, verify the size,
+    then move it into place.
+19. A stored document states its schema version and preserves members it does
+    not recognise.
+20. One dead link never stops a run. Report it as a value and carry on.

@@ -35,3 +35,7 @@ content and every ciphertext round-trips against the functions under test.
 
 The `mega` extra (`cryptography`) is part of the `dev` dependencies, so
 `uv sync --all-extras` is enough to run everything.
+
+Download tests write only into pytest's `tmp_path`, and the download manager is
+driven against a stub provider, so a full run touches neither the network nor
+anything outside the temporary directory.
