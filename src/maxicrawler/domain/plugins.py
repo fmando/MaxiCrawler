@@ -59,17 +59,42 @@ class PluginInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class LinkAttribute:
+    """One piece of structured metadata a plugin read out of a URL.
+
+    Attributes are intentionally plain strings: their meaning belongs to the
+    plugin that produced them, and the domain stays free of provider knowledge.
+    """
+
+    name: str
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
 class UrlClassification:
-    """A plugin's verdict about one URL, produced without any I/O."""
+    """A plugin's verdict about one URL, produced without any I/O.
+
+    ``attributes`` carries provider-specific metadata, such as the public
+    handle and decryption key of a file-hosting share. It is empty for plugins
+    that only assign a category.
+    """
 
     record: UrlRecord
     category: UrlCategory
     plugin_name: str
+    attributes: tuple[LinkAttribute, ...] = ()
 
     @property
     def is_supported(self) -> bool:
         """Return whether the classifying plugin can process the URL."""
         return self.category is not UrlCategory.UNSUPPORTED
+
+    def attribute(self, name: str) -> str | None:
+        """Return the value of the attribute called *name*, if it is present."""
+        for attribute in self.attributes:
+            if attribute.name == name:
+                return attribute.value
+        return None
 
 
 @dataclass(frozen=True, slots=True)

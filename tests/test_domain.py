@@ -5,6 +5,7 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from maxicrawler.domain import (
+    LinkAttribute,
     PluginCapability,
     PluginInfo,
     PluginResolution,
@@ -76,6 +77,39 @@ def test_url_classification_reports_support() -> None:
 
     assert supported.is_supported is True
     assert unsupported.is_supported is False
+
+
+def test_url_classification_has_no_attributes_by_default() -> None:
+    record = UrlRecord("https://example.test", "https://example.test/")
+
+    classification = UrlClassification(record, UrlCategory.GENERIC, "generic")
+
+    assert classification.attributes == ()
+    assert classification.attribute("handle") is None
+
+
+def test_url_classification_exposes_structured_attributes() -> None:
+    record = UrlRecord("https://example.test", "https://example.test/")
+
+    classification = UrlClassification(
+        record,
+        UrlCategory.FILE,
+        "mega",
+        attributes=(LinkAttribute("handle", "AaBbCcDd"), LinkAttribute("key", "secret")),
+    )
+
+    assert classification.attribute("handle") == "AaBbCcDd"
+    assert classification.attribute("key") == "secret"
+    assert classification.attribute("missing") is None
+
+
+def test_url_classification_stays_hashable_with_attributes() -> None:
+    record = UrlRecord("https://example.test", "https://example.test/")
+    classification = UrlClassification(
+        record, UrlCategory.FILE, "mega", attributes=(LinkAttribute("handle", "AaBbCcDd"),)
+    )
+
+    assert len({classification, classification}) == 1
 
 
 def test_plugin_resolution_defaults_to_unresolved() -> None:
