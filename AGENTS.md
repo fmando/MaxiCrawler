@@ -37,3 +37,23 @@ Mitwirkende.
 -   Claude Code / Codex: Implementierung.
 -   ChatGPT: Architektur, Review und Sprintplanung.
 -   Mensch: Entscheidungen und Merge.
+
+###   Language Policy
+
+Conversation with AI assistants:
+- German preferred.
+
+Repository:
+- English only.
+
+Code:
+- English only.
+
+Documentation:
+- English only.
+
+Commit messages:
+- English only.
+
+Pull Requests:
+- English only.
