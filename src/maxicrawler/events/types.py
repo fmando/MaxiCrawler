@@ -27,6 +27,11 @@ class PluginLoaded:
 
 
 @dataclass(frozen=True, slots=True)
+class PluginUnloaded:
+    plugin: PluginInfo
+
+
+@dataclass(frozen=True, slots=True)
 class DownloadQueued:
     task: DownloadTask
 
@@ -47,6 +52,7 @@ Event = (
     | ScanStarted
     | ScanFinished
     | PluginLoaded
+    | PluginUnloaded
     | DownloadQueued
     | DownloadFinished
     | DownloadFailed

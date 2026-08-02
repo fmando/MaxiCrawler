@@ -4,6 +4,9 @@
 
 Build a modular, plugin-driven link discovery and download platform.
 
+The mission, core principles, and non-goals are described in
+[VISION.md](VISION.md).
+
 ## Milestones
 
 -   0.1 Foundation ✅
