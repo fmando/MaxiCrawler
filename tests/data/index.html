@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>MaxiCrawler — documentation index</title>
+    <link rel="stylesheet" href="https://cdn.example.test/site.css" />
+    <script src="https://cdn.example.test/analytics.js"></script>
+    <style>
+      /* https://example.test/not-a-real-link-in-css */
+      body { font-family: sans-serif; }
+    </style>
+  </head>
+  <body>
+    <h1>Documentation</h1>
+
+    <ul>
+      <li><a href="https://docs.example.test/getting-started">Getting started</a></li>
+      <li><a href="https://docs.example.test/plugins">Writing plugins</a></li>
+      <li><a href="https://docs.example.test/search?q=urls&amp;lang=en">Search the docs</a></li>
+      <li><a href="/relative/page">A relative link that cannot be resolved offline</a></li>
+      <li><a href="mailto:docs@example.test">Mail the docs team</a></li>
+    </ul>
+
+    <p>
+      The canonical address of this page is
+      <a href="https://docs.example.test/">https://docs.example.test/</a>,
+      written once as markup and once as visible text.
+    </p>
+
+    <img src="https://cdn.example.test/logo.png" alt="Logo" />
+
+    <p>An unclosed paragraph with a bare URL: http://legacy.example.test/archive
+    <p>And a second one, to prove malformed markup is tolerated.
+
+    <script>
+      // https://example.test/not-a-real-link-in-script
+      console.log("no links from here");
+    </script>
+  </body>
+</html>

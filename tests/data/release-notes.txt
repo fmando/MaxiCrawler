@@ -1,0 +1,23 @@
+MaxiCrawler release notes
+=========================
+
+Thanks to everyone who filed reports during the pre-alpha period.
+
+The full changelog lives at https://example.test/changelog and the migration
+guide is at https://example.test/docs/migration. Please read both before
+upgrading.
+
+Known issues are tracked at https://example.test/issues?state=open. If you hit
+something that is not listed there, open a ticket (see https://example.test/support).
+
+A mirror of the archive is available over plain HTTP at
+http://mirror.example.test/releases/ for networks that block TLS.
+
+The changelog URL is repeated here on purpose: https://example.test/changelog
+
+Not URLs, and deliberately so:
+  - version 1.2.3 of the parser
+  - contact us at support@example.test
+  - the local file ./maxicrawler.toml
+  - ftp://legacy.example.test/old-builds is no longer maintained
+  - https:// on its own is not a URL either
