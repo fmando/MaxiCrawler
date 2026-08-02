@@ -238,6 +238,75 @@ print(summary.documents_processed, summary.unique_urls, summary.duplicates_remov
 Pass `repository=` to persist the run and `loader=` or `extractor=` to swap in
 your own components.
 
+## Sprint 5: the first provider plugin
+
+Sprint 5 proves the plugin architecture carries its weight: Mega share links are
+now understood as files and folders with identifiers, instead of being filed
+away as generic links. Still **no networking, no API calls, and no downloading**
+— the plugin reads the URL string and nothing else.
+
+```bash
+uv run maxicrawler discover ./links
+```
+
+```text
+Documents processed: 2
+URLs discovered: 20
+Unique URLs: 19
+Duplicates removed: 1
+
+Plugin usage:
+mega: 13
+generic: 6
+```
+
+Both URL generations are recognized, on `mega.nz` and the historical
+`mega.co.nz`:
+
+| Form | Example | Category |
+| --- | --- | --- |
+| Modern file | `https://mega.nz/file/<handle>#<key>` | `file` |
+| Modern folder | `https://mega.nz/folder/<handle>#<key>` | `container` |
+| Modern folder, one entry selected | `…/folder/<handle>#<key>/file/<node>` | `container` |
+| Legacy file | `https://mega.nz/#!<handle>!<key>` | `file` |
+| Legacy folder | `https://mega.nz/#F!<handle>!<key>` | `container` |
+| Legacy folder, one entry selected | `https://mega.nz/#F!<handle>!<key>!<node>` | `container` |
+
+The category describes the **share**; a selected entry is reported through the
+`node_handle` and `node_kind` attributes rather than by changing the category.
+
+Each classification carries what the URL stated:
+
+```python
+from maxicrawler.domain import UrlRecord
+from maxicrawler.plugins import PluginResolver, create_default_registry
+
+url = "https://mega.nz/folder/QwErTyUi#0123456789abcdefghijkl/file/N0d3H4nd"
+resolution = PluginResolver(create_default_registry()).resolve(
+    UrlRecord(raw_url=url, normalized_url=url)
+)
+
+classification = resolution.classification
+print(classification.category)  # container
+print(classification.attribute("format"))  # modern
+print(classification.attribute("handle"))  # QwErTyUi
+print(classification.attribute("key"))  # 0123456789abcdefghijkl
+print(classification.attribute("node_kind"))  # file
+```
+
+`GenericPlugin` remains the fallback and keeps its old job. A Mega URL that is
+not a share — the pricing page, a malformed handle — is declined by the Mega
+plugin and classified as `generic`.
+
+### URL fragments are now significant
+
+Normalization previously discarded the fragment. A legacy Mega share keeps its
+whole identity there, so two unrelated shares compared equal and the second was
+silently dropped as a duplicate. Fragments are now preserved verbatim.
+
+As a consequence, `https://example.test/a#intro` and `https://example.test/a`
+count as two distinct URLs.
+
 ## Documentation
 
 | Document | Purpose |
