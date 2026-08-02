@@ -25,6 +25,14 @@ cd MaxiCrawler
 uv sync --all-extras
 ```
 
+Create the local configuration and SQLite metadata database:
+
+```bash
+uv run maxicrawler init
+uv run maxicrawler config
+uv run maxicrawler version
+```
+
 Run the test suite and checks:
 
 ```bash
@@ -50,6 +58,26 @@ responsibility and communicates through typed, small interfaces.
 | `api` | Optional programmatic and HTTP API adapters. |
 | `utils` | Shared, dependency-light helpers. |
 | `config` | Typed application settings and configuration loading. |
+
+## First implementation sprint
+
+This release adds the application foundations while intentionally leaving
+crawling and downloading for a later sprint:
+
+- TOML configuration in `maxicrawler.toml` (created with `maxicrawler init`)
+- consistent package logging through `maxicrawler.utils.configure_logging`
+- a small SQLite adapter for application metadata
+- plugin discovery through the `maxicrawler.plugins` entry-point group
+- a Typer CLI with `init`, `config`, and `version` commands
+
+Third-party distributions can register a plugin in `pyproject.toml`:
+
+```toml
+[project.entry-points."maxicrawler.plugins"]
+example = "my_package.plugin:ExamplePlugin"
+```
+
+The plugin object must expose a `name` attribute and a `register()` method.
 
 See [docs/architecture.md](docs/architecture.md) for design rules and
 [docs/development.md](docs/development.md) for the contributor workflow.

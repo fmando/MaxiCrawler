@@ -1,4 +1,4 @@
-"""Plugin protocols."""
+"""Plugin extension protocols."""
 
 from typing import Protocol
 

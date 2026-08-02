@@ -20,7 +20,12 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Typing :: Typed",
 ]
-dependencies = []
+dependencies = ["typer>=0.15"]
+
+[project.scripts]
+maxicrawler = "maxicrawler.cli:app"
+
+[project.entry-points."maxicrawler.plugins"]
 
 [project.optional-dependencies]
 dev = ["mypy>=1.13", "pre-commit>=4.0", "pytest>=8.3", "pytest-cov>=6.0", "ruff>=0.8"]
