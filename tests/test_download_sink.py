@@ -34,6 +34,18 @@ def test_a_payload_is_stored_and_described(tmp_path: Path) -> None:
     assert (entry.path / content.path).read_bytes() == PAYLOAD
 
 
+def test_a_finished_entry_keeps_no_staging_directory(tmp_path: Path) -> None:
+    entry = make_entry(tmp_path)
+
+    with LibrarySink(entry) as sink:
+        sink.begin(ContentDescriptor(name="ubuntu.iso", size=len(PAYLOAD)))
+        sink.write(PAYLOAD)
+        sink.commit()
+
+    assert not entry.staging_directory.exists()
+    assert sorted(path.name for path in entry.path.iterdir()) == ["content"]
+
+
 def test_the_digest_is_of_what_was_written(tmp_path: Path) -> None:
     entry = make_entry(tmp_path)
 

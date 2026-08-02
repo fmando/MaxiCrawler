@@ -142,6 +142,10 @@ class LibrarySink:
         claims to be complete while holding a truncated file, which is the one
         failure a library must never contain.
 
+        The staging directory is removed afterwards, so a finished entry
+        contains only what it holds — an empty ``.incomplete`` left behind
+        would read as a transfer that never finished.
+
         Raises:
             DownloadError: nothing was announced, or the payload is not the
                 size it was supposed to be.
@@ -158,6 +162,7 @@ class LibrarySink:
         stored = self._entry.commit(self._staged, self._filename)
         self._committed = True
         self._filename = stored.name
+        self._entry.discard()
         return ContentRecord(
             filename=stored.name,
             path=stored.relative_to(self._entry.path).as_posix(),
