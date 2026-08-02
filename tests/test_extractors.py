@@ -7,7 +7,7 @@ import pytest
 from maxicrawler.documents import Document, DocumentLoader, DocumentType
 from maxicrawler.extractors import GenericUrlExtractor, UrlExtractor
 
-DATA = Path(__file__).parent / "data"
+DATA = Path(__file__).parent / "data" / "documents"
 
 
 def make_document(text: str = "", links: tuple[str, ...] = ()) -> Document:

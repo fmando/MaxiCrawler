@@ -13,7 +13,7 @@ from maxicrawler.database import SQLiteDatabase, SQLiteDiscoveryRepository
 from maxicrawler.domain import ScanSession, Statistics
 
 runner = CliRunner()
-DATA = Path(__file__).parent / "data"
+DATA = Path(__file__).parent / "data" / "documents"
 
 
 def make_summary(
