@@ -1,0 +1,4 @@
+{
+  "comment": "An unsupported file type. Its URL must never be discovered.",
+  "endpoint": "https://never.example.test/should-not-be-extracted"
+}

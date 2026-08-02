@@ -41,6 +41,14 @@ class DiscoveryPipeline:
         """Publish the beginning of a caller-managed discovery session."""
         self._event_bus.publish(ScanStarted(session))
 
+    def record_document(self) -> None:
+        """Count one processed source document.
+
+        The pipeline does not read documents itself; callers report each
+        document they fed in so the session counters stay in one place.
+        """
+        self._statistics = self._statistics.with_document()
+
     def discover(self, raw_url: str, source_url: str | None = None) -> DiscoveryResult:
         """Process one URL candidate without fetching it.
 
