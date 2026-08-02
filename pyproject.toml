@@ -28,7 +28,15 @@ maxicrawler = "maxicrawler.cli:app"
 [project.entry-points."maxicrawler.plugins"]
 
 [project.optional-dependencies]
-dev = ["mypy>=1.13", "pre-commit>=4.0", "pytest>=8.3", "pytest-cov>=6.0", "ruff>=0.8"]
+mega = ["cryptography>=43"]
+dev = [
+  "cryptography>=43",
+  "mypy>=1.13",
+  "pre-commit>=4.0",
+  "pytest>=8.3",
+  "pytest-cov>=6.0",
+  "ruff>=0.8",
+]
 
 [project.urls]
 Homepage = "https://github.com/fmando/MaxiCrawler"

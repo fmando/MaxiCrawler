@@ -6,6 +6,11 @@ question, *"what can I do with this resource?"*, and is the only place in
 MaxiCrawler that reaches a remote host.
 """
 
+from maxicrawler.providers.crypto import (
+    CipherBackend,
+    CryptographyCipherBackend,
+    default_cipher_backend,
+)
 from maxicrawler.providers.errors import (
     DuplicateProviderError,
     InvalidProviderError,
@@ -21,9 +26,19 @@ from maxicrawler.providers.errors import (
 )
 from maxicrawler.providers.protocol import ResourceProvider
 from maxicrawler.providers.registry import ProviderRegistry
+from maxicrawler.providers.retry import Retrier, RetryPolicy
+from maxicrawler.providers.transport import (
+    DEFAULT_TIMEOUT,
+    HttpTransport,
+    UrllibTransport,
+)
 
 __all__ = [
+    "DEFAULT_TIMEOUT",
+    "CipherBackend",
+    "CryptographyCipherBackend",
     "DuplicateProviderError",
+    "HttpTransport",
     "InvalidProviderError",
     "ProviderCryptoError",
     "ProviderDependencyError",
@@ -34,6 +49,10 @@ __all__ = [
     "ProviderRegistryError",
     "ProviderTransportError",
     "ResourceProvider",
+    "Retrier",
+    "RetryPolicy",
     "UnknownProviderError",
     "UnsupportedResourceError",
+    "UrllibTransport",
+    "default_cipher_backend",
 ]
