@@ -29,6 +29,10 @@ cd MaxiCrawler
 uv sync --all-extras
 ```
 
+`--all-extras` includes the optional `mega` extra, which pulls in
+`cryptography`. It is needed only to decrypt the names inside a Mega share;
+everything else works without it.
+
 Create the local configuration and SQLite metadata database:
 
 ```bash
@@ -43,6 +47,12 @@ Discover the URLs in a folder of local documents:
 uv run maxicrawler discover ./docs
 ```
 
+Ask what a share link points at, without downloading it:
+
+```bash
+uv run maxicrawler info "https://mega.nz/file/<handle>#<key>"
+```
+
 Run the test suite and checks:
 
 ```bash
@@ -51,6 +61,21 @@ uv run ruff format --check .
 uv run ruff check .
 uv run mypy src
 ```
+
+## Two extension layers
+
+MaxiCrawler learns about a new host in two independent steps, and it is worth
+knowing which one you are looking at:
+
+| Layer | Package | Question | Network |
+| --- | --- | --- | --- |
+| Plugin | `maxicrawler.plugins` | *"Can I classify this URL?"* | never |
+| Provider | `maxicrawler.providers` | *"What can I do with this resource?"* | allowed |
+
+A plugin decides from the URL string alone, so it runs on every URL discovery
+finds and can never block. A provider takes the plugin's verdict and asks the
+host what the resource actually is. Only commands that say so contact a
+provider: `discover` stays entirely offline, `info` is the one that reaches out.
 
 ## Architecture
 
@@ -65,6 +90,7 @@ responsibility and communicates through typed, small interfaces.
 | `downloader` | Fetches resources and applies transport policies. |
 | `database` | Persistence abstractions and implementations. |
 | `plugins` | Plugin protocol, registry, resolution, and discovery. |
+| `providers` | Provider protocol, registry, transport, retries, and crypto. |
 | `gui` | Optional desktop user interface adapters. |
 | `api` | Optional programmatic and HTTP API adapters. |
 | `utils` | Shared, dependency-light helpers. |
@@ -306,6 +332,159 @@ silently dropped as a duplicate. Fragments are now preserved verbatim.
 
 As a consequence, `https://example.test/a#intro` and `https://example.test/a`
 count as two distinct URLs.
+
+## Sprint 6: the provider layer
+
+Sprint 6 adds the second extension layer. Where a plugin says *what a URL is*,
+a provider says *what the resource behind it is* — and for the first time
+MaxiCrawler contacts a remote host to find out. It still **does not download**:
+the goal of this sprint is metadata only.
+
+```bash
+uv run maxicrawler info "https://mega.nz/file/<handle>#<key>"
+```
+
+```text
+Provider: Mega
+Type: File
+Name: ubuntu.iso
+Size: 5.8 GB
+Available: Yes
+```
+
+A folder share is described in one request too, including what it holds:
+
+```bash
+uv run maxicrawler info "https://mega.nz/folder/<handle>#<key>"
+```
+
+```text
+Provider: Mega
+Type: Folder
+Name: Ubuntu Releases
+Size: 5.8 GB
+Available: Yes
+Files: 2
+Folders: 1
+
+Contents:
+  archive/
+  checksums.txt  1.0 MB
+  ubuntu.iso     5.8 GB
+```
+
+| Option | Effect |
+| --- | --- |
+| `--offline` | Read the link only; contact no provider |
+| `--json` | Print a machine-readable document |
+| `--max-entries N` | Limit how many folder entries are listed |
+| `--config PATH` | Use a different TOML configuration |
+
+The exit code carries the verdict, so link checking is scriptable:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | The resource is available |
+| `2` | The provider says it is gone, revoked, or blocked |
+| `3` | No statement could be obtained (rate limited, quota, or a failure) |
+
+Rate limiting is deliberately **not** reported as "unavailable": a throttled
+lookup says nothing about whether the resource still exists.
+
+### Nothing is downloaded
+
+For a Mega file share the provider sends `{"a":"g","p":<handle>}` and leaves the
+download flag unset. Mega then reports size and encrypted attributes without
+allocating a transfer URL, so no file content moves and no transfer quota is
+consumed. A folder share is one `{"a":"f","c":1,"r":1}` request that returns the
+whole node tree.
+
+### The decryption key never leaves your machine
+
+A Mega link keeps its key in the URL fragment, which no HTTP client transmits.
+MaxiCrawler preserves that property rather than merely inheriting it:
+
+- the key is wrapped in a `ResourceSecret`, readable only through an explicit
+  `reveal()` call, and redacted in `repr()` and `str()`;
+- `ResourceRef.url` is the share URL with the fragment already removed, so even
+  a full reference is safe to print or log;
+- decryption happens locally, in a module that has no access to the network;
+- the test suite scans every outgoing request, rendering, and log record for
+  fragments of the key, and reads the syntax tree to confirm that only the
+  provider module unwraps a secret.
+
+Sizes, timestamps, and the structure of a share arrive unencrypted, so a link
+published **without** its key is still fully enumerable — only its names stay
+hidden:
+
+```text
+Provider: Mega
+Type: File
+Name: unavailable (encrypted)
+Size: 5.8 GB
+Available: Yes
+
+Names stay encrypted: the link carries no usable decryption key.
+```
+
+Reading names needs AES, which is an optional dependency:
+
+```bash
+uv sync --extra mega        # or: pip install 'maxicrawler[mega]'
+```
+
+### Configuration
+
+```toml
+[maxicrawler]
+network_timeout = 30.0   # seconds to wait for a provider
+network_retries = 3      # attempts before giving up, with exponential backoff
+max_entries = 1000       # folder entries listed per inspection
+```
+
+### Using a provider from Python
+
+```python
+from maxicrawler.domain import UrlRecord
+from maxicrawler.plugins import PluginResolver, create_default_registry
+from maxicrawler.providers import UrllibTransport, create_default_provider_registry
+
+url = "https://mega.nz/file/QwErTyUi#<key>"
+record = UrlRecord(raw_url=url, normalized_url=url)
+classification = PluginResolver(create_default_registry()).resolve(record).classification
+
+providers = create_default_provider_registry(
+    transport=UrllibTransport(user_agent="MaxiCrawler/0.1.0")
+)
+provider = providers.resolve(classification)
+
+ref = provider.reference(classification)  # pure: no request is made
+inspection = provider.inspect(ref)  # one request, no download
+
+print(inspection.availability)  # available
+print(inspection.metadata.name)  # ubuntu.iso
+print(inspection.total_size)  # 5800000000
+```
+
+`reference()` is deliberately separate from `inspect()`: building a reference is
+pure, so it can be done, stored, and compared offline.
+
+### Adding a provider
+
+A new provider implements four members and needs no base class:
+
+```python
+class ResourceProvider(Protocol):
+    @property
+    def metadata(self) -> ProviderInfo: ...
+    def supports(self, classification: UrlClassification) -> bool: ...
+    def reference(self, classification: UrlClassification) -> ResourceRef: ...
+    def inspect(self, ref: ResourceRef) -> ResourceInspection: ...
+```
+
+Providers that do not encrypt anything — Pixeldrain, GoFile, MediaFire — simply
+leave `ResourceRef.secret` as `None` and never touch the cipher backend. No
+change to the protocol, the registry, or the CLI is required to add one.
 
 ## Documentation
 
