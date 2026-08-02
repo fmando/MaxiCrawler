@@ -5,10 +5,15 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 def normalize_url(value: str) -> str:
-    """Return a stable HTTP(S) URL without fragments.
+    """Return a stable HTTP(S) URL.
 
     Query parameters are sorted solely to make equivalent candidate URLs
     compare consistently within an in-memory discovery session.
+
+    The fragment is preserved verbatim, because it can carry the identity of a
+    link rather than a position inside a page: a legacy Mega share keeps its
+    whole handle and decryption key there. Dropping or rewriting it would make
+    two unrelated links compare equal and destroy case-sensitive keys.
     """
     parsed = urlsplit(value.strip())
     scheme = parsed.scheme.lower()
@@ -21,7 +26,7 @@ def normalize_url(value: str) -> str:
     netloc = hostname if port is None or default_port else f"{hostname}:{port}"
     path = parsed.path or "/"
     query = urlencode(sorted(parse_qsl(parsed.query, keep_blank_values=True)), doseq=True)
-    return urlunsplit((scheme, netloc, path, query, ""))
+    return urlunsplit((scheme, netloc, path, query, parsed.fragment))
 
 
 class DuplicateDetector:

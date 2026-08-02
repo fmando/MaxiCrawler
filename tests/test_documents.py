@@ -15,7 +15,7 @@ from maxicrawler.documents import (
     UnsupportedDocumentError,
 )
 
-DATA = Path(__file__).parent / "data"
+DATA = Path(__file__).parent / "data" / "documents"
 
 
 def test_readers_implement_the_document_reader_protocol() -> None:

@@ -8,6 +8,7 @@ from maxicrawler.domain.models import (
     UrlRecord,
 )
 from maxicrawler.domain.plugins import (
+    LinkAttribute,
     PluginCapability,
     PluginInfo,
     PluginResolution,
@@ -18,6 +19,7 @@ from maxicrawler.domain.plugins import (
 __all__ = [
     "DiscoveryResult",
     "DownloadTask",
+    "LinkAttribute",
     "PluginCapability",
     "PluginInfo",
     "PluginResolution",

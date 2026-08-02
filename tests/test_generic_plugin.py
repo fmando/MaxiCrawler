@@ -96,7 +96,10 @@ def test_classification_performs_no_network_access(monkeypatch: pytest.MonkeyPat
     assert plugin.classify(record).category is UrlCategory.GENERIC
 
 
-def test_default_registry_contains_only_the_generic_plugin() -> None:
+def test_default_registry_keeps_the_generic_plugin_as_the_last_resort() -> None:
     registry = create_default_registry()
 
-    assert [info.name for info in registry.discover()] == ["generic"]
+    names = [info.name for info in registry.discover()]
+
+    assert "generic" in names
+    assert names[-1] == "generic", "the generic plugin must remain the lowest-priority fallback"

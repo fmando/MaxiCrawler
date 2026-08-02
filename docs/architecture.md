@@ -54,6 +54,10 @@ Sprint 4 adds offline discovery over local documents, described under
 [Offline discovery](#offline-discovery). File-system reads are the only I/O
 the project performs; there is still no network access.
 
+Sprint 5 adds the first provider plugin, described under
+[Provider plugins](#provider-plugins). It classifies URLs from their string
+form; no request is made to the provider.
+
 ## Plugin architecture
 
 ### Layers
@@ -63,7 +67,8 @@ the project performs; there is still no network access.
 | `PluginInfo`, `UrlClassification`, `PluginResolution`, `UrlCategory`, `PluginCapability` | `maxicrawler.domain.plugins` | Domain |
 | `CrawlerPlugin` | `maxicrawler.plugins.protocol` | Domain-facing contract |
 | `PluginRegistry`, `PluginResolver` | `maxicrawler.plugins` | Application |
-| `GenericPlugin` | `maxicrawler.plugins.generic` | Built-in plugin |
+| `GenericPlugin` | `maxicrawler.plugins.generic` | Built-in fallback plugin |
+| `MegaPlugin` | `maxicrawler.plugins.mega` | Built-in provider plugin |
 | `create_default_registry` | `maxicrawler.plugins.defaults` | Composition |
 
 The domain imports nothing outside the standard library. Plugins import the
@@ -90,7 +95,8 @@ All three members must be side-effect free. `classify` reports
 
 `PluginRegistry` orders plugins by descending `PluginInfo.priority`; equal
 priorities keep their registration order. `GenericPlugin` registers at
-priority `-100`, so any specialised plugin outranks it. `PluginResolver`
+priority `-100` and provider plugins above zero — `MegaPlugin` at `100` — so
+any specialised plugin outranks the fallback. `PluginResolver`
 asks the registry for the responsible plugin and returns an immutable
 `PluginResolution` — with `plugin` and `classification` set to `None` when no
 plugin claims the record.
@@ -153,6 +159,64 @@ no storage logic. `NullDiscoveryRepository` is the default, keeping the service
 usable and testable without a database. The CLI is the composition root that
 binds the two.
 
+## Provider plugins
+
+`maxicrawler.plugins.mega` is the reference implementation of a provider
+plugin and the shape later providers should follow.
+
+### Package layout
+
+A provider is a package, not a module, because it grows:
+
+```text
+plugins/mega/
+    models.py   MegaLink, MegaLinkKind, MegaLinkFormat — what a link is
+    parser.py   parse_mega_url() — recognizing the URL, a pure string operation
+    plugin.py   MegaPlugin — the CrawlerPlugin implementation
+```
+
+The split keeps the parser testable on its own: the bulk of provider knowledge
+lives in `parser.py` and needs no registry, no record, and no plugin instance.
+
+### Structured metadata
+
+`UrlClassification.attributes` carries what a plugin read out of a URL as
+plain name/value pairs, and `UrlCategory` says what kind of thing the URL is.
+The domain deliberately learns no provider vocabulary: "handle" and "key" are
+strings whose meaning belongs to the plugin that produced them. Typed
+provider models such as `MegaLink` stay inside the provider package.
+
+### Recognition rules
+
+Two rules keep provider plugins predictable:
+
+1. **Strict about identity, lenient about the key.** A modern Mega link is
+   identified by its path, so an unreadable fragment yields a link without a
+   key rather than a rejection. A legacy link keeps its identity in the
+   fragment, so an unreadable fragment means the URL is not recognized.
+2. **Decline what you do not understand.** `can_handle` returns `False` for
+   URLs on a provider's host that are not shares, so the generic fallback keeps
+   handling them. A provider plugin owns a *link shape*, not a domain name.
+
+The category describes the share itself. A folder link that selects one entry
+stays a `CONTAINER`; the selection is reported through the `node_handle` and
+`node_kind` attributes. Encoding the selection in the category would have made
+the modern and legacy forms disagree, because the legacy format does not state
+what the selected node is.
+
+### Fragments carry identity
+
+`normalize_url` preserves the fragment. This is not cosmetic: a legacy Mega
+share keeps its entire handle and decryption key there, so discarding the
+fragment made unrelated shares compare equal, and the extractor dropped them
+before any plugin could see them. Fragments are appended verbatim because keys
+are case-sensitive.
+
+The cost is accepted deliberately: `…/a#intro` and `…/a` now count as two URLs.
+
+Plugins parse `UrlRecord.raw_url` rather than `normalized_url`, so a key
+survives even if normalization rules change again.
+
 ## Design rules
 
 1. Keep public interfaces typed and small.
@@ -166,3 +230,7 @@ binds the two.
    structurally and are bound by the composition root.
 8. Add an input format by adding a `DocumentReader`, not by teaching the
    extractor about the format.
+9. A provider plugin owns a link shape, not a host. Decline URLs you do not
+   understand so the generic fallback keeps working.
+10. Keep provider vocabulary inside the provider package; the domain carries
+    it only as untyped attributes.

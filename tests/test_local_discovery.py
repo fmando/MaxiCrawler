@@ -13,7 +13,7 @@ from maxicrawler.domain import ScanSession, UrlCategory
 from maxicrawler.events import EventBus, ScanFinished, ScanStarted, UrlDiscovered
 from maxicrawler.plugins import PluginRegistry
 
-DATA = Path(__file__).parent / "data"
+DATA = Path(__file__).parent / "data" / "documents"
 SESSION = ScanSession("session-1", datetime(2026, 8, 2, 12, 0, tzinfo=UTC))
 
 
