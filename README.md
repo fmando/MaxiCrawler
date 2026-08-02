@@ -37,6 +37,12 @@ uv run maxicrawler config
 uv run maxicrawler version
 ```
 
+Discover the URLs in a folder of local documents:
+
+```bash
+uv run maxicrawler discover ./docs
+```
+
 Run the test suite and checks:
 
 ```bash
@@ -53,8 +59,9 @@ responsibility and communicates through typed, small interfaces.
 
 | Package | Responsibility |
 | --- | --- |
-| `crawler` | Coordinates URL fetching and crawl lifecycle. |
-| `extractors` | Converts responses into structured content. |
+| `crawler` | Coordinates the discovery lifecycle and orchestration services. |
+| `documents` | Reads local files into a format-independent representation. |
+| `extractors` | Converts documents and responses into structured content. |
 | `downloader` | Fetches resources and applies transport policies. |
 | `database` | Persistence abstractions and implementations. |
 | `plugins` | Plugin protocol, registry, resolution, and discovery. |
@@ -161,6 +168,75 @@ registry.register(ExampleHostPlugin())
 
 Plugins depend on the domain and the standard library only. Network access,
 persistence, and file-system I/O stay in the infrastructure layer.
+
+## Sprint 4: offline discovery
+
+Sprint 4 delivers the first usable workflow. MaxiCrawler reads local documents,
+extracts the URLs they contain, resolves each one through the plugin registry,
+and stores the results. There is still **no network access, no crawling, and no
+downloading**.
+
+```bash
+uv run maxicrawler discover ./docs
+```
+
+```text
+Documents processed: 4
+URLs discovered: 22
+Unique URLs: 21
+Duplicates removed: 1
+
+Plugin usage:
+generic: 21
+```
+
+`URLs discovered` counts every URL handed to the pipeline, `Unique URLs` those
+seen for the first time, and the two differ by `Duplicates removed`. The plugin
+name is the one registered in the plugin registry.
+
+The command accepts a single file or a directory, which is processed
+recursively; unsupported files are skipped silently.
+
+```bash
+uv run maxicrawler discover ./notes.md            # a single file
+uv run maxicrawler discover ./docs --no-persist   # report only, write nothing
+uv run maxicrawler discover ./docs --config custom.toml
+```
+
+Results are written to the database configured in `maxicrawler.toml`, into a
+`scan_sessions` table and a `discovered_urls` table holding the original URL,
+its canonical form, the source document, and the responsible plugin.
+
+### Supported input
+
+| Format | Suffixes | How URLs are found |
+| --- | --- | --- |
+| Plain text | `.txt` | scanned as prose |
+| Markdown | `.md` | scanned as prose; inline, autolink and reference syntax all keep the URL literal |
+| HTML | `.html`, `.htm` | link attributes (`href`, `src`, …) plus visible text; `script` and `style` are ignored |
+
+Relative links, `mailto:` addresses, and other non-HTTP(S) URLs are skipped
+because they cannot be resolved without a base URL.
+
+### Using the workflow from Python
+
+```python
+from datetime import UTC, datetime
+from pathlib import Path
+
+from maxicrawler.crawler import DiscoveryPipeline, LocalDiscoveryService
+from maxicrawler.domain import ScanSession
+from maxicrawler.events import EventBus
+
+service = LocalDiscoveryService(DiscoveryPipeline(EventBus()))
+session = ScanSession(session_id="local-1", started_at=datetime.now(UTC))
+summary = service.run(Path("docs"), session)
+
+print(summary.documents_processed, summary.unique_urls, summary.duplicates_removed)
+```
+
+Pass `repository=` to persist the run and `loader=` or `extractor=` to swap in
+your own components.
 
 ## Documentation
 
