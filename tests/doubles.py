@@ -16,8 +16,10 @@ from maxicrawler.domain import (
     UrlClassification,
     UrlRecord,
 )
+from maxicrawler.downloader.models import DownloadJob, DownloadOutcome
 from maxicrawler.providers.errors import UnsupportedResourceError
 from maxicrawler.providers.protocol import DownloadSink
+from maxicrawler.utils import strip_fragment
 
 
 class StubPlugin:
@@ -125,7 +127,7 @@ class StubProvider:
             provider=self._metadata.name,
             resource_id=classification.attribute("handle") or "stub-handle",
             kind=self._kind,
-            url=classification.record.normalized_url,
+            url=strip_fragment(classification.record.normalized_url),
             secret=None if key is None else ResourceSecret(key),
         )
 
@@ -173,6 +175,33 @@ class RecordingSink:
     def payload(self) -> bytes:
         """Return everything that was written, in order."""
         return b"".join(self.chunks)
+
+
+class RecordingProgressReporter:
+    """A :class:`ProgressReporter` that keeps every call it received."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self.started_jobs: list[tuple[str, int | None]] = []
+        self.advanced_totals: list[int] = []
+        self.finished_jobs: list[DownloadOutcome] = []
+
+    def begin(self) -> None:
+        self.events.append("begin")
+
+    def end(self) -> None:
+        self.events.append("end")
+
+    def started(self, job: DownloadJob, size: int | None) -> None:
+        self.events.append("started")
+        self.started_jobs.append((job.label, size))
+
+    def advanced(self, job: DownloadJob, written: int) -> None:
+        self.advanced_totals.append(written)
+
+    def finished(self, job: DownloadJob, outcome: DownloadOutcome) -> None:
+        self.events.append("finished")
+        self.finished_jobs.append(outcome)
 
 
 def make_record(url: str) -> UrlRecord:
