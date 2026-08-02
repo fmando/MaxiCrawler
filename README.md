@@ -53,7 +53,7 @@ responsibility and communicates through typed, small interfaces.
 | `extractors` | Converts responses into structured content. |
 | `downloader` | Fetches resources and applies transport policies. |
 | `database` | Persistence abstractions and implementations. |
-| `plugins` | Extension points and plugin discovery. |
+| `plugins` | Plugin protocol, registry, resolution, and discovery. |
 | `gui` | Optional desktop user interface adapters. |
 | `api` | Optional programmatic and HTTP API adapters. |
 | `utils` | Shared, dependency-light helpers. |
@@ -78,6 +78,8 @@ example = "my_package.plugin:ExamplePlugin"
 ```
 
 The plugin object must expose a `name` attribute and a `register()` method.
+This is the distribution-level contract; `register()` is where a plugin adds
+its `CrawlerPlugin` implementations to a registry (see Sprint 3 below).
 
 ## Sprint 2: domain and discovery
 
@@ -93,6 +95,68 @@ implementation.
   `DuplicateDetector` tracks them within a session.
 - `DiscoveryPipeline` orchestrates local normalization, duplicate detection,
   and lifecycle events only.
+
+## Sprint 3: plugin architecture
+
+Sprint 3 introduces the plugin system that later sprints will extend. It is a
+design sprint: there is still no networking, crawling, or downloading. Plugins
+classify URLs from their string form alone.
+
+- `CrawlerPlugin` is the public plugin protocol: `metadata`, `can_handle`, and
+  `classify`. Plugins are structurally typed, so no base class is required.
+- `PluginRegistry` registers, unregisters, discovers, and resolves plugins, and
+  publishes `PluginLoaded` / `PluginUnloaded` events.
+- `PluginResolver` turns `UrlRecord` objects into immutable `PluginResolution`
+  results.
+- `GenericPlugin` is the built-in fallback for ordinary HTTP(S) URLs. It
+  registers at the lowest priority and never performs network access.
+- `DiscoveryPipeline` resolves every unique URL through the registry.
+
+```python
+from maxicrawler.events import EventBus
+from maxicrawler.crawler import DiscoveryPipeline
+
+pipeline = DiscoveryPipeline(EventBus())
+result = pipeline.discover("https://example.test/docs")
+
+assert result.resolution is not None
+print(result.resolution.plugin.name)  # generic
+print(result.resolution.classification.category)  # generic (UrlCategory.GENERIC)
+```
+
+A custom plugin implements the protocol and is registered by priority, so it
+outranks the generic fallback:
+
+```python
+from maxicrawler.domain import PluginInfo, UrlCategory, UrlClassification, UrlRecord
+from maxicrawler.plugins import PluginRegistry, create_default_registry
+
+
+class ExampleHostPlugin:
+    """Handles one specific host."""
+
+    @property
+    def metadata(self) -> PluginInfo:
+        return PluginInfo(
+            name="example-host",
+            version="1.0.0",
+            module=__name__,
+            priority=10,
+        )
+
+    def can_handle(self, record: UrlRecord) -> bool:
+        return record.normalized_url.startswith("https://example.test/")
+
+    def classify(self, record: UrlRecord) -> UrlClassification:
+        return UrlClassification(record, UrlCategory.CONTAINER, "example-host")
+
+
+registry: PluginRegistry = create_default_registry()
+registry.register(ExampleHostPlugin())
+```
+
+Plugins depend on the domain and the standard library only. Network access,
+persistence, and file-system I/O stay in the infrastructure layer.
 
 See [docs/architecture.md](docs/architecture.md) for design rules and
 [docs/development.md](docs/development.md) for the contributor workflow.
