@@ -1,12 +1,20 @@
-"""The single seam through which MaxiCrawler issues HTTP requests.
+"""The seams through which MaxiCrawler issues HTTP requests.
 
-Providers depend on :class:`HttpTransport` rather than on a concrete HTTP
-library, so a test can drive a full inspection without a socket and so the
-default implementation can be swapped without touching provider logic.
+Providers depend on :class:`HttpTransport` and :class:`StreamTransport` rather
+than on a concrete HTTP library, so a test can drive a full inspection or a
+full download without a socket and so the default implementations can be
+swapped without touching provider logic.
+
+The two are separate on purpose. An API call is a small JSON document that is
+read into memory whole; a transfer is an unbounded stream of bytes that must
+never be. Keeping them apart means the memory bound that protects the first can
+stay in place, and a provider that only reads metadata never gains the ability
+to move content.
 """
 
 import json
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
+from contextlib import closing
 from typing import Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
@@ -19,6 +27,14 @@ DEFAULT_TIMEOUT = 30.0
 
 DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 """Upper bound on a response body, so a hostile reply cannot exhaust memory."""
+
+DEFAULT_CHUNK_SIZE = 1024 * 1024
+"""Bytes read from a transfer at a time.
+
+Large enough that the per-read overhead disappears against real throughput,
+small enough that progress stays responsive and memory flat regardless of how
+large the file is.
+"""
 
 ALLOWED_SCHEMES = frozenset({"http", "https"})
 """Schemes a transport is willing to talk; anything else is a configuration bug."""
@@ -41,6 +57,30 @@ class HttpTransport(Protocol):
         Raises:
             ProviderTransportError: the request could not be carried out.
             ProviderProtocolError: the response was not decodable JSON.
+        """
+        ...
+
+
+@runtime_checkable
+class StreamTransport(Protocol):
+    """Reads a response body in chunks, without ever holding all of it."""
+
+    def stream(
+        self, url: str, *, chunk_size: int = DEFAULT_CHUNK_SIZE
+    ) -> Generator[bytes, None, None]:
+        """Yield the body of a GET request to *url*, chunk by chunk.
+
+        The result is a generator rather than a bare iterator because the
+        connection has to be releasable on demand: a caller that abandons a
+        transfer part-way — because the disk filled up, or the user pressed
+        Ctrl-C — closes the generator and the socket goes with it.
+
+        Nothing happens until the first chunk is pulled, so building the
+        generator is free and opening the connection is the caller's decision.
+
+        Raises:
+            ProviderTransportError: the request could not be carried out, or
+                failed while the body was being read.
         """
         ...
 
@@ -115,6 +155,61 @@ class UrllibTransport:
         }
         request_headers.update(headers or {})
         return Request(target, data=body, headers=request_headers, method="POST")  # noqa: S310
+
+
+class UrllibStreamTransport:
+    """A :class:`StreamTransport` built on the standard library.
+
+    Deliberately thin, like its sibling: it knows about sockets and chunk
+    sizes, and nothing about what the bytes mean. Whether the content is
+    encrypted, compressed, or plain is entirely the provider's business.
+
+    No response-size limit applies here. A transfer is expected to be large,
+    and it is written straight to disk rather than accumulated, so the bound
+    that protects :class:`UrllibTransport` would only get in the way.
+    """
+
+    def __init__(self, *, user_agent: str, timeout: float = DEFAULT_TIMEOUT) -> None:
+        if timeout <= 0:
+            msg = "timeout must be positive"
+            raise ValueError(msg)
+        self._user_agent = user_agent
+        self._timeout = timeout
+
+    def stream(
+        self, url: str, *, chunk_size: int = DEFAULT_CHUNK_SIZE
+    ) -> Generator[bytes, None, None]:
+        """Yield the body of a GET request to *url*, chunk by chunk."""
+        if chunk_size <= 0:
+            msg = "chunk_size must be positive"
+            raise ValueError(msg)
+        scheme = urlsplit(url).scheme.lower()
+        if scheme not in ALLOWED_SCHEMES:
+            msg = f"unsupported URL scheme: {scheme or '(none)'}"
+            raise ProviderTransportError(msg)
+        request = Request(  # noqa: S310 - the scheme is checked above
+            url,
+            headers={"User-Agent": self._user_agent, "Accept": "*/*"},
+            method="GET",
+        )
+        try:
+            response = urlopen(request, timeout=self._timeout)  # noqa: S310
+        except HTTPError as error:
+            msg = f"HTTP {error.code} from {_safe_target(url)}"
+            raise ProviderTransportError(msg) from error
+        except (URLError, TimeoutError, OSError) as error:
+            msg = f"request to {_safe_target(url)} failed"
+            raise ProviderTransportError(msg) from error
+        with closing(response):
+            while True:
+                try:
+                    chunk = response.read(chunk_size)
+                except (URLError, TimeoutError, OSError) as error:
+                    msg = f"transfer from {_safe_target(url)} was interrupted"
+                    raise ProviderTransportError(msg) from error
+                if not chunk:
+                    return
+                yield chunk
 
 
 def decode_json(body: bytes, *, source: str) -> object:

@@ -7,6 +7,7 @@ MaxiCrawler that reaches a remote host.
 """
 
 from maxicrawler.providers.crypto import (
+    BlockStream,
     CipherBackend,
     CryptographyCipherBackend,
     default_cipher_backend,
@@ -33,22 +34,28 @@ from maxicrawler.providers.mega import (
     MegaApiError,
     MegaProvider,
 )
-from maxicrawler.providers.protocol import ResourceProvider
+from maxicrawler.providers.protocol import DownloadSink, ResourceProvider
 from maxicrawler.providers.registry import ProviderRegistry
 from maxicrawler.providers.retry import Retrier, RetryPolicy
 from maxicrawler.providers.transport import (
+    DEFAULT_CHUNK_SIZE,
     DEFAULT_TIMEOUT,
     HttpTransport,
+    StreamTransport,
+    UrllibStreamTransport,
     UrllibTransport,
 )
 
 __all__ = [
+    "DEFAULT_CHUNK_SIZE",
     "DEFAULT_TIMEOUT",
     "MEGA_API_URL",
     "MEGA_PROVIDER_NAME",
     "MEGA_PROVIDER_PRIORITY",
+    "BlockStream",
     "CipherBackend",
     "CryptographyCipherBackend",
+    "DownloadSink",
     "DuplicateProviderError",
     "HttpTransport",
     "InvalidProviderError",
@@ -66,8 +73,10 @@ __all__ = [
     "ResourceProvider",
     "Retrier",
     "RetryPolicy",
+    "StreamTransport",
     "UnknownProviderError",
     "UnsupportedResourceError",
+    "UrllibStreamTransport",
     "UrllibTransport",
     "create_default_provider_registry",
     "default_cipher_backend",

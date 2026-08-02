@@ -3,6 +3,7 @@
 import pytest
 
 from maxicrawler.providers import (
+    BlockStream,
     CipherBackend,
     CryptographyCipherBackend,
     ProviderCryptoError,
@@ -93,3 +94,39 @@ def test_validate_ciphertext_accepts_an_aligned_block() -> None:
 def test_validate_ciphertext_rejects_an_empty_payload() -> None:
     with pytest.raises(ProviderCryptoError, match="must not be empty"):
         validate_ciphertext(b"")
+
+
+def test_ctr_decrypts_a_known_vector() -> None:
+    # NIST SP 800-38A, F.5.2: AES-128-CTR decryption, first block.
+    key = bytes.fromhex("2b7e151628aed2a6abf7158809cf4f3c")
+    counter = bytes.fromhex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
+    ciphertext = bytes.fromhex("874d6191b620e3261bef6864990db6ce")
+    plaintext = bytes.fromhex("6bc1bee22e409f96e93d7e117393172a")
+
+    assert backend().aes_ctr_stream(key, counter).update(ciphertext) == plaintext
+
+
+def test_a_ctr_stream_keeps_its_position_between_calls() -> None:
+    key = bytes.fromhex("2b7e151628aed2a6abf7158809cf4f3c")
+    counter = bytes.fromhex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
+    ciphertext = bytes.fromhex("874d6191b620e3261bef6864990db6ce9806f66b7970fdff8617187bb9fffdff")
+    whole = backend().aes_ctr_stream(key, counter).update(ciphertext)
+
+    stream = backend().aes_ctr_stream(key, counter)
+    in_pieces = b"".join(stream.update(ciphertext[start : start + 7]) for start in range(0, 32, 7))
+
+    assert in_pieces == whole
+
+
+def test_a_ctr_stream_satisfies_the_block_stream_protocol() -> None:
+    assert isinstance(backend().aes_ctr_stream(KEY, bytes(16)), BlockStream)
+
+
+def test_ctr_rejects_a_key_of_the_wrong_length() -> None:
+    with pytest.raises(ProviderCryptoError, match="AES key must be 16 bytes"):
+        backend().aes_ctr_stream(bytes(8), bytes(16))
+
+
+def test_ctr_rejects_a_counter_block_of_the_wrong_length() -> None:
+    with pytest.raises(ProviderCryptoError, match="counter block must be 16 bytes"):
+        backend().aes_ctr_stream(KEY, bytes(8))

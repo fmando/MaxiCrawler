@@ -1,6 +1,12 @@
-"""The Mega provider: metadata inspection for public Mega shares."""
+"""The Mega provider: metadata inspection and transfers for public shares."""
 
-from maxicrawler.providers.mega.api import MEGA_API_URL, MegaApiClient, MegaApiError
+from maxicrawler.providers.mega.api import (
+    MEGA_API_URL,
+    MegaApiClient,
+    MegaApiError,
+    transfer_url,
+)
+from maxicrawler.providers.mega.download import counter_block, decrypt_content
 from maxicrawler.providers.mega.provider import (
     DEFAULT_MAX_ENTRIES,
     MEGA_PROVIDER_NAME,
@@ -17,5 +23,8 @@ __all__ = [
     "MegaApiClient",
     "MegaApiError",
     "MegaProvider",
+    "counter_block",
+    "decrypt_content",
     "share_url",
+    "transfer_url",
 ]

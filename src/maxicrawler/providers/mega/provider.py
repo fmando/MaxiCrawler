@@ -2,19 +2,25 @@
 
 The plugin in :mod:`maxicrawler.plugins.mega` decides whether a URL is a Mega
 share; this provider decides what can be done with the share behind it. It
-reuses the plugin's parser so the URL grammar has a single home, and it never
-downloads: everything below is answered by at most one request that moves no
-file content.
+reuses the plugin's parser so the URL grammar has a single home.
+
+Inspection and transfer are kept strictly apart, because they cost different
+things. An inspection asks Mega to describe a resource and deliberately leaves
+the download flag unset, so no transfer URL is allocated and no quota is
+consumed. Only :meth:`MegaProvider.download` sets it, and only when content is
+actually about to be fetched.
 """
 
 from collections import defaultdict, deque
 from collections.abc import Mapping, Sequence
+from contextlib import closing
 from typing import Any
 from urllib.parse import urlsplit
 
 from maxicrawler import __version__
 from maxicrawler.domain import (
     Availability,
+    ContentDescriptor,
     LinkAttribute,
     ProviderCapability,
     ProviderInfo,
@@ -32,10 +38,12 @@ from maxicrawler.providers.errors import (
     ProviderCryptoError,
     ProviderDependencyError,
     ProviderRateLimitError,
+    ProviderTransportError,
     UnsupportedResourceError,
 )
-from maxicrawler.providers.mega.api import MegaApiClient, MegaApiError
+from maxicrawler.providers.mega.api import MegaApiClient, MegaApiError, transfer_url
 from maxicrawler.providers.mega.crypto import (
+    MegaFileKey,
     attribute_name,
     decode_base64,
     decrypt_attributes,
@@ -45,6 +53,7 @@ from maxicrawler.providers.mega.crypto import (
     unpack_file_key,
     unpack_folder_key,
 )
+from maxicrawler.providers.mega.download import decrypt_content
 from maxicrawler.providers.mega.mapping import (
     NODE_ROOT,
     availability_for,
@@ -52,6 +61,8 @@ from maxicrawler.providers.mega.mapping import (
     node_size,
     node_timestamp,
 )
+from maxicrawler.providers.protocol import DownloadSink
+from maxicrawler.providers.transport import DEFAULT_CHUNK_SIZE, StreamTransport
 from maxicrawler.utils.urls import strip_fragment
 
 MEGA_PROVIDER_NAME = "mega"
@@ -67,7 +78,7 @@ _KINDS = {MegaLinkKind.FILE: ResourceKind.FILE, MegaLinkKind.FOLDER: ResourceKin
 
 
 class MegaProvider:
-    """Reads what a Mega share contains without downloading any of it.
+    """Reads and transfers Mega file and folder shares.
 
     A file share is described by one ``g`` request that omits the download
     flag, so Mega reports size and encrypted attributes without allocating a
@@ -75,8 +86,19 @@ class MegaProvider:
     whole node tree; sizes, timestamps, and structure arrive in plaintext, and
     only names need the key from the link.
 
+    A transfer is the same ``g`` request with the download flag set, followed
+    by a stream of AES-128-CTR ciphertext that is decrypted chunk by chunk on
+    the way to the sink. Nothing is buffered: a fifty-gigabyte share costs the
+    same memory as a fifty-kilobyte one.
+
+    Transferring is optional. Without a stream transport, or without the AES
+    backend, the provider simply does not advertise
+    :attr:`~maxicrawler.domain.providers.ProviderCapability.DOWNLOAD` —
+    inspection keeps working unchanged.
+
     The key never leaves this process. It is used by
-    :mod:`maxicrawler.providers.mega.crypto` and is never part of a request,
+    :mod:`maxicrawler.providers.mega.crypto` and
+    :mod:`maxicrawler.providers.mega.download`, and is never part of a request,
     which is exactly the property a Mega share link is built on.
     """
 
@@ -85,23 +107,33 @@ class MegaProvider:
         api: MegaApiClient,
         *,
         cipher: CipherBackend | None = None,
+        stream: StreamTransport | None = None,
         max_entries: int = DEFAULT_MAX_ENTRIES,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
         priority: int = MEGA_PROVIDER_PRIORITY,
     ) -> None:
         if max_entries < 1:
             msg = "max_entries must be at least 1"
             raise ValueError(msg)
+        if chunk_size < 1:
+            msg = "chunk_size must be at least 1"
+            raise ValueError(msg)
         self._api = api
         self._cipher = cipher
+        self._stream = stream
         self._max_entries = max_entries
+        self._chunk_size = chunk_size
+        capabilities = {ProviderCapability.INSPECT, ProviderCapability.LIST}
+        if stream is not None and cipher is not None:
+            capabilities.add(ProviderCapability.DOWNLOAD)
         self._metadata = ProviderInfo(
             name=MEGA_PROVIDER_NAME,
             version=__version__,
             module=__name__,
-            description="Reads metadata from Mega file and folder shares.",
+            description="Reads and transfers Mega file and folder shares.",
             display_name="Mega",
             priority=priority,
-            capabilities=frozenset({ProviderCapability.INSPECT, ProviderCapability.LIST}),
+            capabilities=frozenset(capabilities),
         )
 
     @property
@@ -156,6 +188,74 @@ class MegaProvider:
             return ResourceInspection(ref=ref, availability=availability_for(error.code))
         except ProviderRateLimitError:
             return ResourceInspection(ref=ref, availability=Availability.RATE_LIMITED)
+
+    def download(self, ref: ResourceRef, sink: DownloadSink) -> ContentDescriptor:
+        """Stream the content of *ref* into *sink*, decrypting it on the way.
+
+        A Mega share is end-to-end encrypted, so a link published without its
+        key describes a resource that can be listed but not read. That is
+        reported as an unsupported reference rather than attempted, because no
+        amount of transferring would produce usable bytes.
+        """
+        if ref.provider != MEGA_PROVIDER_NAME:
+            msg = f"reference belongs to another provider: {ref.provider}"
+            raise UnsupportedResourceError(msg)
+        if ref.kind is ResourceKind.FOLDER:
+            msg = f"a Mega folder is not a transfer; download its entries: {ref.url}"
+            raise UnsupportedResourceError(msg)
+        secret = ref.secret
+        if secret is None:
+            msg = f"the link carries no decryption key, so its content stays sealed: {ref.url}"
+            raise UnsupportedResourceError(msg)
+        stream = self._require_stream()
+        cipher = self._require_cipher()
+        key = self._content_key(ref, secret, cipher)
+        answer = self._transfer_answer(ref)
+        descriptor = ContentDescriptor(
+            name=self._decrypt_name(answer.get("at"), key.aes_key, cipher),
+            size=node_size(answer.get("s")),
+        )
+        sink.begin(descriptor)
+        with closing(stream.stream(transfer_url(answer), chunk_size=self._chunk_size)) as chunks:
+            for block in decrypt_content(cipher, key, chunks):
+                sink.write(block)
+        return descriptor
+
+    def _transfer_answer(self, ref: ResourceRef) -> Mapping[str, Any]:
+        """Ask Mega to allocate a transfer for *ref*.
+
+        This is the request that costs quota, so it is made last: a reference
+        whose key cannot be resolved never reaches it.
+        """
+        if ref.parent_id is None:
+            return self._api.file_transfer(ref.resource_id)
+        return self._api.node_transfer(ref.resource_id, folder=ref.parent_id)
+
+    def _content_key(
+        self, ref: ResourceRef, secret: ResourceSecret, cipher: CipherBackend
+    ) -> MegaFileKey:
+        """Return the key that decrypts the content of *ref*.
+
+        For a file link the credential *is* the file key. For an entry inside a
+        shared folder it is the share key, and the per-node key it opens is
+        published only in the folder listing — which is why a contained
+        download costs one request more than a plain one.
+        """
+        if ref.parent_id is None:
+            return unpack_file_key(decode_base64(secret.reveal()))
+        share_key = unpack_folder_key(decode_base64(secret.reveal()))
+        node = _find_node(self._api.folder_nodes(ref.parent_id), ref.resource_id)
+        if node is None:
+            msg = f"the shared folder no longer lists this entry: {ref.resource_id}"
+            raise UnsupportedResourceError(msg)
+        encoded = node.get("k")
+        ciphertext = (
+            select_key_ciphertext(encoded, ref.parent_id) if isinstance(encoded, str) else None
+        )
+        if ciphertext is None:
+            msg = "the shared folder publishes no usable key for this entry"
+            raise ProviderCryptoError(msg)
+        return unpack_file_key(decrypt_node_key(cipher, share_key, ciphertext))
 
     def _inspect(self, ref: ResourceRef) -> ResourceInspection:
         """Route *ref* to the request that can describe it."""
@@ -252,9 +352,25 @@ class MegaProvider:
         cipher = self._require_cipher()
         try:
             key = unpack_file_key(decode_base64(secret.reveal())).aes_key
-            return attribute_name(decrypt_attributes(cipher, key, payload)), True
         except ProviderCryptoError:
             return None, False
+        name = self._decrypt_name(payload, key, cipher)
+        return name, name is not None
+
+    @staticmethod
+    def _decrypt_name(payload: object, key: bytes, cipher: CipherBackend) -> str | None:
+        """Return the name in an attribute block, or ``None`` if it stays hidden.
+
+        A resource whose name cannot be read is still perfectly downloadable —
+        the library falls back to a generic file name — so an undecryptable
+        attribute block is an absent name rather than a failure.
+        """
+        if not isinstance(payload, str):
+            return None
+        try:
+            return attribute_name(decrypt_attributes(cipher, key, payload))
+        except ProviderCryptoError:
+            return None
 
     def _name_reader(self, secret: ResourceSecret | None, share: str) -> "_NameReader":
         """Return the reader that decrypts names inside the share *share*."""
@@ -277,6 +393,18 @@ class MegaProvider:
             msg = f"reading Mega names requires the cryptography package; {INSTALL_HINT}"
             raise ProviderDependencyError(msg)
         return self._cipher
+
+    def _require_stream(self) -> StreamTransport:
+        """Return the transfer transport, or explain that there is none.
+
+        Reaching this without one means the provider was composed for
+        inspection only, which its metadata already said by omitting
+        :attr:`~maxicrawler.domain.providers.ProviderCapability.DOWNLOAD`.
+        """
+        if self._stream is None:
+            msg = "this Mega provider was built without a transfer transport"
+            raise ProviderTransportError(msg)
+        return self._stream
 
 
 class _NameReader:

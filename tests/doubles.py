@@ -2,6 +2,7 @@
 
 from maxicrawler.domain import (
     Availability,
+    ContentDescriptor,
     PluginCapability,
     PluginInfo,
     ProviderCapability,
@@ -16,6 +17,7 @@ from maxicrawler.domain import (
     UrlRecord,
 )
 from maxicrawler.providers.errors import UnsupportedResourceError
+from maxicrawler.providers.protocol import DownloadSink
 
 
 class StubPlugin:
@@ -81,6 +83,10 @@ class StubProvider:
         kind: ResourceKind = ResourceKind.FILE,
         inspection: ResourceInspection | None = None,
         capabilities: frozenset[ProviderCapability] = frozenset({ProviderCapability.INSPECT}),
+        payload: bytes = b"stub payload",
+        content_name: str | None = "stub.bin",
+        chunk_size: int = 4,
+        failure: Exception | None = None,
     ) -> None:
         self._metadata = ProviderInfo(
             name=name,
@@ -94,7 +100,12 @@ class StubProvider:
         self._url_prefix = url_prefix
         self._kind = kind
         self._inspection = inspection
+        self._payload = payload
+        self._content_name = content_name
+        self._chunk_size = max(chunk_size, 1)
+        self._failure = failure
         self.inspected: list[ResourceRef] = []
+        self.downloaded: list[ResourceRef] = []
 
     @property
     def metadata(self) -> ProviderInfo:
@@ -128,11 +139,40 @@ class StubProvider:
             metadata=ResourceMetadata(kind=self._kind, name="stub.bin", size=1024),
         )
 
+    def download(self, ref: ResourceRef, sink: DownloadSink) -> ContentDescriptor:
+        self.downloaded.append(ref)
+        if self._failure is not None:
+            raise self._failure
+        descriptor = ContentDescriptor(name=self._content_name, size=len(self._payload))
+        sink.begin(descriptor)
+        for start in range(0, len(self._payload), self._chunk_size):
+            sink.write(self._payload[start : start + self._chunk_size])
+        return descriptor
+
 
 class NotAProvider:
     """Object that deliberately fails the :class:`ResourceProvider` contract."""
 
     name = "broken"
+
+
+class RecordingSink:
+    """A :class:`DownloadSink` that keeps everything a provider wrote."""
+
+    def __init__(self) -> None:
+        self.descriptor: ContentDescriptor | None = None
+        self.chunks: list[bytes] = []
+
+    def begin(self, content: ContentDescriptor) -> None:
+        self.descriptor = content
+
+    def write(self, chunk: bytes) -> None:
+        self.chunks.append(chunk)
+
+    @property
+    def payload(self) -> bytes:
+        """Return everything that was written, in order."""
+        return b"".join(self.chunks)
 
 
 def make_record(url: str) -> UrlRecord:
