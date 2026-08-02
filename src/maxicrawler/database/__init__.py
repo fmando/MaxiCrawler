@@ -1,5 +1,5 @@
-"""Persistence abstractions."""
+"""Persistence adapters."""
 
-from maxicrawler.database.base import CrawlStore
+from maxicrawler.database.sqlite import SQLiteDatabase
 
-__all__ = ["CrawlStore"]
+__all__ = ["SQLiteDatabase"]

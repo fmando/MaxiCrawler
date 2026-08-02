@@ -1,5 +1,1 @@
-"""Transport and download abstractions."""
-
-from maxicrawler.downloader.base import Downloader
-
-__all__ = ["Downloader"]
+"""Reserved for future transport and downloading support."""

@@ -15,6 +15,13 @@ plugins extend crawler/extractors/downloader
 api and gui adapt the core for users
 ```
 
+## Current implementation boundary
+
+The first implementation sprint provides configuration, logging, generic
+SQLite metadata storage, plugin discovery, and a CLI. The `crawler`,
+`downloader`, and `extractors` packages are explicit placeholders; no network
+or crawling behavior is implemented yet.
+
 ## Design rules
 
 1. Keep public interfaces typed and small.
