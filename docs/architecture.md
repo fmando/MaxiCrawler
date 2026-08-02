@@ -22,6 +22,11 @@ SQLite metadata storage, plugin discovery, and a CLI. The `crawler`,
 `downloader`, and `extractors` packages are explicit placeholders; no network
 or crawling behavior is implemented yet.
 
+Sprint 2 introduces a pure domain layer and synchronous events. The discovery
+pipeline is an in-memory application service: it accepts caller-provided URL
+strings, normalizes and deduplicates them, then emits events. It does not fetch
+URLs or schedule any I/O.
+
 ## Design rules
 
 1. Keep public interfaces typed and small.
