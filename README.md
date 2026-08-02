@@ -6,6 +6,10 @@ and delivery interfaces separate so each concern can evolve independently.
 
 > Version: **0.1.0** — the project is in its initial, pre-alpha phase.
 
+MaxiCrawler is a link discovery and management platform, not merely a
+downloader. [VISION.md](VISION.md) states the mission, the core principles, and
+what the project deliberately will not do.
+
 ## Features
 
 - Clear package boundaries for crawling, extraction, downloads, databases, plugins, GUI, and API layers.
@@ -158,8 +162,17 @@ registry.register(ExampleHostPlugin())
 Plugins depend on the domain and the standard library only. Network access,
 persistence, and file-system I/O stay in the infrastructure layer.
 
-See [docs/architecture.md](docs/architecture.md) for design rules and
-[docs/development.md](docs/development.md) for the contributor workflow.
+## Documentation
+
+| Document | Purpose |
+| --- | --- |
+| [VISION.md](VISION.md) | Mission, core principles, and explicit non-goals. |
+| [ROADMAP.md](ROADMAP.md) | Milestones from 0.1 to the stable release. |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Layer boundaries and quality rules. |
+| [DECISIONS.md](DECISIONS.md) | Architecture decision records. |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Workflow and coding guidelines. |
+| [docs/architecture.md](docs/architecture.md) | Design rules and the plugin architecture in detail. |
+| [docs/development.md](docs/development.md) | Contributor setup and quality gates. |
 
 ## Development
 

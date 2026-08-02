@@ -1,5 +1,9 @@
 # Architecture
 
+This document explains *how* the layers are built. [VISION.md](../VISION.md)
+explains *why*: the "Clean Architecture", "Plugin First", and "Testability"
+principles below are the direct implementation of its core principles.
+
 MaxiCrawler follows a layered, modular design. Core packages must not depend on
 optional delivery layers (`api` and `gui`). The crawler orchestrates work; it
 does not embed parsing or storage details.
