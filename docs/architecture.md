@@ -16,8 +16,9 @@ config, utils
 downloader → crawler → extractors → documents
                     ↘ plugins (protocol, registry, resolver)
                     ↘ repository port ← database implements it structurally
+providers → plugins (pure URL parsing only); never the reverse
 plugins depend on the domain only; concrete plugins extend the protocol
-cli composes crawler, documents, extractors, plugins and database
+cli composes crawler, documents, extractors, plugins, providers and database
 api and gui adapt the core for users
 ```
 
@@ -57,6 +58,10 @@ the project performs; there is still no network access.
 Sprint 5 adds the first provider plugin, described under
 [Provider plugins](#provider-plugins). It classifies URLs from their string
 form; no request is made to the provider.
+
+Sprint 6 adds the provider layer, described under
+[The provider layer](#the-provider-layer). This is the first sprint that
+performs network access — from one command only, and never to download.
 
 ## Plugin architecture
 
@@ -217,6 +222,137 @@ The cost is accepted deliberately: `…/a#intro` and `…/a` now count as two UR
 Plugins parse `UrlRecord.raw_url` rather than `normalized_url`, so a key
 survives even if normalization rules change again.
 
+## The provider layer
+
+Sprint 6 adds MaxiCrawler's second extension layer. The two layers answer
+different questions and are therefore separate:
+
+| Layer | Package | Question | I/O |
+| --- | --- | --- | --- |
+| Plugin | `maxicrawler.plugins` | *"Can I classify this URL?"* | none |
+| Provider | `maxicrawler.providers` | *"What can I do with this resource?"* | network allowed |
+
+`UrlClassification` is the seam between them. A plugin decides from the URL
+string alone and therefore runs on every URL discovery finds; a provider may
+contact the host and is invoked only by a command that says so. Folding both
+into one protocol would have made classification able to block on the network,
+which the offline discovery workflow depends on not doing.
+
+### Layers
+
+| Element | Module | Layer |
+| --- | --- | --- |
+| `ResourceRef`, `ResourceSecret`, `ResourceMetadata`, `ResourceEntry`, `ResourceInspection`, `Availability`, `ResourceKind`, `ProviderInfo`, `ProviderCapability` | `maxicrawler.domain.providers` | Domain |
+| `ResourceProvider` | `maxicrawler.providers.protocol` | Domain-facing contract |
+| `ProviderRegistry` | `maxicrawler.providers.registry` | Application |
+| `HttpTransport`, `UrllibTransport` | `maxicrawler.providers.transport` | Infrastructure |
+| `CipherBackend`, `CryptographyCipherBackend` | `maxicrawler.providers.crypto` | Infrastructure |
+| `RetryPolicy`, `Retrier` | `maxicrawler.providers.retry` | Application policy |
+| `MegaProvider` | `maxicrawler.providers.mega` | Built-in provider |
+| `create_default_provider_registry` | `maxicrawler.providers.defaults` | Composition |
+
+The domain vocabulary carries no provider knowledge: a Mega share, a
+Pixeldrain file, and a GoFile folder are all described with the same value
+objects.
+
+### The provider contract
+
+```python
+class ResourceProvider(Protocol):
+    @property
+    def metadata(self) -> ProviderInfo: ...
+    def supports(self, classification: UrlClassification) -> bool: ...
+    def reference(self, classification: UrlClassification) -> ResourceRef: ...
+    def inspect(self, ref: ResourceRef) -> ResourceInspection: ...
+```
+
+The contract splits into a pure half and an I/O half on purpose. `supports`
+and `reference` are side-effect free, so references can be built, stored, and
+compared offline — which is exactly what `info --offline` does. `inspect` is
+the single place a request happens, which keeps the network on one testable
+seam and gives downloading a natural home later.
+
+### Errors versus availability
+
+A resource that was deleted, revoked, or blocked is a valid *answer*, so it is
+reported through `Availability`. Exceptions are reserved for failures on our
+side:
+
+| Situation | Reported as |
+| --- | --- |
+| Deleted, revoked, blocked, over quota, rate limited | `Availability` value |
+| Connection refused, timeout, HTTP error | `ProviderTransportError` |
+| Response we cannot parse | `ProviderProtocolError` |
+| Optional dependency missing | `ProviderDependencyError` |
+| Malformed key or undecryptable payload | `ProviderCryptoError` |
+
+`Availability.is_determined` separates "the link is dead" from "we could not
+find out", which the CLI turns into exit codes `2` and `3`.
+
+### Secret confinement
+
+A share link can carry a decryption key in its URL fragment, which no HTTP
+client transmits. MaxiCrawler preserves that property inside the process:
+
+1. `ResourceSecret` exposes its value only through `reveal()`, is immutable,
+   and redacts `repr()` and `str()`.
+2. `ResourceRef.url` is the share URL with the fragment already removed. For a
+   legacy Mega link, whose entire identity lives in the fragment, the canonical
+   modern form is rebuilt instead of stripped.
+3. `providers.mega.api` owns the wire and never imports `ResourceSecret`;
+   `providers.mega.crypto` owns decryption and never imports a transport.
+4. The provider is the only module that calls `reveal()`.
+
+Point 4 is asserted, not assumed: `tests/test_mega_secret_confinement.py`
+scans every outgoing request, rendering, and log record for eight-character
+runs of the key, and reads the syntax tree of every source module to confirm
+the allowlist. Widening that allowlist requires editing the test on purpose.
+
+### The Mega provider
+
+```text
+providers/mega/
+    api.py       MegaApiClient — the /cs wire protocol, and nothing else
+    crypto.py    key unpacking and attribute decryption, entirely local
+    mapping.py   Mega node types and status codes → domain models
+    provider.py  MegaProvider — orchestration of the three above
+```
+
+Mega publishes no specification for this endpoint; the request shapes follow
+its own open-source clients. Confining that knowledge to `api.py` means a
+change on Mega's side has one place to be fixed, and a response that no longer
+fits raises `ProviderProtocolError` rather than being guessed at.
+
+Two requests exist, and neither transfers content:
+
+| Link | Request | Answer |
+| --- | --- | --- |
+| File share | `{"a":"g","p":<handle>}` | size and encrypted attributes |
+| Folder share | `{"a":"f","c":1,"r":1}` with `?n=<handle>` | the whole node tree |
+
+The `g` download flag is deliberately unset, so no transfer URL is allocated
+and no quota is consumed. Sizes, timestamps, and structure arrive unencrypted;
+only names need the key, so a share published without one is still fully
+enumerable.
+
+A file inside a shared folder is described from the folder listing rather than
+by asking about it directly, because its per-node key is published only there.
+
+### Why the parser is reused, not duplicated
+
+`providers.mega` imports `parse_mega_url` from `plugins.mega`. The URL grammar
+of a host is one piece of knowledge and belongs in one place; duplicating it
+would let the two layers disagree about what a link is. The dependency runs
+providers → plugins and never the reverse, so no cycle is possible.
+
+### Adding a provider
+
+Nothing in the protocol, the registry, or the CLI is Mega-specific. A provider
+for Pixeldrain, GoFile, or MediaFire implements the same four members, leaves
+`ResourceRef.secret` as `None` because those hosts do not encrypt names, and
+never touches the cipher backend. Registering it in
+`create_default_provider_registry` is the only wiring required.
+
 ## Design rules
 
 1. Keep public interfaces typed and small.
@@ -234,3 +370,12 @@ survives even if normalization rules change again.
    understand so the generic fallback keeps working.
 10. Keep provider vocabulary inside the provider package; the domain carries
     it only as untyped attributes.
+11. Classification never performs I/O; only a provider may reach a host, and
+    only through `HttpTransport`.
+12. Report what a resource *is* as a value and what *we* failed at as an
+    exception.
+13. A credential from a URL is wrapped in a `ResourceSecret` and unwrapped in
+    exactly one module. Anything that echoes a URL echoes it without its
+    fragment.
+14. Providers may depend on plugins for pure URL parsing; plugins never depend
+    on providers.
