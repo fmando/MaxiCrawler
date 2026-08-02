@@ -1,6 +1,11 @@
 """Immutable core domain models for MaxiCrawler."""
 
 from maxicrawler.domain.discovery import DiscoveryResult
+from maxicrawler.domain.downloads import (
+    Checksum,
+    ContentDescriptor,
+    DownloadStatus,
+)
 from maxicrawler.domain.models import (
     DownloadTask,
     ScanSession,
@@ -29,7 +34,10 @@ from maxicrawler.domain.providers import (
 
 __all__ = [
     "Availability",
+    "Checksum",
+    "ContentDescriptor",
     "DiscoveryResult",
+    "DownloadStatus",
     "DownloadTask",
     "LinkAttribute",
     "PluginCapability",

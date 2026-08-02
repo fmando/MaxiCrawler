@@ -140,6 +140,26 @@ def make_record(url: str) -> UrlRecord:
     return UrlRecord(raw_url=url, normalized_url=url)
 
 
+def make_ref(
+    resource_id: str = "AaBbCcDd",
+    *,
+    provider: str = "mega",
+    kind: ResourceKind = ResourceKind.FILE,
+    parent_id: str | None = None,
+    secret: str | None = None,
+    url: str | None = None,
+) -> ResourceRef:
+    """Return a :class:`ResourceRef` without running a provider."""
+    return ResourceRef(
+        provider=provider,
+        resource_id=resource_id,
+        kind=kind,
+        url=url if url is not None else f"https://mega.nz/file/{resource_id}",
+        secret=None if secret is None else ResourceSecret(secret),
+        parent_id=parent_id,
+    )
+
+
 def make_classification(
     url: str,
     *,
