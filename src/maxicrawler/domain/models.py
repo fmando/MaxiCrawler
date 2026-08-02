@@ -33,12 +33,17 @@ class ScanSession:
 class Statistics:
     """Immutable counters collected during a discovery session."""
 
+    documents_processed: int = 0
     discovered_urls: int = 0
     duplicate_urls: int = 0
     unresolved_urls: int = 0
     queued_downloads: int = 0
     completed_downloads: int = 0
     failed_downloads: int = 0
+
+    def with_document(self) -> "Statistics":
+        """Return counters updated for one processed source document."""
+        return replace(self, documents_processed=self.documents_processed + 1)
 
     def with_discovery(self, *, duplicate: bool, resolved: bool = True) -> "Statistics":
         """Return counters updated for a processed URL candidate.
