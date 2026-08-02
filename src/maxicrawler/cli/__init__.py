@@ -8,6 +8,13 @@ from uuid import uuid4
 import typer
 
 from maxicrawler import __version__
+from maxicrawler.cli.downloads import (
+    exit_code_for as download_exit_code_for,
+)
+from maxicrawler.cli.downloads import (
+    render_plan,
+    render_report,
+)
 from maxicrawler.cli.inspection import (
     EXIT_UNDETERMINED,
     exit_code_for,
@@ -31,12 +38,21 @@ from maxicrawler.domain import (
     UrlClassification,
     UrlRecord,
 )
+from maxicrawler.downloader import (
+    DownloadManager,
+    NullProgressReporter,
+    ProgressReporter,
+    RichProgressReporter,
+    SourceError,
+)
 from maxicrawler.events import EventBus
+from maxicrawler.library import Library
 from maxicrawler.plugins import PluginResolver, create_default_registry
 from maxicrawler.providers import (
     ProviderError,
     ProviderRegistry,
     RetryPolicy,
+    UrllibStreamTransport,
     UrllibTransport,
     create_default_provider_registry,
 )
@@ -138,6 +154,68 @@ def info(
 
 
 @app.command()
+def download(
+    source: Annotated[
+        str,
+        typer.Argument(
+            help="A share link, a document holding links, or a directory of documents.",
+            show_default=False,
+        ),
+    ],
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Library directory to store into."),
+    ] = None,
+    config_path: Annotated[
+        Path, typer.Option("--config", help="TOML configuration file to use.")
+    ] = DEFAULT_CONFIG_PATH,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Report what would be downloaded; transfer nothing.")
+    ] = False,
+    progress: Annotated[
+        bool, typer.Option("--progress/--no-progress", help="Draw progress bars on stderr.")
+    ] = True,
+    max_entries: Annotated[
+        int | None, typer.Option("--max-entries", help="How many folder entries to consider.")
+    ] = None,
+) -> None:
+    """Download what a source points at into the library.
+
+    The source may be a share link, a text, Markdown, or HTML document holding
+    links, or a directory of such documents; there is one command because from
+    the outside they all answer the same question. Documents are read with the
+    same rules as discover, so whatever discover finds is what download fetches.
+
+    Downloads land in the configured library, one directory per resource, each
+    with a metadata.json describing where it came from. A resource the library
+    already holds is skipped without contacting the provider, and nothing is
+    ever overwritten automatically.
+
+    The exit code is 0 when everything the source asked for is in the library,
+    and 4 when something was not: a failed transfer, a revoked share, or a link
+    no provider handles. The report says which.
+    """
+    settings = Settings.from_toml(config_path)
+    root = output if output is not None else settings.library_path
+    registry = _build_provider_registry(settings, max_entries=max_entries, transfers=True)
+    manager = DownloadManager(
+        registry,
+        Library(root),
+        reporter=_build_reporter(progress=progress and not dry_run),
+    )
+    try:
+        plan = manager.plan(source)
+    except SourceError as error:
+        raise typer.BadParameter(str(error)) from error
+    if dry_run:
+        typer.echo(render_plan(plan, root))
+        raise typer.Exit(0 if not plan.unresolved else 4)
+    report = manager.run(plan)
+    typer.echo(render_report(report))
+    raise typer.Exit(download_exit_code_for(report))
+
+
+@app.command()
 def version() -> None:
     """Print the installed MaxiCrawler version."""
     typer.echo(__version__)
@@ -165,14 +243,32 @@ def _classify(url: str) -> UrlClassification:
     return resolution.classification
 
 
-def _build_provider_registry(settings: Settings, *, max_entries: int | None) -> ProviderRegistry:
-    """Return the providers, wired to the configured network behaviour."""
+def _build_provider_registry(
+    settings: Settings, *, max_entries: int | None, transfers: bool = False
+) -> ProviderRegistry:
+    """Return the providers, wired to the configured network behaviour.
+
+    A registry built without *transfers* has no way to move content at all,
+    which is what keeps ``info`` unable to download by construction rather
+    than by convention.
+    """
     transport = UrllibTransport(user_agent=settings.user_agent, timeout=settings.network_timeout)
+    stream = (
+        UrllibStreamTransport(user_agent=settings.user_agent, timeout=settings.network_timeout)
+        if transfers
+        else None
+    )
     return create_default_provider_registry(
         transport=transport,
+        stream=stream,
         retry=RetryPolicy(max_attempts=settings.network_retries),
         max_entries=max_entries if max_entries is not None else settings.max_entries,
     )
+
+
+def _build_reporter(*, progress: bool) -> ProgressReporter:
+    """Return the progress reporter a run should use."""
+    return RichProgressReporter() if progress else NullProgressReporter()
 
 
 def _offline_inspection(ref: ResourceRef) -> ResourceInspection:

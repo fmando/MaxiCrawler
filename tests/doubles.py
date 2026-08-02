@@ -2,6 +2,7 @@
 
 from maxicrawler.domain import (
     Availability,
+    ContentDescriptor,
     PluginCapability,
     PluginInfo,
     ProviderCapability,
@@ -15,7 +16,10 @@ from maxicrawler.domain import (
     UrlClassification,
     UrlRecord,
 )
+from maxicrawler.downloader.models import DownloadJob, DownloadOutcome
 from maxicrawler.providers.errors import UnsupportedResourceError
+from maxicrawler.providers.protocol import DownloadSink
+from maxicrawler.utils import strip_fragment
 
 
 class StubPlugin:
@@ -81,6 +85,10 @@ class StubProvider:
         kind: ResourceKind = ResourceKind.FILE,
         inspection: ResourceInspection | None = None,
         capabilities: frozenset[ProviderCapability] = frozenset({ProviderCapability.INSPECT}),
+        payload: bytes = b"stub payload",
+        content_name: str | None = "stub.bin",
+        chunk_size: int = 4,
+        failure: Exception | None = None,
     ) -> None:
         self._metadata = ProviderInfo(
             name=name,
@@ -94,7 +102,12 @@ class StubProvider:
         self._url_prefix = url_prefix
         self._kind = kind
         self._inspection = inspection
+        self._payload = payload
+        self._content_name = content_name
+        self._chunk_size = max(chunk_size, 1)
+        self._failure = failure
         self.inspected: list[ResourceRef] = []
+        self.downloaded: list[ResourceRef] = []
 
     @property
     def metadata(self) -> ProviderInfo:
@@ -114,7 +127,7 @@ class StubProvider:
             provider=self._metadata.name,
             resource_id=classification.attribute("handle") or "stub-handle",
             kind=self._kind,
-            url=classification.record.normalized_url,
+            url=strip_fragment(classification.record.normalized_url),
             secret=None if key is None else ResourceSecret(key),
         )
 
@@ -128,6 +141,16 @@ class StubProvider:
             metadata=ResourceMetadata(kind=self._kind, name="stub.bin", size=1024),
         )
 
+    def download(self, ref: ResourceRef, sink: DownloadSink) -> ContentDescriptor:
+        self.downloaded.append(ref)
+        if self._failure is not None:
+            raise self._failure
+        descriptor = ContentDescriptor(name=self._content_name, size=len(self._payload))
+        sink.begin(descriptor)
+        for start in range(0, len(self._payload), self._chunk_size):
+            sink.write(self._payload[start : start + self._chunk_size])
+        return descriptor
+
 
 class NotAProvider:
     """Object that deliberately fails the :class:`ResourceProvider` contract."""
@@ -135,9 +158,75 @@ class NotAProvider:
     name = "broken"
 
 
+class RecordingSink:
+    """A :class:`DownloadSink` that keeps everything a provider wrote."""
+
+    def __init__(self) -> None:
+        self.descriptor: ContentDescriptor | None = None
+        self.chunks: list[bytes] = []
+
+    def begin(self, content: ContentDescriptor) -> None:
+        self.descriptor = content
+
+    def write(self, chunk: bytes) -> None:
+        self.chunks.append(chunk)
+
+    @property
+    def payload(self) -> bytes:
+        """Return everything that was written, in order."""
+        return b"".join(self.chunks)
+
+
+class RecordingProgressReporter:
+    """A :class:`ProgressReporter` that keeps every call it received."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self.started_jobs: list[tuple[str, int | None]] = []
+        self.advanced_totals: list[int] = []
+        self.finished_jobs: list[DownloadOutcome] = []
+
+    def begin(self) -> None:
+        self.events.append("begin")
+
+    def end(self) -> None:
+        self.events.append("end")
+
+    def started(self, job: DownloadJob, size: int | None) -> None:
+        self.events.append("started")
+        self.started_jobs.append((job.label, size))
+
+    def advanced(self, job: DownloadJob, written: int) -> None:
+        self.advanced_totals.append(written)
+
+    def finished(self, job: DownloadJob, outcome: DownloadOutcome) -> None:
+        self.events.append("finished")
+        self.finished_jobs.append(outcome)
+
+
 def make_record(url: str) -> UrlRecord:
     """Return a :class:`UrlRecord` whose raw and normalized URL are *url*."""
     return UrlRecord(raw_url=url, normalized_url=url)
+
+
+def make_ref(
+    resource_id: str = "AaBbCcDd",
+    *,
+    provider: str = "mega",
+    kind: ResourceKind = ResourceKind.FILE,
+    parent_id: str | None = None,
+    secret: str | None = None,
+    url: str | None = None,
+) -> ResourceRef:
+    """Return a :class:`ResourceRef` without running a provider."""
+    return ResourceRef(
+        provider=provider,
+        resource_id=resource_id,
+        kind=kind,
+        url=url if url is not None else f"https://mega.nz/file/{resource_id}",
+        secret=None if secret is None else ResourceSecret(secret),
+        parent_id=parent_id,
+    )
 
 
 def make_classification(

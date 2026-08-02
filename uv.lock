@@ -258,6 +258,7 @@ name = "maxicrawler"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "rich" },
     { name = "typer" },
 ]
 
@@ -276,6 +277,7 @@ requires-dist = [
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0" },
+    { name = "rich", specifier = ">=13.7" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "typer", specifier = ">=0.15" },
 ]

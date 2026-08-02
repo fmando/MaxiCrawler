@@ -66,6 +66,25 @@ class MegaApiClient:
         """
         return self._command({"a": "g", "p": handle})
 
+    def file_transfer(self, handle: str) -> Mapping[str, Any]:
+        """Return the transfer URL, size, and attributes of the file *handle*.
+
+        This is :meth:`file_metadata` with the ``g`` download flag set. Mega
+        then allocates a transfer URL, which is the point where a download
+        starts counting against the share's quota — so this is called only when
+        content is actually about to be fetched.
+        """
+        return self._command({"a": "g", "g": 1, "p": handle})
+
+    def node_transfer(self, handle: str, *, folder: str) -> Mapping[str, Any]:
+        """Return the transfer URL of the node *handle* inside *folder*.
+
+        A node inside a shared folder is addressed by ``n`` rather than ``p``,
+        with the share handle travelling as a query parameter, because it is
+        reachable only in the context of the share that publishes it.
+        """
+        return self._command({"a": "g", "g": 1, "n": handle}, folder=folder)
+
     def folder_nodes(self, folder_handle: str) -> tuple[Mapping[str, Any], ...]:
         """Return every node of the shared folder *folder_handle*.
 
@@ -102,6 +121,25 @@ class MegaApiClient:
         return _unwrap(answer)
 
 
+def transfer_url(answer: Mapping[str, Any]) -> str:
+    """Return the URL a transfer answer points content at.
+
+    Mega states it in ``g``, occasionally as a single-element array. Anything
+    else means the response no longer has the shape this client was written
+    against, which is a protocol error rather than a transport one.
+
+    Raises:
+        ProviderProtocolError: no usable transfer URL is present.
+    """
+    value = answer.get("g")
+    if isinstance(value, list) and value:
+        value = value[0]
+    if isinstance(value, str) and value.lower().startswith(("http://", "https://")):
+        return value
+    msg = "Mega transfer answer carries no usable download URL"
+    raise ProviderProtocolError(msg)
+
+
 def _unwrap(answer: object) -> Mapping[str, Any]:
     """Return the single result in *answer*.
 
@@ -115,9 +153,22 @@ def _unwrap(answer: object) -> Mapping[str, Any]:
         if isinstance(result, int) and not isinstance(result, bool):
             _fail(result)
         if isinstance(result, dict):
+            _reject_embedded_error(result)
             return result
     msg = "unexpected response shape from the Mega API"
     raise ProviderProtocolError(msg)
+
+
+def _reject_embedded_error(result: Mapping[str, Any]) -> None:
+    """Raise when a successful-looking result carries a status code instead.
+
+    A transfer request answers an exhausted quota with ``{"e": -17}`` rather
+    than with a bare number, so a caller that only checked the envelope would
+    read the refusal as an empty file.
+    """
+    code = result.get("e")
+    if isinstance(code, int) and not isinstance(code, bool) and code < 0:
+        _fail(code)
 
 
 def _fail(code: int) -> NoReturn:

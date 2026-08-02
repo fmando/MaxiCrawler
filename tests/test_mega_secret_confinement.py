@@ -165,7 +165,7 @@ def test_the_wire_layer_knows_nothing_about_secrets() -> None:
 
 
 def test_the_crypto_layer_knows_nothing_about_the_network() -> None:
-    for module in ("providers/crypto.py", "providers/mega/crypto.py"):
+    for module in ("providers/crypto.py", "providers/mega/crypto.py", "providers/mega/download.py"):
         imported = imported_names(SOURCE_ROOT / module)
         assert not {name for name in imported if name.startswith(("urllib", "http", "socket"))}
         assert "maxicrawler.providers.transport" not in imported

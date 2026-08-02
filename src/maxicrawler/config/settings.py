@@ -18,6 +18,9 @@ class Settings:
 
     user_agent: str = "MaxiCrawler/0.1.0"
     database_path: Path = Path("maxicrawler.db")
+    library_path: Path = Path("library")
+    """Where downloads are stored; ``--output`` overrides it for one run."""
+
     log_level: str = "INFO"
     network_timeout: float = 30.0
     network_retries: int = 3
@@ -26,6 +29,9 @@ class Settings:
     def __post_init__(self) -> None:
         if not self.user_agent.strip():
             msg = "user_agent must not be empty"
+            raise ValueError(msg)
+        if not str(self.library_path).strip():
+            msg = "library_path must not be empty"
             raise ValueError(msg)
         if not self.log_level.strip():
             msg = "log_level must not be empty"
@@ -57,6 +63,9 @@ class Settings:
             database_path=Path(
                 _string_value(app_config, "database_path", str(defaults.database_path))
             ),
+            library_path=Path(
+                _string_value(app_config, "library_path", str(defaults.library_path))
+            ),
             log_level=_string_value(app_config, "log_level", defaults.log_level).upper(),
             network_timeout=_float_value(app_config, "network_timeout", defaults.network_timeout),
             network_retries=_int_value(app_config, "network_retries", defaults.network_retries),
@@ -69,6 +78,7 @@ class Settings:
             "[maxicrawler]\n"
             f'user_agent = "{self.user_agent}"\n'
             f'database_path = "{self.database_path.as_posix()}"\n'
+            f'library_path = "{self.library_path.as_posix()}"\n'
             f'log_level = "{self.log_level}"\n'
             f"network_timeout = {self.network_timeout}\n"
             f"network_retries = {self.network_retries}\n"

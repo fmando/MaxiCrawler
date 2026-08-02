@@ -8,7 +8,7 @@ against the very functions under test.
 import base64
 import json
 from collections import deque
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Generator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,13 +33,21 @@ CHILD_FILE_HANDLE = "FileAAA1"
 CHILD_FOLDER_HANDLE = "SubFldr1"
 NESTED_FILE_HANDLE = "FileAAA2"
 
-CHILD_FILE_KEY = bytes(range(32, 48))
+CHILD_FILE_AES_KEY = bytes(range(32, 48))
+CHILD_FILE_NONCE = bytes.fromhex("1122334455667788")
+
+NESTED_FILE_AES_KEY = bytes(range(64, 80))
+NESTED_FILE_NONCE = bytes.fromhex("2233445566778899")
+
 CHILD_FOLDER_KEY = bytes(range(48, 64))
-NESTED_FILE_KEY = bytes(range(64, 80))
+"""A folder node publishes its 16-byte share key directly."""
 
 UBUNTU_SIZE = 5_800_000_000
 NESTED_SIZE = 1_048_576
 TIMESTAMP = 1_772_000_000
+
+TRANSFER_URL = "https://gfs001.userstorage.mega.co.nz/dl/AaBbCcDd"
+"""The kind of host Mega hands out for a transfer; never the API endpoint."""
 
 
 def encode_base64(raw: bytes) -> str:
@@ -65,6 +73,26 @@ def pack_file_key(
     return head + tail
 
 
+CHILD_FILE_KEY = pack_file_key(CHILD_FILE_AES_KEY, CHILD_FILE_NONCE)
+"""The packed 32-byte key a file node inside a shared folder publishes."""
+
+NESTED_FILE_KEY = pack_file_key(NESTED_FILE_AES_KEY, NESTED_FILE_NONCE)
+"""The packed key of the file one level further down."""
+
+
+def node_attribute_key(node_key: bytes) -> bytes:
+    """Return the AES key a node's attributes are encrypted under.
+
+    A folder node uses its 16-byte share key as-is; a file node carries a
+    packed 32-byte container whose halves XOR into the AES key. Mirroring that
+    here keeps the fixtures honest: a listing they produce decrypts through the
+    production code path rather than a simplified one.
+    """
+    if len(node_key) == 16:
+        return node_key
+    return bytes(left ^ right for left, right in zip(node_key[:16], node_key[16:], strict=True))
+
+
 def encrypt_attributes(key: bytes, name: str, **extra: Any) -> str:
     """Return the encrypted attribute block naming *name*."""
     document = json.dumps({"n": name, **extra}, separators=(",", ":")).encode("utf-8")
@@ -83,6 +111,29 @@ def file_answer(
 ) -> dict[str, Any]:
     """Return the answer Mega gives for a public file link."""
     return {"s": size, "at": encrypt_attributes(key, name)}
+
+
+def encrypt_content(
+    plaintext: bytes, *, key: bytes = FILE_AES_KEY, nonce: bytes = FILE_NONCE
+) -> bytes:
+    """Return *plaintext* encrypted the way Mega encrypts file content.
+
+    AES-128 in counter mode, starting from the nonce padded with zeros, which
+    is what a transfer of a whole file looks like on the wire.
+    """
+    encryptor = Cipher(algorithms.AES(key), modes.CTR(nonce + bytes(8))).encryptor()
+    return encryptor.update(plaintext) + encryptor.finalize()
+
+
+def transfer_answer(
+    size: int,
+    *,
+    name: str = "ubuntu.iso",
+    key: bytes = FILE_AES_KEY,
+    url: str = TRANSFER_URL,
+) -> dict[str, Any]:
+    """Return the answer Mega gives when it allocates a transfer."""
+    return {"s": size, "at": encrypt_attributes(key, name), "g": url}
 
 
 def file_url(handle: str = FILE_HANDLE, *, key: bytes | None = None) -> str:
@@ -131,7 +182,7 @@ def node(
     if node_key is not None:
         entry["k"] = f"{share_handle}:{encrypt_node_key(share_key, node_key)}"
         if name is not None:
-            entry["a"] = encrypt_attributes(node_key[:16], name)
+            entry["a"] = encrypt_attributes(node_attribute_key(node_key), name)
     return entry
 
 
@@ -254,6 +305,46 @@ class RecordingTransport:
             ],
             default=repr,
         )
+
+
+class StubStreamTransport:
+    """Serves fixed bytes for a transfer and records what was asked for.
+
+    The stream is a generator so a test can observe that an abandoned transfer
+    is closed, which is the property the provider relies on to release a
+    connection it stopped reading.
+    """
+
+    def __init__(self, content: bytes = b"", *, chunk_size: int = 8) -> None:
+        self._content = content
+        self._chunk_size = max(chunk_size, 1)
+        self.urls: list[str] = []
+        self.chunk_sizes: list[int] = []
+        self.closed = False
+
+    def stream(self, url: str, *, chunk_size: int = 1024) -> Generator[bytes, None, None]:
+        """Yield the fixed content, recording the request."""
+        self.urls.append(url)
+        self.chunk_sizes.append(chunk_size)
+        try:
+            for start in range(0, len(self._content), self._chunk_size):
+                yield self._content[start : start + self._chunk_size]
+        finally:
+            self.closed = True
+
+
+class FailingStreamTransport:
+    """Raises when a transfer is opened, for failure-path tests."""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+        self.urls: list[str] = []
+
+    def stream(self, url: str, *, chunk_size: int = 1024) -> Generator[bytes, None, None]:
+        """Record the request and raise the configured error."""
+        self.urls.append(url)
+        raise self._error
+        yield b""  # pragma: no cover - makes this a generator function
 
 
 class FailingTransport:

@@ -27,7 +27,11 @@ class ProviderCapability(StrEnum):
     """Enumerates the entries a container resource holds."""
 
     DOWNLOAD = "download"
-    """Transfers resource content; no provider implements this yet."""
+    """Transfers resource content.
+
+    Advertised only when the provider was actually composed with everything a
+    transfer needs, so a caller can ask before it tries.
+    """
 
 
 class ResourceKind(StrEnum):
