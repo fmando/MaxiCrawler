@@ -89,6 +89,21 @@ def test_discover_command_reports_a_summary(tmp_path: Path, monkeypatch: object)
     assert "generic: 21" in result.stdout
 
 
+def test_discover_command_reports_each_plugin_separately(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    monkeypatch.chdir(tmp_path)  # type: ignore[attr-defined]
+    mega = Path(__file__).parent / "data" / "mega"
+
+    result = runner.invoke(app, ["discover", str(mega), "--no-persist"])
+
+    assert result.exit_code == 0
+    assert "Documents processed: 2" in result.stdout
+    assert "Duplicates removed: 1" in result.stdout
+    assert "mega: 13" in result.stdout
+    assert "generic: 6" in result.stdout
+
+
 def test_discover_command_accepts_a_single_file(tmp_path: Path, monkeypatch: object) -> None:
     monkeypatch.chdir(tmp_path)  # type: ignore[attr-defined]
 
