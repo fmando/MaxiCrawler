@@ -11,6 +11,7 @@ from maxicrawler.providers.crypto import (
     CryptographyCipherBackend,
     default_cipher_backend,
 )
+from maxicrawler.providers.defaults import create_default_provider_registry
 from maxicrawler.providers.errors import (
     DuplicateProviderError,
     InvalidProviderError,
@@ -24,6 +25,14 @@ from maxicrawler.providers.errors import (
     UnknownProviderError,
     UnsupportedResourceError,
 )
+from maxicrawler.providers.mega import (
+    MEGA_API_URL,
+    MEGA_PROVIDER_NAME,
+    MEGA_PROVIDER_PRIORITY,
+    MegaApiClient,
+    MegaApiError,
+    MegaProvider,
+)
 from maxicrawler.providers.protocol import ResourceProvider
 from maxicrawler.providers.registry import ProviderRegistry
 from maxicrawler.providers.retry import Retrier, RetryPolicy
@@ -35,11 +44,17 @@ from maxicrawler.providers.transport import (
 
 __all__ = [
     "DEFAULT_TIMEOUT",
+    "MEGA_API_URL",
+    "MEGA_PROVIDER_NAME",
+    "MEGA_PROVIDER_PRIORITY",
     "CipherBackend",
     "CryptographyCipherBackend",
     "DuplicateProviderError",
     "HttpTransport",
     "InvalidProviderError",
+    "MegaApiClient",
+    "MegaApiError",
+    "MegaProvider",
     "ProviderCryptoError",
     "ProviderDependencyError",
     "ProviderError",
@@ -54,5 +69,6 @@ __all__ = [
     "UnknownProviderError",
     "UnsupportedResourceError",
     "UrllibTransport",
+    "create_default_provider_registry",
     "default_cipher_backend",
 ]
