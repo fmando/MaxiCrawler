@@ -79,6 +79,21 @@ example = "my_package.plugin:ExamplePlugin"
 
 The plugin object must expose a `name` attribute and a `register()` method.
 
+## Sprint 2: domain and discovery
+
+Sprint 2 adds the core, immutable domain model and a fully in-memory discovery
+pipeline. It has no network access, crawler, downloader, or extractor
+implementation.
+
+- `maxicrawler.domain` provides typed `UrlRecord`, `DiscoveryResult`,
+  `DownloadTask`, `PluginInfo`, `ScanSession`, and `Statistics` value objects.
+- `maxicrawler.events` provides synchronous `EventBus` delivery for scan, URL,
+  plugin, and future download lifecycle events.
+- `maxicrawler.utils.normalize_url` canonicalizes HTTP(S) URL candidates and
+  `DuplicateDetector` tracks them within a session.
+- `DiscoveryPipeline` orchestrates local normalization, duplicate detection,
+  and lifecycle events only.
+
 See [docs/architecture.md](docs/architecture.md) for design rules and
 [docs/development.md](docs/development.md) for the contributor workflow.
 
