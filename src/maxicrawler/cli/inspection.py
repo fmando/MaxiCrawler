@@ -98,6 +98,9 @@ def render_json(inspection: ResourceInspection, provider: ProviderInfo) -> str:
 
     The document describes the resource, never the credential: only whether a
     key travelled with the link is reported, and never the key itself.
+
+    Fields that describe metadata are omitted when there is no metadata, so a
+    reader cannot mistake a default for a finding.
     """
     return json.dumps(inspection_document(inspection, provider), indent=2)
 
@@ -113,10 +116,11 @@ def inspection_document(inspection: ResourceInspection, provider: ProviderInfo) 
         "availability": inspection.availability.value,
         "available": inspection.availability.is_available,
         "has_key": inspection.ref.has_secret,
-        "names_available": inspection.names_available,
         "name": metadata.name if metadata is not None else None,
         "size": inspection.total_size,
     }
+    if metadata is not None:
+        document["names_available"] = inspection.names_available
     if metadata is not None and metadata.modified_at is not None:
         document["modified_at"] = metadata.modified_at.isoformat()
     if metadata is not None and inspection.kind is ResourceKind.FOLDER:

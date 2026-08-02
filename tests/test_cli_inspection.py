@@ -236,3 +236,26 @@ def test_the_json_document_of_an_unreachable_resource_reports_nulls() -> None:
     assert document["availability"] == "blocked"
     assert document["name"] is None
     assert document["size"] is None
+
+
+def test_the_json_document_omits_findings_it_did_not_make() -> None:
+    document = inspection_document(
+        ResourceInspection(ref=ref(), availability=Availability.NOT_FOUND), PROVIDER
+    )
+
+    assert "names_available" not in document
+    assert "modified_at" not in document
+
+
+def test_the_json_document_reports_readability_when_metadata_exists() -> None:
+    document = inspection_document(
+        ResourceInspection(
+            ref=ref(key=False),
+            availability=Availability.AVAILABLE,
+            metadata=ResourceMetadata(kind=ResourceKind.FILE, size=1),
+            names_available=False,
+        ),
+        PROVIDER,
+    )
+
+    assert document["names_available"] is False
