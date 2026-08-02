@@ -52,6 +52,7 @@ from maxicrawler.providers.mega.mapping import (
     node_size,
     node_timestamp,
 )
+from maxicrawler.utils.urls import strip_fragment
 
 MEGA_PROVIDER_NAME = "mega"
 """Registry name of the Mega provider."""
@@ -121,7 +122,7 @@ class MegaProvider:
         raw_url = classification.record.raw_url
         link = parse_mega_url(raw_url)
         if link is None:
-            msg = f"not a Mega share link: {_without_fragment(raw_url)}"
+            msg = f"not a Mega share link: {strip_fragment(raw_url)}"
             raise UnsupportedResourceError(msg)
         secret = None if link.key is None else ResourceSecret(link.key)
         url = share_url(raw_url, link)
@@ -332,12 +333,6 @@ def share_url(url: str, link: MegaLink) -> str:
     """
     host = urlsplit(url.strip()).hostname or "mega.nz"
     return f"https://{host}/{link.kind.value}/{link.handle}"
-
-
-def _without_fragment(url: str) -> str:
-    """Return *url* reduced to scheme, host, and path, so no key can leak."""
-    parsed = urlsplit(url.strip())
-    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
 
 def _handle(node: Mapping[str, Any]) -> str:

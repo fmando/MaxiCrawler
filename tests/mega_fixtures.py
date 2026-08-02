@@ -207,6 +207,12 @@ class RecordingTransport:
     def __init__(self, answers: Iterable[object] = ()) -> None:
         self._answers = deque(answers)
         self.calls: list[RecordedCall] = []
+        self.arguments: dict[str, Any] = {}
+        """The keyword arguments the transport was constructed with, if recorded."""
+
+    def queue(self, *answers: object) -> None:
+        """Add further answers the transport should hand out."""
+        self._answers.extend(answers)
 
     def post_json(
         self,

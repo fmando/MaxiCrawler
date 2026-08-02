@@ -29,6 +29,18 @@ def normalize_url(value: str) -> str:
     return urlunsplit((scheme, netloc, path, query, parsed.fragment))
 
 
+def strip_fragment(url: str) -> str:
+    """Return *url* without its fragment.
+
+    A share link keeps its decryption key there, so anything that echoes a URL
+    back to a person, a log, or an error message should echo this instead. The
+    result is not a substitute for the URL: a legacy Mega link keeps its whole
+    identity in the fragment and is reduced to its host.
+    """
+    parsed = urlsplit(url.strip())
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
+
+
 class DuplicateDetector:
     """Tracks normalized URLs seen during one discovery session."""
 
