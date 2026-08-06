@@ -130,3 +130,86 @@ Without the first rule, an older binary would silently discard fields it does
 not know. Without the second, a mixed-version environment would lose data on
 every write. Both are cheap now and impossible to retrofit onto a library that
 already holds thousands of entries.
+
+## ADR-014: A web layer beside discovery, not inside it
+
+`maxicrawler.web` is a package of its own rather than a module under
+`maxicrawler.crawler`. The crawler package is documented throughout as the
+station whose I/O is the file system and which never leaves the machine;
+putting a socket inside it would erase a boundary the documentation currently
+makes checkable.
+
+The new layer answers one question — *"which URLs does this page contain?"* —
+and imports `crawler`, `extractors`, `domain`, and `utils`. It imports no
+provider, no downloader, and no library, which is a rule you can check by
+reading: grep the package for `mega`, `provider`, `download`, or `library` and
+there are no hits.
+
+## ADR-015: The crawler has its own bounded fetcher
+
+Neither transport in `maxicrawler.providers` fits a crawl. `post_json` sends
+and returns JSON; `stream` yields bytes but exposes no status, no headers, and
+no URL that finally answered — which are the three things a crawler needs
+most. Reaching for either would also make the web layer depend on the provider
+layer, which ADR-014 forbids.
+
+`UrllibPageFetcher` therefore owns the request, and every limit it enforces is
+there because the page belongs to a stranger:
+
+-   the scheme allow-list keeps `file:`, `data:`, and `javascript:` targets
+    away from a socket, on the first request and on every redirect hop;
+-   redirects are capped, recorded, and restricted to HTTP(S) — the standard
+    handler permits `ftp:` and keeps its chain to itself;
+-   the content type is checked from the headers *before* the body is read, so
+    a video answered to a page request costs one round trip rather than a
+    download;
+-   the size limit applies to the bytes as they arrive *and* to what a
+    compressed body expands to, so a small archive that inflates to gigabytes
+    is refused like a large one.
+
+The two pieces genuinely shared with the provider transports — the scheme
+guard and the URL redaction rule — moved down into `maxicrawler.utils.urls`
+rather than being copied.
+
+## ADR-016: Politeness is a policy object
+
+`CrawlPolicy` has one method and one implementation that says yes to
+everything. It exists before anything needs it because it is the seam that
+robots.txt, scope rules, depth limits, private-network guards, and rate limits
+all plug into, and a seam introduced after those grew is a redesign of all of
+them.
+
+`RobotsPolicy` will read `/robots.txt` through the same `PageFetcher` the
+crawl already uses, so no second I/O seam is required. A refusal is a value
+rather than an exception, so a recursive crawl records *"skipped: disallowed by
+robots.txt"* against a URL and carries on; the service raises only for the URL
+it was explicitly asked for, where refusing is a failure of the request.
+
+robots.txt is deliberately not implemented yet. Fetching one page named by its
+operator is what a browser does when the same person types the same address.
+
+## ADR-017: One page per call; recursion is a caller
+
+`WebDiscoveryService.crawl()` takes one URL, returns one immutable
+`CrawlResult`, and holds no state about which URL to visit next. Recursion is
+therefore not a property of the crawler but a question of who calls it, in
+what order — an addition *above* the layer rather than a change inside it.
+
+What it will take, and why none of it is a redesign:
+
+-   a **frontier**, which is `DownloadQueue` again — lock-guarded,
+    deduplicating by identity, handing out one item at a time;
+-   a **scope**, which is the `CrawlPolicy` of ADR-016;
+-   a **scheduler**, which is a `PageFetcher` wrapping another `PageFetcher`,
+    the same trick `Retrier` plays around the provider transport.
+
+`CrawlResult` keeps both `requested_url` and `final_url` for this reason. A
+redirect makes them differ, and a crawl queue, a crawl history, and a user
+interface each need a different one of the two; deriving either later is
+impossible once one has been dropped.
+
+One honest caveat: `DiscoveryPipeline` is not thread-safe. Its statistics are
+rebound without a lock and its duplicate detector holds a plain set, so
+parallel crawling needs either a lock there or one pipeline per worker with
+merged `Statistics`. That is a contained change to an existing class, and it
+is recorded here rather than discovered later.
