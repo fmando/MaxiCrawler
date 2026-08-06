@@ -26,6 +26,7 @@ from maxicrawler.web.errors import (
     TransportError,
     UnsupportedSchemeError,
 )
+from maxicrawler.web.fetcher import PageFetcher, UrllibPageFetcher
 from maxicrawler.web.models import (
     CrawlResult,
     FetchedPage,
@@ -36,24 +37,35 @@ from maxicrawler.web.models import (
     ParsedHtml,
     RawLink,
 )
+from maxicrawler.web.parser import HtmlLinkParser, HtmlParser
+from maxicrawler.web.policy import AllowAllPolicy, CrawlPolicy, PolicyDecision
+from maxicrawler.web.service import WebDiscoveryService
 
 __all__ = [
+    "AllowAllPolicy",
     "ContentEncodingError",
     "ContentTypeError",
     "CrawlError",
+    "CrawlPolicy",
     "CrawlResult",
     "FetchError",
     "FetchedPage",
     "HtmlDocument",
+    "HtmlLinkParser",
+    "HtmlParser",
     "HttpStatusError",
     "LinkKind",
+    "PageFetcher",
     "PageInfo",
     "PageLink",
     "ParsedHtml",
+    "PolicyDecision",
     "PolicyRefusedError",
     "RawLink",
     "ResponseTooLargeError",
     "TooManyRedirectsError",
     "TransportError",
     "UnsupportedSchemeError",
+    "UrllibPageFetcher",
+    "WebDiscoveryService",
 ]
