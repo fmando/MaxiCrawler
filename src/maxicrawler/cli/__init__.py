@@ -8,6 +8,12 @@ from uuid import uuid4
 import typer
 
 from maxicrawler import __version__
+from maxicrawler.cli.crawling import (
+    EXIT_FETCH_FAILED,
+    EXIT_NOT_A_PAGE,
+    render_crawl,
+    render_crawl_json,
+)
 from maxicrawler.cli.downloads import (
     exit_code_for as download_exit_code_for,
 )
@@ -56,7 +62,15 @@ from maxicrawler.providers import (
     UrllibTransport,
     create_default_provider_registry,
 )
-from maxicrawler.utils import configure_logging, normalize_url, strip_fragment
+from maxicrawler.utils import configure_logging, normalize_url, require_http_scheme, strip_fragment
+from maxicrawler.web import (
+    ContentTypeError,
+    FetchError,
+    HtmlLinkParser,
+    PolicyRefusedError,
+    UrllibPageFetcher,
+    WebDiscoveryService,
+)
 
 app = typer.Typer(help="Configuration and runtime tools for MaxiCrawler.", no_args_is_help=True)
 ConfigPath = Annotated[Path, typer.Option(help="TOML configuration file to use.")]
@@ -104,6 +118,71 @@ def discover(
     session = ScanSession(session_id=uuid4().hex, started_at=datetime.now(UTC))
     summary = service.run(source, session)
     typer.echo(render_summary(summary))
+
+
+@app.command()
+def crawl(
+    url: Annotated[str, typer.Argument(help="Web page to crawl.", show_default=False)],
+    config_path: Annotated[
+        Path, typer.Option("--config", help="TOML configuration file to use.")
+    ] = DEFAULT_CONFIG_PATH,
+    persist: Annotated[
+        bool, typer.Option("--persist/--no-persist", help="Store results in the database.")
+    ] = True,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Print the result as a JSON document.")
+    ] = False,
+    prose: Annotated[
+        bool,
+        typer.Option("--prose/--no-prose", help="Also read URLs written as plain text."),
+    ] = True,
+) -> None:
+    """Fetch one web page and discover the URLs it contains.
+
+    Exactly one page is fetched; links are reported, never followed. Nothing is
+    downloaded and no provider is contacted — the URLs found here are run
+    through the same discovery pipeline and the same plugins as the ones
+    discover finds in a local document.
+
+    Only HTML is read. JavaScript is not executed, no cookie is stored, and no
+    form is submitted, so a page that builds its links in the browser will
+    appear to have fewer of them than it shows a reader.
+
+    robots.txt is not consulted yet. One page named by its operator is what a
+    browser fetches when the same person types the same address.
+
+    The exit code is 0 when the page was read, 5 when it could not be
+    retrieved, and 6 when what answered was not a page.
+    """
+    try:
+        require_http_scheme(url)
+    except ValueError as error:
+        raise typer.BadParameter(f"{error}: {url}") from error
+    settings = Settings.from_toml(config_path)
+    repository = _build_repository(settings, persist=persist)
+    service = WebDiscoveryService(
+        DiscoveryPipeline(EventBus()),
+        fetcher=UrllibPageFetcher(
+            user_agent=settings.user_agent,
+            timeout=settings.network_timeout,
+            max_response_bytes=settings.max_page_bytes,
+            max_redirects=settings.max_redirects,
+        ),
+        parser=HtmlLinkParser(max_links=settings.max_links),
+        repository=repository,
+        scan_prose=prose,
+    )
+    session = ScanSession(session_id=uuid4().hex, started_at=datetime.now(UTC))
+    try:
+        result = service.crawl(url, session)
+    except ContentTypeError as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(EXIT_NOT_A_PAGE) from error
+    except (FetchError, PolicyRefusedError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(EXIT_FETCH_FAILED) from error
+    render = render_crawl_json if as_json else render_crawl
+    typer.echo(render(result))
 
 
 @app.command()

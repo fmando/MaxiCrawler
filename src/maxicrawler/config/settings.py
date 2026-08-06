@@ -26,6 +26,15 @@ class Settings:
     network_retries: int = 3
     max_entries: int = 1000
 
+    max_page_bytes: int = 8 * 1024 * 1024
+    """Upper bound on a crawled page, before and after decompression."""
+
+    max_redirects: int = 5
+    """How many hops one fetch may follow before the chain is called a loop."""
+
+    max_links: int = 10_000
+    """How many links one page may contribute before the rest are dropped."""
+
     def __post_init__(self) -> None:
         if not self.user_agent.strip():
             msg = "user_agent must not be empty"
@@ -44,6 +53,15 @@ class Settings:
             raise ValueError(msg)
         if self.max_entries < 1:
             msg = "max_entries must be at least 1"
+            raise ValueError(msg)
+        if self.max_page_bytes < 1:
+            msg = "max_page_bytes must be at least 1"
+            raise ValueError(msg)
+        if self.max_redirects < 0:
+            msg = "max_redirects must not be negative"
+            raise ValueError(msg)
+        if self.max_links < 1:
+            msg = "max_links must be at least 1"
             raise ValueError(msg)
 
     @classmethod
@@ -70,6 +88,9 @@ class Settings:
             network_timeout=_float_value(app_config, "network_timeout", defaults.network_timeout),
             network_retries=_int_value(app_config, "network_retries", defaults.network_retries),
             max_entries=_int_value(app_config, "max_entries", defaults.max_entries),
+            max_page_bytes=_int_value(app_config, "max_page_bytes", defaults.max_page_bytes),
+            max_redirects=_int_value(app_config, "max_redirects", defaults.max_redirects),
+            max_links=_int_value(app_config, "max_links", defaults.max_links),
         )
 
     def to_toml(self) -> str:
@@ -83,6 +104,9 @@ class Settings:
             f"network_timeout = {self.network_timeout}\n"
             f"network_retries = {self.network_retries}\n"
             f"max_entries = {self.max_entries}\n"
+            f"max_page_bytes = {self.max_page_bytes}\n"
+            f"max_redirects = {self.max_redirects}\n"
+            f"max_links = {self.max_links}\n"
         )
 
 

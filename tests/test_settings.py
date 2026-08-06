@@ -122,3 +122,46 @@ def test_the_library_path_round_trips_through_toml(tmp_path: Path) -> None:
     path.write_text(original.to_toml(), encoding="utf-8")
 
     assert Settings.from_toml(path) == original
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"max_page_bytes": 0}, "max_page_bytes must be at least 1"),
+        ({"max_redirects": -1}, "max_redirects must not be negative"),
+        ({"max_links": 0}, "max_links must be at least 1"),
+    ],
+)
+def test_crawl_settings_reject_impossible_values(kwargs: dict[str, int], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        Settings(**kwargs)  # type: ignore[arg-type]
+
+
+def test_crawl_settings_have_documented_defaults() -> None:
+    settings = Settings()
+
+    assert settings.max_page_bytes == 8 * 1024 * 1024
+    assert settings.max_redirects == 5
+    assert settings.max_links == 10_000
+
+
+def test_crawl_settings_load_from_toml(tmp_path: Path) -> None:
+    path = tmp_path / "settings.toml"
+    path.write_text(
+        "[maxicrawler]\nmax_page_bytes = 4096\nmax_redirects = 2\nmax_links = 50\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings.from_toml(path)
+
+    assert settings.max_page_bytes == 4096
+    assert settings.max_redirects == 2
+    assert settings.max_links == 50
+
+
+def test_crawl_settings_round_trip_through_toml(tmp_path: Path) -> None:
+    path = tmp_path / "settings.toml"
+    original = Settings(max_page_bytes=4096, max_redirects=2, max_links=50)
+    path.write_text(original.to_toml(), encoding="utf-8")
+
+    assert Settings.from_toml(path) == original
