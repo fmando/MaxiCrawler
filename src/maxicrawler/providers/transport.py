@@ -17,10 +17,11 @@ from collections.abc import Generator, Mapping
 from contextlib import closing
 from typing import Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from maxicrawler.providers.errors import ProviderProtocolError, ProviderTransportError
+from maxicrawler.utils import require_http_scheme, safe_target
 
 DEFAULT_TIMEOUT = 30.0
 """Seconds to wait for a response before giving up."""
@@ -35,9 +36,6 @@ Large enough that the per-read overhead disappears against real throughput,
 small enough that progress stays responsive and memory flat regardless of how
 large the file is.
 """
-
-ALLOWED_SCHEMES = frozenset({"http", "https"})
-"""Schemes a transport is willing to talk; anything else is a configuration bug."""
 
 
 @runtime_checkable
@@ -124,15 +122,15 @@ class UrllibTransport:
             with urlopen(request, timeout=self._timeout) as response:  # noqa: S310
                 body = response.read(self._max_response_bytes + 1)
         except HTTPError as error:
-            msg = f"HTTP {error.code} from {_safe_target(url)}"
+            msg = f"HTTP {error.code} from {safe_target(url)}"
             raise ProviderTransportError(msg) from error
         except (URLError, TimeoutError, OSError) as error:
-            msg = f"request to {_safe_target(url)} failed"
+            msg = f"request to {safe_target(url)} failed"
             raise ProviderTransportError(msg) from error
         if len(body) > self._max_response_bytes:
-            msg = f"response from {_safe_target(url)} exceeds {self._max_response_bytes} bytes"
+            msg = f"response from {safe_target(url)} exceeds {self._max_response_bytes} bytes"
             raise ProviderTransportError(msg)
-        return decode_json(body, source=_safe_target(url))
+        return decode_json(body, source=safe_target(url))
 
     def _build_request(
         self,
@@ -142,10 +140,10 @@ class UrllibTransport:
         headers: Mapping[str, str] | None,
     ) -> Request:
         """Return the prepared request for *url*."""
-        scheme = urlsplit(url).scheme.lower()
-        if scheme not in ALLOWED_SCHEMES:
-            msg = f"unsupported URL scheme: {scheme or '(none)'}"
-            raise ProviderTransportError(msg)
+        try:
+            require_http_scheme(url)
+        except ValueError as error:
+            raise ProviderTransportError(str(error)) from error
         target = f"{url}?{urlencode(dict(params))}" if params else url
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         request_headers = {
@@ -183,10 +181,10 @@ class UrllibStreamTransport:
         if chunk_size <= 0:
             msg = "chunk_size must be positive"
             raise ValueError(msg)
-        scheme = urlsplit(url).scheme.lower()
-        if scheme not in ALLOWED_SCHEMES:
-            msg = f"unsupported URL scheme: {scheme or '(none)'}"
-            raise ProviderTransportError(msg)
+        try:
+            require_http_scheme(url)
+        except ValueError as error:
+            raise ProviderTransportError(str(error)) from error
         request = Request(  # noqa: S310 - the scheme is checked above
             url,
             headers={"User-Agent": self._user_agent, "Accept": "*/*"},
@@ -195,17 +193,17 @@ class UrllibStreamTransport:
         try:
             response = urlopen(request, timeout=self._timeout)  # noqa: S310
         except HTTPError as error:
-            msg = f"HTTP {error.code} from {_safe_target(url)}"
+            msg = f"HTTP {error.code} from {safe_target(url)}"
             raise ProviderTransportError(msg) from error
         except (URLError, TimeoutError, OSError) as error:
-            msg = f"request to {_safe_target(url)} failed"
+            msg = f"request to {safe_target(url)} failed"
             raise ProviderTransportError(msg) from error
         with closing(response):
             while True:
                 try:
                     chunk = response.read(chunk_size)
                 except (URLError, TimeoutError, OSError) as error:
-                    msg = f"transfer from {_safe_target(url)} was interrupted"
+                    msg = f"transfer from {safe_target(url)} was interrupted"
                     raise ProviderTransportError(msg) from error
                 if not chunk:
                     return
@@ -224,13 +222,3 @@ def decode_json(body: bytes, *, source: str) -> object:
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         msg = f"response from {source} is not valid JSON"
         raise ProviderProtocolError(msg) from error
-
-
-def _safe_target(url: str) -> str:
-    """Return *url* reduced to scheme, host, and path.
-
-    Query strings and fragments are dropped so that no identifier or credential
-    can reach an exception message through a failed request.
-    """
-    parsed = urlsplit(url)
-    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"

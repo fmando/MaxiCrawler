@@ -1,7 +1,38 @@
-"""URL canonicalization and duplicate-detection helpers."""
+"""URL canonicalization, redaction, and duplicate-detection helpers."""
 
 from collections.abc import Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+HTTP_SCHEMES = frozenset({"http", "https"})
+"""The only schemes MaxiCrawler ever opens a socket for."""
+
+
+def require_http_scheme(url: str) -> str:
+    """Return the lowercased scheme of *url*, which must be HTTP(S).
+
+    Every layer that is about to make a request calls this first, so no
+    ``file:``, ``data:``, or ``javascript:`` target can reach a socket — not as
+    an argument, and not as the destination of a redirect.
+
+    Raises:
+        ValueError: *url* names a scheme we refuse to talk, or names none.
+    """
+    scheme = urlsplit(url).scheme.lower()
+    if scheme not in HTTP_SCHEMES:
+        msg = f"unsupported URL scheme: {scheme or '(none)'}"
+        raise ValueError(msg)
+    return scheme
+
+
+def safe_target(url: str) -> str:
+    """Return *url* reduced to scheme, host, and path.
+
+    Query strings and fragments are dropped, so no identifier or credential can
+    reach a log record or an exception message through a failed request. Anything
+    that echoes a URL back to a person should echo this.
+    """
+    parsed = urlsplit(url)
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
 
 def normalize_url(value: str) -> str:
@@ -17,7 +48,7 @@ def normalize_url(value: str) -> str:
     """
     parsed = urlsplit(value.strip())
     scheme = parsed.scheme.lower()
-    if scheme not in {"http", "https"} or not parsed.hostname:
+    if scheme not in HTTP_SCHEMES or not parsed.hostname:
         msg = "URL must be an absolute HTTP(S) URL"
         raise ValueError(msg)
     hostname = parsed.hostname.lower()
