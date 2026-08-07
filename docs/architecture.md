@@ -973,6 +973,19 @@ most, identity last — so a URL refused for being off-site is *not* also
 remembered as seen, and a later crawl under a wider scope still finds it. The
 counters therefore count occurrences rather than distinct URLs.
 
+### Only what could be a page is followed
+
+A stylesheet, a script and an image are resources, not documents to walk. They
+are discovered, classified and counted like every other URL — finding resources
+is the whole point — but they are never fetched, because following one buys a
+round trip that ends in *"this is not a page"*, which the markup already said.
+
+The four kinds that remain are the ones a reader could follow: a link, a frame,
+a meta refresh, and a URL somebody wrote out in the text.
+
+This came out of the sprint's own acceptance run, which fetched seven CSS, JS
+and icon files and reported them as failed pages.
+
 ### Identity: two keys, and two moments
 
 `normalize_url` preserves URL fragments, because a legacy Mega share keeps its

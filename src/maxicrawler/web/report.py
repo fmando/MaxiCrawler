@@ -43,6 +43,14 @@ class SkipReason(StrEnum):
     ALREADY_SEEN = "already seen"
     """Queued or fetched earlier in this crawl."""
 
+    NOT_A_PAGE = "not a page link"
+    """A stylesheet, a script or an image — a resource, never a page.
+
+    Still discovered, still classified, still counted. Just never fetched: a
+    ``<link href>`` cannot answer with HTML, so following it costs a round trip
+    to be told what the markup already said.
+    """
+
     UNUSABLE = "unusable"
     """Not a URL this crawler can canonicalize, so not one it can track."""
 

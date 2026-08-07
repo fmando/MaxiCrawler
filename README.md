@@ -974,6 +974,10 @@ default. A crawl with no `--depth` still fetches exactly one page.
   pointing straight at the redirect's target.
 - A cycle terminates, and so does a page that links to itself.
 
+Stylesheets, scripts and images are found and classified but never *followed*.
+They are resources, not pages, and fetching one only to be told so is a wasted
+request. Links, frames, meta refreshes and URLs written in prose are followed.
+
 `<link rel="canonical">` is recorded and reported but never used to skip a URL.
 A page can declare a canonical it does not equal, and skipping a URL that was
 never fetched loses every link on it.

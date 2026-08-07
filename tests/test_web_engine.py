@@ -9,7 +9,7 @@ from web_server import Site, serve
 
 from maxicrawler.crawler import DiscoveryPipeline
 from maxicrawler.events import EventBus
-from maxicrawler.web import PolicyRefusedError, UrllibPageFetcher, WebDiscoveryService
+from maxicrawler.web import LinkKind, PolicyRefusedError, UrllibPageFetcher, WebDiscoveryService
 from maxicrawler.web.engine import CrawlEngine
 from maxicrawler.web.frontier import CrawlItem, FifoFrontier, visit_key
 from maxicrawler.web.policy import PolicyDecision, SameDomainPolicy
@@ -582,3 +582,58 @@ def test_an_injected_policy_is_asked_alongside_the_domain_option() -> None:
 
     assert "/a1" not in visited_paths(report, base)
     assert "/b1" in visited_paths(report, base)
+
+
+# --- what is worth following -------------------------------------------------
+
+
+def test_stylesheets_scripts_and_images_are_found_but_never_fetched() -> None:
+    """They are resources, not documents. Following one buys a wasted request.
+
+    The acceptance run for this sprint fetched seven CSS, JS and icon files and
+    reported them as failed pages, which is what prompted this.
+    """
+    site = Site()
+    site.add_html(
+        "/",
+        '<link rel="stylesheet" href="/s.css"><script src="/a.js"></script>'
+        '<img src="/i.png"><a href="/real">real</a>',
+    )
+    site.add_html("/real", "<p>x</p>")
+
+    with crawl(site, max_depth=1) as (report, base):
+        assert visited_paths(report, base) == ["/", "/real"]
+        assert report.statistics.pages_failed == 0
+        assert dict(report.statistics.skips_by_reason)[SkipReason.NOT_A_PAGE] == 3
+
+
+def test_a_resource_link_still_reaches_the_pipeline() -> None:
+    """Not following it must not mean not discovering it."""
+    site = Site()
+    site.add_html("/", '<link rel="stylesheet" href="/s.css"><img src="/i.png">')
+
+    with crawl(site, max_depth=1) as (report, base):
+        assert report.links_discovered == 2
+        assert report.summary.unique_urls == 2
+        assert dict(report.statistics.links_by_kind)[LinkKind.STYLESHEET] == 1
+
+
+def test_frames_and_meta_refreshes_are_followed() -> None:
+    site = Site()
+    site.add_html("/", '<iframe src="/framed"></iframe>')
+    site.add_html("/framed", '<meta http-equiv="refresh" content="0; url=/next">')
+    site.add_html("/next", "<p>x</p>")
+
+    with crawl(site, max_depth=2) as (report, base):
+        assert sorted(visited_paths(report, base)) == ["/", "/framed", "/next"]
+
+
+def test_a_url_written_in_prose_is_followed() -> None:
+    site = Site()
+
+    with serve(site) as base:
+        site.add_html("/", f"<p>see {base}/mentioned for more</p>")
+        site.add_html("/mentioned", "<p>x</p>")
+        report = make_engine().run(make_session(f"{base}/", max_depth=1))
+
+    assert sorted(visited_paths(report, base)) == ["/", "/mentioned"]

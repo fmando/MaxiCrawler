@@ -52,6 +52,18 @@ from maxicrawler.web.repository import CrawlRepository, NullCrawlRepository
 from maxicrawler.web.service import WebDiscoveryService
 from maxicrawler.web.session import CrawlControl, CrawlSession, CrawlState
 
+FOLLOWABLE_KINDS = frozenset({LinkKind.ANCHOR, LinkKind.FRAME, LinkKind.REDIRECT, LinkKind.TEXT})
+"""Which kinds of link could plausibly lead to another page.
+
+A stylesheet, a script and an image are resources, not documents to walk. They
+are discovered, classified and counted like every other URL — the crawler's job
+is to *find* resources — but following one buys a round trip that ends in "this
+is not a page", which the markup already said.
+
+The four that remain are the ones a reader could follow: a link, a frame, a
+meta refresh, and a URL somebody wrote out in the text.
+"""
+
 
 class CrawlEngine:
     """Crawls from a seed, following links until a limit or the work runs out.
@@ -305,10 +317,18 @@ class CrawlEngine:
         )
 
     def _enqueue_links(self, item: CrawlItem, result: CrawlResult) -> None:
-        """Offer everything this page linked to for the next round."""
+        """Offer everything this page linked to for the next round.
+
+        Everything is counted and everything reached the discovery pipeline
+        already; only what could plausibly *be* a page is offered to the
+        frontier.
+        """
         depth = item.depth + 1
         for link in result.links:
             self._kinds[link.kind] += 1
+            if link.kind not in FOLLOWABLE_KINDS:
+                self._skips[SkipReason.NOT_A_PAGE] += 1
+                continue
             self._consider(
                 CrawlItem(url=link.resolved_url, depth=depth, discovered_from=result.final_url)
             )
