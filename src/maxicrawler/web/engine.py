@@ -48,6 +48,7 @@ from maxicrawler.web.frontier import (
 from maxicrawler.web.models import CrawlResult
 from maxicrawler.web.policy import AllowAllPolicy, CrawlPolicy
 from maxicrawler.web.report import CrawlReport, CrawlStatistics, PageOutcome, SkipReason
+from maxicrawler.web.repository import CrawlRepository, NullCrawlRepository
 from maxicrawler.web.service import WebDiscoveryService
 from maxicrawler.web.session import CrawlControl, CrawlSession, CrawlState
 
@@ -69,8 +70,10 @@ class CrawlEngine:
         policy: CrawlPolicy | None = None,
         control: CrawlControl | None = None,
         event_bus: EventBus | None = None,
+        repository: CrawlRepository | None = None,
     ) -> None:
         self._service = service
+        self._repository = repository if repository is not None else NullCrawlRepository()
         self._frontier = frontier if frontier is not None else FifoFrontier()
         self._visited = visited if visited is not None else InMemoryVisitedSet()
         self._policy = policy if policy is not None else AllowAllPolicy()
@@ -114,6 +117,7 @@ class CrawlEngine:
         started = monotonic()
         scan = session.scan_session
         self._control.state = CrawlState.RUNNING
+        self._repository.start_crawl(session)
         self._service.start(scan)
         self._publish(
             CrawlStarted(
@@ -145,7 +149,7 @@ class CrawlEngine:
                 pages_failed=failed,
             )
         )
-        return CrawlReport(
+        report = CrawlReport(
             session=session,
             state=state,
             statistics=CrawlStatistics.of(
@@ -160,6 +164,8 @@ class CrawlEngine:
             pages=tuple(self._pages),
             finished_at=datetime.now(UTC),
         )
+        self._repository.finish_crawl(session, report)
+        return report
 
     def _publish(self, event: CrawlStarted | CrawlFinished | PageCrawled | PageFailed) -> None:
         """Announce *event*, when anybody asked to be told.
