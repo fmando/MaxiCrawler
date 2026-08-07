@@ -16,6 +16,19 @@ TRAILING_PUNCTUATION = ".,;:!?\"'"
 """Characters stripped from the end of a match; prose punctuation, not URL syntax."""
 
 
+def scan_text(text: str) -> Iterator[str]:
+    """Yield every URL-shaped substring of *text*.
+
+    This is the one rule for finding a URL written as prose rather than as
+    markup. It is public because the web crawler needs it too: a share link on
+    a forum page is usually plain text, and it must be found by the same rule
+    that finds it in a Markdown file rather than by a second, subtly different
+    scanner.
+    """
+    for match in URL_PATTERN.finditer(text):
+        yield match.group()
+
+
 @dataclass(frozen=True, slots=True)
 class UrlCandidate:
     """A URL found in a document, in both its original and canonical form."""
@@ -53,19 +66,13 @@ class GenericUrlExtractor:
         """Return the unique candidates in *document*, markup links first."""
         seen: set[str] = set()
         candidates: list[UrlCandidate] = []
-        for raw_url in chain(document.links, self._scan(document.text)):
+        for raw_url in chain(document.links, scan_text(document.text)):
             candidate = self._to_candidate(raw_url)
             if candidate is None or candidate.normalized_url in seen:
                 continue
             seen.add(candidate.normalized_url)
             candidates.append(candidate)
         return tuple(candidates)
-
-    @staticmethod
-    def _scan(text: str) -> Iterator[str]:
-        """Yield every URL-shaped substring of *text*."""
-        for match in URL_PATTERN.finditer(text):
-            yield match.group()
 
     @staticmethod
     def _to_candidate(raw_url: str) -> UrlCandidate | None:

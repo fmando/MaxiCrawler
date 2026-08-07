@@ -1,8 +1,8 @@
-"""Tests for URL normalization and duplicate detection."""
+"""Tests for URL normalization, redaction, and duplicate detection."""
 
 import pytest
 
-from maxicrawler.utils import DuplicateDetector, normalize_url
+from maxicrawler.utils import DuplicateDetector, normalize_url, require_http_scheme, safe_target
 
 
 def test_normalize_url_canonicalizes_host_and_query() -> None:
@@ -41,6 +41,44 @@ def test_normalize_url_treats_an_empty_fragment_as_absent() -> None:
 def test_normalize_url_rejects_non_http_urls() -> None:
     with pytest.raises(ValueError, match="absolute HTTP"):
         normalize_url("/relative")
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("http://example.test/", "http"),
+        ("HTTPS://Example.TEST/", "https"),
+        ("https://example.test/a?b=1#c", "https"),
+    ],
+)
+def test_require_http_scheme_accepts_http_and_https(url: str, expected: str) -> None:
+    assert require_http_scheme(url) == expected
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["file:///etc/passwd", "ftp://example.test/x", "data:text/html,x", "javascript:alert(1)"],
+)
+def test_require_http_scheme_refuses_every_other_scheme(url: str) -> None:
+    with pytest.raises(ValueError, match="unsupported URL scheme"):
+        require_http_scheme(url)
+
+
+def test_require_http_scheme_names_a_missing_scheme() -> None:
+    with pytest.raises(ValueError, match=r"unsupported URL scheme: \(none\)"):
+        require_http_scheme("/relative/path")
+
+
+def test_safe_target_keeps_scheme_host_and_path() -> None:
+    assert safe_target("https://example.test:8443/a/b") == "https://example.test:8443/a/b"
+
+
+def test_safe_target_drops_the_query_and_the_fragment() -> None:
+    target = safe_target("https://mega.nz/file/AaBbCcDd?n=Handle#SecretKey")
+
+    assert target == "https://mega.nz/file/AaBbCcDd"
+    assert "SecretKey" not in target
+    assert "Handle" not in target
 
 
 def test_duplicate_detector_registers_only_once() -> None:

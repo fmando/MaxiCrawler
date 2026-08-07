@@ -13,6 +13,7 @@ what the project deliberately will not do.
 ## Features
 
 - Clear package boundaries for crawling, extraction, downloads, storage, plugins, GUI, and API layers.
+- A web crawler that discovers the links on a page and feeds them to the same discovery pipeline local documents use.
 - A provider-independent download manager: a new host is a plugin and a provider, nothing else.
 - A self-describing library: one directory per resource, with versioned JSON metadata beside it.
 - Typed interfaces and strict static checking with mypy.
@@ -31,9 +32,11 @@ cd MaxiCrawler
 uv sync --all-extras
 ```
 
-`--all-extras` includes the optional `mega` extra, which pulls in
-`cryptography`. It is needed only to decrypt the names inside a Mega share;
-everything else works without it.
+`--all-extras` includes two optional extras. `mega` pulls in `cryptography` and
+is needed only to decrypt the names inside a Mega share. `brotli` lets the
+crawler read a Brotli-compressed page; without it, `Accept-Encoding` simply
+does not advertise `br`, so a server sends gzip instead. Everything else works
+without either.
 
 Create the local configuration and SQLite metadata database:
 
@@ -47,6 +50,12 @@ Discover the URLs in a folder of local documents:
 
 ```bash
 uv run maxicrawler discover ./docs
+```
+
+Discover the URLs on a web page:
+
+```bash
+uv run maxicrawler crawl https://example.org
 ```
 
 Ask what a share link points at, without downloading it:
@@ -73,7 +82,7 @@ uv run mypy src
 ## The chain
 
 ```text
-Website / URL → Discovery → Plugin → Provider → Download Manager → Library
+Website → Crawler → Discovery → Plugin → Provider → Download Manager → Library
 ```
 
 Each station answers exactly one question, and that is what keeps them
@@ -81,17 +90,24 @@ replaceable:
 
 | Station | Package | Question | Network |
 | --- | --- | --- | --- |
+| Crawler | `maxicrawler.web` | *"Which URLs does this page contain?"* | required |
 | Discovery | `maxicrawler.crawler` | *"Which URLs exist?"* | never |
 | Plugin | `maxicrawler.plugins` | *"Can I classify this URL?"* | never |
 | Provider | `maxicrawler.providers` | *"What can I do with this resource?"* | allowed |
 | Download Manager | `maxicrawler.downloader` | *"How are downloads executed?"* | delegates |
 | Library | `maxicrawler.library` | *"How are resources stored?"* | never |
 
+The crawler is the only station that retrieves a document MaxiCrawler was not
+given. It knows nothing about providers, downloads, or the library: it fetches a
+page, finds the URLs in it, and hands them to the discovery pipeline unchanged.
+A link found on a web page is therefore classified by exactly the same plugins
+as one found in a local file.
+
 A plugin decides from the URL string alone, so it runs on every URL discovery
 finds and can never block. A provider takes the plugin's verdict and asks the
 host what the resource actually is. Only commands that say so contact a
-provider: `discover` stays entirely offline, `info` and `download` are the ones
-that reach out.
+provider: `discover` stays entirely offline, `crawl` contacts a web server but
+no provider, and `info` and `download` are the ones that reach a host.
 
 **Adding a host means adding a plugin and a provider.** The download manager
 and the library do not change — they contain no provider name at all.
@@ -732,6 +748,145 @@ report = manager.run(plan)
 Without a `stream=` transport the registry produces inspection-only providers,
 which is what keeps `info` unable to download by construction rather than by
 convention.
+
+## Sprint 8: the web crawler
+
+Sprint 8 adds the first station of the chain. `crawl` fetches **one** web page,
+reads the links out of it, and runs them through the discovery pipeline that
+already exists:
+
+```bash
+maxicrawler crawl https://example.org
+```
+
+```text
+Fetched:   https://example.org/
+Status:    200 text/html (utf-8, 1256 bytes)
+Title:     Example Domain
+
+Links found: 42
+  anchor: 30
+  image: 6
+  script: 3
+  stylesheet: 2
+  meta refresh: 1
+Skipped (not HTTP(S)): 5
+
+Documents processed: 1
+URLs discovered: 37
+Unique URLs: 30
+Duplicates removed: 7
+
+Plugin usage:
+generic: 28
+mega: 2
+```
+
+The last two blocks are the same renderer `discover` uses, because they are the
+same numbers from the same pipeline.
+
+### One page, and only one
+
+The crawler fetches the page you name and **follows nothing**. Links are
+reported, never visited. There is no `--depth`, no `--recursive`, and no queue,
+because this sprint is about discovering what is on a page rather than about
+walking a site.
+
+That is a scope decision, not a limitation of the design: `crawl()` returns an
+immutable result and holds no state about which URL comes next, so recursion is
+a loop *around* it rather than a change inside it. The extension points are
+described in [docs/architecture.md](docs/architecture.md#how-this-extends-to-recursion).
+
+### What it reads
+
+| Element | Taken from |
+| --- | --- |
+| `<a href>`, `<area href>` | the link target |
+| `<img src>` | the image source |
+| `<script src>` | the script source |
+| `<link href>` | any `rel`, including `stylesheet` and `canonical` |
+| `<iframe src>` | the frame source |
+| `<meta http-equiv="refresh">` | the `url=` inside `content` |
+| plain text | bare URLs written in prose, via `--prose` (the default) |
+
+The last row is there because a share link on a forum page is usually written
+out rather than linked. It uses the same rule that finds a URL in a Markdown
+file — never a second scanner — and ignores anything inside `<script>` or
+`<style>`. Turn it off with `--no-prose`.
+
+Relative URLs are resolved against the page, `<base href>` is respected, and a
+page reached through a redirect resolves against the URL that **answered**, not
+the one requested. `crawl --json` reports both.
+
+URL fragments are kept. That is not cosmetic: a legacy Mega share carries its
+whole handle and decryption key in the fragment, so a crawler that strips
+fragments would silently lose every one of them.
+
+### What it deliberately does not do
+
+- **No JavaScript.** A page that builds its links in the browser will show
+  fewer here than a reader sees.
+- **No cookies, no login, no forms, no headless browser.** Static HTML only.
+- **No downloads.** `crawl` contacts a web server; it contacts no provider and
+  writes no file into the library.
+- **No robots.txt — yet.** Fetching one page named by its operator is what a
+  browser does when the same person types the same address. The architecture
+  reserves a one-method `CrawlPolicy` seam for it, and a `RobotsPolicy` will
+  read `/robots.txt` through the same fetcher. Until then, **you** are
+  responsible for what you point it at.
+
+### Every fetch is bounded
+
+The page belongs to a stranger, so each of these is enforced rather than hoped
+for: only `http` and `https` are opened, on the first request and on every
+redirect hop; redirects are capped and recorded; the content type is checked
+from the headers *before* the body is read, so a video answered to a page
+request costs one round trip instead of a download; and the size limit applies
+both to what arrives and to what a compressed body expands to, so a small
+archive that inflates to gigabytes is refused like a large one.
+
+Errors say which of those happened, and the exit code separates them:
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | the page was fetched and read |
+| 5 | it could not be retrieved — refused, unreachable, too large, too many redirects |
+| 6 | something answered, but it was not a page |
+
+### Configuration
+
+```toml
+[maxicrawler]
+user_agent = "MaxiCrawler/0.1.0"
+network_timeout = 30.0
+max_page_bytes = 8388608
+max_redirects = 5
+max_links = 10000
+```
+
+### Using the crawler from Python
+
+```python
+from maxicrawler.crawler import DiscoveryPipeline
+from maxicrawler.events import EventBus
+from maxicrawler.web import UrllibPageFetcher, WebDiscoveryService
+
+service = WebDiscoveryService(
+    DiscoveryPipeline(EventBus()),
+    fetcher=UrllibPageFetcher(user_agent="MaxiCrawler/0.1.0"),
+)
+result = service.crawl("https://example.org", session)
+
+print(result.requested_url, "->", result.final_url)
+for link in result.links:
+    print(link.kind, link.resolved_url)
+print(result.summary.unique_urls)
+```
+
+`CrawlResult` is an immutable value and the service takes no terminal, so the
+same call serves a script, a future API, and a future GUI. A long crawl needs
+no polling either: the pipeline already publishes `ScanStarted`,
+`UrlDiscovered`, and `ScanFinished` on the event bus.
 
 ## Documentation
 

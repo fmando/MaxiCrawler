@@ -16,11 +16,14 @@ config, utils
 downloader → providers → plugins (pure URL parsing only); never the reverse
           ↘ library → domain
           ↘ documents, extractors (reused for reading a source of links)
+web → crawler (pipeline, repository port, summary)
+    ↘ extractors (the prose-URL rule)
+    ↘ domain, utils; never providers, downloader, or library
 crawler → extractors → documents
        ↘ plugins (protocol, registry, resolver)
        ↘ repository port ← database implements it structurally
 plugins depend on the domain only; concrete plugins extend the protocol
-cli composes crawler, documents, extractors, plugins, providers,
+cli composes web, crawler, documents, extractors, plugins, providers,
     downloader, library and database
 api and gui adapt the core for users
 ```
@@ -28,7 +31,7 @@ api and gui adapt the core for users
 The processing chain the packages implement runs left to right:
 
 ```text
-Website / URL → Discovery → Plugin → Provider → Download Manager → Library
+Website → Crawler → Discovery → Plugin → Provider → Download Manager → Library
 ```
 
 The crawler depends on the plugin *abstractions*, never on a concrete
@@ -48,8 +51,9 @@ SQLite metadata storage, plugin discovery, and a CLI. The `crawler`,
 `downloader`, and `extractors` packages are explicit placeholders; no network
 or crawling behavior is implemented yet.
 
-The `crawler` and `extractors` packages were filled in by later sprints, and
-`downloader` by Sprint 7, as described below.
+The `crawler` and `extractors` packages were filled in by later sprints,
+`downloader` by Sprint 7, and the `web` package was added by Sprint 8, as
+described below.
 
 Sprint 2 introduces a pure domain layer and synchronous events. The discovery
 pipeline is an in-memory application service: it accepts caller-provided URL
@@ -76,6 +80,11 @@ Sprint 7 adds the download manager and the library, described under
 [The download layer](#the-download-layer) and [The library](#the-library).
 This is the first sprint that transfers content and writes files outside the
 metadata database.
+
+Sprint 8 adds the web layer, described under
+[The web layer](#the-web-layer). It is the first station of the chain and the
+first code that retrieves a document MaxiCrawler was not given. It fetches
+exactly one page and downloads nothing.
 
 ## Plugin architecture
 
@@ -664,6 +673,217 @@ provider-independent on purpose: a host that offers its own integrity check —
 Mega's meta-MAC, for instance — would add to this rather than replace it, so
 resources from different providers stay comparable.
 
+## The web layer
+
+Sprint 8 adds the first station of the chain: the one that answers *"which URLs
+does this page contain?"*.
+
+### Layers
+
+| Element | Module | Layer |
+| --- | --- | --- |
+| `FetchedPage`, `PageInfo`, `ParsedHtml`, `HtmlDocument`, `PageLink`, `RawLink`, `LinkKind`, `CrawlResult` | `maxicrawler.web.models` | Application values |
+| `PageFetcher` | `maxicrawler.web.fetcher` | Domain-facing contract |
+| `UrllibPageFetcher`, `BoundedRedirectHandler` | `maxicrawler.web.fetcher` | Infrastructure |
+| `detect_encoding`, `decode_body` | `maxicrawler.web.encoding` | Pure |
+| `HtmlParser`, `HtmlLinkParser` | `maxicrawler.web.parser` | Pure |
+| `resolve_links` | `maxicrawler.web.resolve` | Pure |
+| `CrawlPolicy`, `PolicyDecision`, `AllowAllPolicy` | `maxicrawler.web.policy` | Application policy |
+| `WebDiscoveryService` | `maxicrawler.web.service` | Application |
+| `render_crawl`, `render_crawl_json` | `maxicrawler.cli.crawling` | Interface adapter |
+
+### Why a package of its own
+
+`maxicrawler.crawler` is described throughout this document as the station
+whose I/O is the file system and which never leaves the machine. A socket
+inside it would erase a boundary that is currently checkable. `maxicrawler.web`
+sits beside it instead and imports `crawler`, `extractors`, `domain`, and
+`utils` — never `providers`, `downloader`, or `library`. Grep the package for
+`mega`, `provider`, `download`, or `library`: there are no hits.
+
+### Pipeline
+
+```text
+crawl URL
+  → CrawlPolicy.may_fetch()   may this be retrieved at all?
+  → PageFetcher.fetch()       scheme, redirects, size, content type → FetchedPage
+  → decode_body()             BOM → header → meta prescan → UTF-8
+  → HtmlParser.parse()        tags and attributes → ParsedHtml (no URLs yet)
+  → resolve_links()           base URL + relative resolution → HtmlDocument
+  → DiscoveryPipeline         normalize, deduplicate, resolve a plugin
+  → DiscoveryRepository       the same port `discover` writes through
+  → CrawlResult
+```
+
+`WebDiscoveryService` is pure orchestration, deliberately the same shape as
+`LocalDiscoveryService`. **The discovery pipeline is never bypassed**: a URL
+found on a page is normalized, deduplicated, and classified by exactly the same
+plugins, in the same order, as one found in a Markdown file, and one fetched
+page counts as one processed document. That is what makes the two commands
+report comparable numbers instead of two ideas of what a URL is.
+
+### Everything about a fetch is bounded
+
+Each limit exists because the page belongs to a stranger:
+
+| Threat | Answer |
+| --- | --- |
+| `file:`, `data:`, `javascript:` targets | Scheme allow-list on the request **and** on every redirect hop |
+| Redirect to another scheme | `BoundedRedirectHandler`; the standard one permits `ftp:` |
+| Redirect loops | Hard cap, chain recorded, `TooManyRedirectsError` |
+| A video answered to a page request | Content type checked from the headers **before** the body is read |
+| Unbounded body | `max_page_bytes`, on `Content-Length` *and* while reading |
+| Decompression bomb | Incremental decompression under the same limit |
+| A page with a million links | `max_links`; the surplus is dropped and reported |
+| Credentials in a log record | Every message carries `safe_target(url)` only |
+
+Two details of `urllib` had to be worked around, and both are asserted rather
+than assumed. Its redirect handler checks the scheme *before* `redirect_request`
+is reached, so a `file:` target would arrive as a plain 302 unless
+`http_error_302` pre-empts it; and it aliases 301, 303, 307, and 308 onto its
+own method object, so overriding 302 alone would let four of the five statuses
+bypass the check entirely.
+
+### Encoding
+
+The HTML standard's sniffing order, reduced to what a non-interactive fetcher
+can do: a byte order mark, then the `charset` of the HTTP header, then a
+prescan of the first 1024 bytes, then UTF-8. Browsers fall back to windows-1252
+instead; the corpus this project targets is modern, and being wrong costs
+little because a body that will not decode strictly is decoded again with
+replacement characters. A page can never abort a crawl.
+
+Every charset label passes through `codecs.lookup()`, because real responses
+carry labels no codec is registered under.
+
+### Parsing and resolution are separate
+
+The parser is pure syntax: it collects the strings a page wrote down, in the
+order it wrote them, and knows nothing about URLs. `resolve.py` turns those into
+absolute URLs. The split means the parser is testable without a base URL and
+the resolver without any HTML — and it is why `ParsedHtml` and `HtmlDocument`
+are two types rather than one.
+
+Parsing uses `html.parser`, which `HtmlDocumentReader` already uses for local
+documents. That is the point: `discover` and `crawl` agree about what a link is
+by construction. It is not a spec-compliant HTML5 tree builder and does not need
+to be — link extraction reads start tags and attribute values. `HtmlParser` is a
+protocol, so a faster backend can be substituted without touching the crawler.
+
+The element table is data:
+
+```python
+LINK_SOURCES = {
+    ("a", "href"): LinkKind.ANCHOR,
+    ("area", "href"): LinkKind.ANCHOR,
+    ("img", "src"): LinkKind.IMAGE,
+    ("script", "src"): LinkKind.SCRIPT,
+    ("link", "href"): LinkKind.STYLESHEET,
+    ("iframe", "src"): LinkKind.FRAME,
+}
+```
+
+Three resolution rules are decisions rather than details:
+
+1. **Resolution is against the URL that answered**, not the one requested. A
+   page reached through a redirect states its relative links against where it
+   ended up. This is the most common relative-link bug in a crawler.
+2. **A `<base>` overrides that, and the first one wins**, as the standard
+   requires. A base that resolves to something other than HTTP(S) is ignored.
+3. **Fragments are preserved.** A conventional crawler strips them; doing that
+   here would silently destroy every legacy Mega share on a page, because such
+   a link keeps its whole handle and key in the fragment. A reference that is
+   *only* a fragment points into the page we already hold, so that one is
+   dropped — and counted, like every other reference the pipeline cannot take.
+
+`<link rel="canonical">` is recorded but never acted on. Treating it as identity
+is a de-duplication policy belonging to a recursive crawl; applying it here
+would report links under a URL that was never fetched.
+
+### URLs written as prose
+
+A share link on a forum page is usually written out rather than linked, so the
+parser also collects the page's prose and the service scans it with
+`maxicrawler.extractors.scan_text` — the same rule that finds a URL in a
+Markdown file. A second scanner would eventually disagree about what a URL
+looks like. Script and style content is excluded, so a URL inside a `<script>`
+is not mistaken for one a reader can see. `crawl --no-prose` turns it off.
+
+### The robots.txt extension point
+
+```python
+@dataclass(frozen=True, slots=True)
+class PolicyDecision:
+    allowed: bool
+    reason: str | None = None
+
+
+class CrawlPolicy(Protocol):
+    def may_fetch(self, url: str) -> PolicyDecision: ...
+```
+
+That is the whole seam, and it is about twenty lines. What plugs into it:
+
+- **`RobotsPolicy`** — reads `/robots.txt` through the *same* `PageFetcher` the
+  crawl already uses, so no second I/O seam is needed, parses it with
+  `urllib.robotparser`, and caches per host.
+- **`ScopePolicy`** — same host, path prefix, maximum depth.
+- **`PrivateNetworkPolicy`** — the SSRF guard, required before any web
+  interface accepts a URL from someone other than the operator.
+- **`CompositePolicy`** — the first refusal wins.
+
+A refusal is a value, so a recursive crawl records *"skipped: disallowed by
+robots.txt"* and carries on. The service raises `PolicyRefusedError` only for
+the URL it was explicitly asked for, where refusing *is* a failure of the
+request; a crawl loop catches that per URL.
+
+robots.txt is deliberately not implemented. Fetching one page named by its
+operator is what a browser does when the same person types the same address.
+
+### How this extends to recursion
+
+`crawl()` takes one URL, returns one immutable `CrawlResult`, and holds no
+state about which URL to visit next. Recursion is therefore not a property of
+the crawler but a question of who calls it, in what order — an addition *above*
+the layer. Nothing in `fetcher`, `parser`, `resolve`, or `encoding` changes.
+
+```python
+frontier.push(CrawlItem(seed, depth=0))
+while (item := frontier.pop()) is not None:
+    try:
+        result = service.crawl(item.url, session)
+    except CrawlError as error:
+        report.skipped(item.url, str(error))  # one dead page stops nothing
+        continue
+    frontier.extend(CrawlItem(link.resolved_url, item.depth + 1) for link in result.document.links)
+```
+
+| Needed for | Provided by | Changes in `maxicrawler.web` |
+| --- | --- | --- |
+| Multiple pages | A frontier — `DownloadQueue` again: lock-guarded, deduplicating by identity, handing out one item at a time | none |
+| Scope and depth | `CrawlPolicy` | none |
+| Politeness, `Crawl-delay` | A `PageFetcher` wrapping another one, like `Retrier` around the provider transport | none |
+| A live web UI | `CrawlResult` is a value and the CLI is a pure renderer; `DiscoveryPipeline` already publishes `ScanStarted`, `UrlDiscovered`, and `ScanFinished` | `PageFetched` / `PageFailed` events |
+| A resumable crawl | `DiscoveryRepository` already records every result with its `source_url`; a frontier table is an adapter | none |
+
+`CrawlResult` states both `requested_url` and `final_url` for exactly this
+reason. A redirect makes them differ, and a queue, a history, and an interface
+each need a different one; deriving either after one has been dropped is
+impossible.
+
+**One honest caveat.** `DiscoveryPipeline` is not thread-safe: `_statistics` is
+rebound without a lock and `DuplicateDetector` holds a plain `set`. Parallel
+crawling will need either a lock there or one pipeline per worker with merged
+`Statistics`. That is a contained change to an existing class, recorded now
+rather than discovered later.
+
+### What this sprint deliberately does not do
+
+No recursion, no robots.txt, no cookies, no authentication, no forms, no
+JavaScript, no headless browser, no sitemaps, no `srcset`, no canonical-URL
+de-duplication, no conditional requests, and no connection reuse. A page that
+builds its links in the browser will appear to have fewer than a reader sees.
+
 ## Design rules
 
 1. Keep public interfaces typed and small.
@@ -701,3 +921,12 @@ resources from different providers stay comparable.
 19. A stored document states its schema version and preserves members it does
     not recognise.
 20. One dead link never stops a run. Report it as a value and carry on.
+21. The crawler knows no provider, no download, and no library. It retrieves a
+    document and reports the URLs in it.
+22. A fetch is bounded in every dimension: scheme, redirects, content type, and
+    response size before *and* after decompression.
+23. Politeness is a policy object, never a condition inside the fetch loop.
+24. The crawler fetches one page and holds no state about the next one.
+    Recursion belongs to the caller.
+25. A URL found on a page goes through the same pipeline and the same plugins
+    as one found in a file. Never write a second scanner.

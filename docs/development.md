@@ -39,3 +39,10 @@ The `mega` extra (`cryptography`) is part of the `dev` dependencies, so
 Download tests write only into pytest's `tmp_path`, and the download manager is
 driven against a stub provider, so a full run touches neither the network nor
 anything outside the temporary directory.
+
+The web crawler is tested against a throwaway server on `127.0.0.1`
+(`tests/web_server.py`) rather than a mocked `urllib`. Redirects, compressed
+bodies, and content-type refusals are exactly where the bugs live, and none of
+them survives being stubbed out. The `brotli` extra is part of the `dev`
+dependencies; without it the handful of Brotli tests skip and the rest still
+pass, which is the same situation a user without the extra is in.

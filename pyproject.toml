@@ -29,7 +29,9 @@ maxicrawler = "maxicrawler.cli:app"
 
 [project.optional-dependencies]
 mega = ["cryptography>=43"]
+brotli = ["brotli>=1.1"]
 dev = [
+  "brotli>=1.1",
   "cryptography>=43",
   "mypy>=1.13",
   "pre-commit>=4.0",
@@ -64,3 +66,7 @@ strict = true
 mypy_path = "src"
 packages = ["maxicrawler"]
 warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["brotli", "brotlicffi"]
+ignore_missing_imports = true

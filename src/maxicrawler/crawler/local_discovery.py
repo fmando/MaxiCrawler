@@ -1,51 +1,14 @@
 """The offline discovery workflow over local documents."""
 
 from collections import Counter
-from dataclasses import dataclass
 from pathlib import Path
 
 from maxicrawler.crawler.discovery import DiscoveryPipeline
 from maxicrawler.crawler.repository import DiscoveryRepository, NullDiscoveryRepository
+from maxicrawler.crawler.summary import DiscoverySummary, to_plugin_usage
 from maxicrawler.documents import DocumentLoader
-from maxicrawler.domain import ScanSession, Statistics
+from maxicrawler.domain import ScanSession
 from maxicrawler.extractors import GenericUrlExtractor, UrlExtractor
-
-
-@dataclass(frozen=True, slots=True)
-class PluginUsage:
-    """How often one plugin was responsible for a discovered URL."""
-
-    name: str
-    count: int
-
-
-@dataclass(frozen=True, slots=True)
-class DiscoverySummary:
-    """The outcome of one offline discovery run."""
-
-    session: ScanSession
-    statistics: Statistics
-    plugin_usage: tuple[PluginUsage, ...]
-
-    @property
-    def documents_processed(self) -> int:
-        """Return how many source documents were read."""
-        return self.statistics.documents_processed
-
-    @property
-    def total_urls(self) -> int:
-        """Return every URL handed to the pipeline, duplicates included."""
-        return self.statistics.discovered_urls + self.statistics.duplicate_urls
-
-    @property
-    def unique_urls(self) -> int:
-        """Return the URLs that were seen for the first time."""
-        return self.statistics.discovered_urls
-
-    @property
-    def duplicates_removed(self) -> int:
-        """Return the URLs dropped because they had already been seen."""
-        return self.statistics.duplicate_urls
 
 
 class LocalDiscoveryService:
@@ -111,11 +74,5 @@ class LocalDiscoveryService:
         return DiscoverySummary(
             session=session,
             statistics=statistics,
-            plugin_usage=_to_usage(usage),
+            plugin_usage=to_plugin_usage(usage),
         )
-
-
-def _to_usage(counter: Counter[str]) -> tuple[PluginUsage, ...]:
-    """Return usage entries ordered by descending count, then by name."""
-    ordered = sorted(counter.items(), key=lambda item: (-item[1], item[0]))
-    return tuple(PluginUsage(name=name, count=count) for name, count in ordered)

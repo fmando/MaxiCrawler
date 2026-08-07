@@ -18,13 +18,14 @@
 ## Verarbeitungskette
 
 ```text
-Website / URL → Discovery → Plugin → Provider → Download Manager → Library
+Website → Crawler → Discovery → Plugin → Provider → Download Manager → Library
 ```
 
 Jede Station beantwortet genau eine Frage:
 
 | Station | Paket | Frage | I/O |
 | --- | --- | --- | --- |
+| Crawler | `maxicrawler.web` | *"Which URLs does this page contain?"* | Netzwerk |
 | Discovery | `maxicrawler.crawler` | *"Which URLs exist?"* | Dateisystem |
 | Plugin | `maxicrawler.plugins` | *"Can I classify this URL?"* | keins |
 | Provider | `maxicrawler.providers` | *"What can I do with this resource?"* | Netzwerk erlaubt |
@@ -48,10 +49,22 @@ Download Manager und Library sind bewusst **keine** Erweiterungsschichten. Ein
 neuer Host wird als Plugin und Provider ergänzt; an beiden ändert sich dabei
 keine Zeile.
 
+Der Crawler ist ebenfalls keine Erweiterungsschicht. Er kennt weder Plugins
+noch Provider: er holt ein Dokument, findet die URLs darin und übergibt sie
+unverändert an die Discovery-Pipeline. Ein auf einer Webseite gefundener Link
+wird deshalb von genau denselben Plugins klassifiziert wie einer aus einer
+lokalen Datei.
+
 ## Regeln
 
 -   Domain kennt keine Infrastruktur.
 -   Netzwerkzugriffe nur in der Infrastruktur.
+-   Der Crawler kennt keinen Provider, keinen Download und keine Library. Seine
+    einzige Aufgabe ist *"Dokument holen und URLs finden"*.
+-   Ein Abruf ist in jeder Dimension begrenzt: Schema, Umleitungen, Content-Type,
+    Antwortgröße vor **und** nach dem Entpacken.
+-   Höflichkeit ist ein Policy-Objekt, keine Bedingung in der Abrufschleife.
+-   Der Crawler holt genau eine Seite. Rekursion ist Sache des Aufrufers.
 -   Plugins kommunizieren über definierte Schnittstellen.
 -   Plugins führen kein I/O aus; Provider führen I/O nur über `HttpTransport`
     und `StreamTransport` aus.
