@@ -437,3 +437,88 @@ def test_a_visited_set_seeded_with_a_page_skips_it() -> None:
         report = engine.run(make_session(f"{base}/", max_depth=1))
 
     assert visited_paths(report, base) == ["/"]
+
+
+# --- events ------------------------------------------------------------------
+
+
+def test_a_crawl_announces_its_start_and_its_end() -> None:
+    from maxicrawler.events import CrawlFinished, CrawlStarted
+
+    bus = EventBus()
+    seen: list[object] = []
+    bus.subscribe(CrawlStarted, seen.append)
+    bus.subscribe(CrawlFinished, seen.append)
+
+    with crawl(make_site(), engine=make_engine(event_bus=bus), max_depth=1) as (report, base):
+        pass
+
+    started, finished = seen
+    assert isinstance(started, CrawlStarted)
+    assert started.seed_url == f"{base}/"
+    assert started.max_depth == 1
+    assert isinstance(finished, CrawlFinished)
+    assert finished.state == "completed"
+    assert finished.pages_visited == 3
+
+
+def test_every_read_page_is_announced() -> None:
+    from maxicrawler.events import PageCrawled
+
+    bus = EventBus()
+    seen: list[PageCrawled] = []
+    bus.subscribe(PageCrawled, seen.append)
+
+    with crawl(make_site(), engine=make_engine(event_bus=bus), max_depth=1) as (report, base):
+        pass
+
+    assert len(seen) == 3
+    assert {event.depth for event in seen} == {0, 1}
+    assert all(event.status == 200 for event in seen)
+    assert all(event.session_id == "crawl-1" for event in seen)
+
+
+def test_a_failed_page_is_announced_with_its_reason() -> None:
+    from maxicrawler.events import PageFailed
+
+    bus = EventBus()
+    seen: list[PageFailed] = []
+    bus.subscribe(PageFailed, seen.append)
+    site = make_site({"/": '<a href="/gone">gone</a>'})
+
+    with crawl(site, engine=make_engine(event_bus=bus), max_depth=1) as (report, base):
+        pass
+
+    assert len(seen) == 1
+    assert seen[0].url == f"{base}/gone"
+    assert "404" in seen[0].reason
+
+
+def test_an_interrupted_crawl_still_announces_its_end() -> None:
+    from maxicrawler.events import CrawlFinished
+
+    bus = EventBus()
+    control = CrawlControl()
+    seen: list[CrawlFinished] = []
+    bus.subscribe(CrawlFinished, seen.append)
+
+    class StopAfterFirst:
+        def __init__(self) -> None:
+            self.seen = 0
+
+        def may_fetch(self, url: str) -> PolicyDecision:
+            self.seen += 1
+            if self.seen > 1:
+                control.request_stop()
+            return PolicyDecision.allow()
+
+    with serve(make_site()) as base:
+        engine = make_engine(event_bus=bus, control=control, policy=StopAfterFirst())
+        engine.run(make_session(f"{base}/", max_depth=5))
+
+    assert seen[0].state == "interrupted"
+
+
+def test_a_crawl_without_a_bus_publishes_nothing_and_still_works() -> None:
+    with crawl(make_site(), max_depth=1) as (report, base):
+        assert report.state is CrawlState.COMPLETED

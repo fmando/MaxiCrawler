@@ -29,6 +29,13 @@ from collections import Counter
 from datetime import UTC, datetime
 from time import monotonic
 
+from maxicrawler.events import (
+    CrawlFinished,
+    CrawlStarted,
+    EventBus,
+    PageCrawled,
+    PageFailed,
+)
 from maxicrawler.web.errors import CrawlError, PolicyRefusedError
 from maxicrawler.web.frontier import (
     CrawlItem,
@@ -61,12 +68,14 @@ class CrawlEngine:
         visited: VisitedSet | None = None,
         policy: CrawlPolicy | None = None,
         control: CrawlControl | None = None,
+        event_bus: EventBus | None = None,
     ) -> None:
         self._service = service
         self._frontier = frontier if frontier is not None else FifoFrontier()
         self._visited = visited if visited is not None else InMemoryVisitedSet()
         self._policy = policy if policy is not None else AllowAllPolicy()
         self._control = control if control is not None else CrawlControl()
+        self._event_bus = event_bus
         self._skips: Counter[SkipReason] = Counter()
         self._pages: list[PageOutcome] = []
         self._fetched: set[str] = set()
@@ -106,6 +115,13 @@ class CrawlEngine:
         scan = session.scan_session
         self._control.state = CrawlState.RUNNING
         self._service.start(scan)
+        self._publish(
+            CrawlStarted(
+                session_id=session.session_id,
+                seed_url=session.seed_url,
+                max_depth=session.options.max_depth,
+            )
+        )
         try:
             self._seed(session)
             state = self._drain(session)
@@ -119,12 +135,22 @@ class CrawlEngine:
             raise
         summary = self._service.finish(scan)
         self._control.state = state
+        visited = sum(1 for page in self._pages if page.succeeded)
+        failed = len(self._pages) - visited
+        self._publish(
+            CrawlFinished(
+                session_id=session.session_id,
+                state=str(state),
+                pages_visited=visited,
+                pages_failed=failed,
+            )
+        )
         return CrawlReport(
             session=session,
             state=state,
             statistics=CrawlStatistics.of(
-                pages_visited=sum(1 for page in self._pages if page.succeeded),
-                pages_failed=sum(1 for page in self._pages if not page.succeeded),
+                pages_visited=visited,
+                pages_failed=failed,
                 skips=self._skips,
                 max_depth_reached=self._deepest,
                 frontier_remaining=self._frontier.pending,
@@ -134,6 +160,16 @@ class CrawlEngine:
             pages=tuple(self._pages),
             finished_at=datetime.now(UTC),
         )
+
+    def _publish(self, event: CrawlStarted | CrawlFinished | PageCrawled | PageFailed) -> None:
+        """Announce *event*, when anybody asked to be told.
+
+        The bus is optional so a library caller that wants none of this pays
+        nothing for it, and a future user interface subscribes rather than
+        polls.
+        """
+        if self._event_bus is not None:
+            self._event_bus.publish(event)
 
     def _reset(self, session: CrawlSession) -> None:
         """Start a fresh set of counters for this run.
@@ -194,8 +230,26 @@ class CrawlEngine:
                     error=str(error),
                 )
             )
+            self._publish(
+                PageFailed(
+                    session_id=session.session_id,
+                    url=item.url,
+                    depth=item.depth,
+                    reason=str(error),
+                )
+            )
             return
         self._record(item, result)
+        self._publish(
+            PageCrawled(
+                session_id=session.session_id,
+                url=item.url,
+                final_url=result.final_url,
+                depth=item.depth,
+                status=result.page.status,
+                link_count=result.link_count,
+            )
+        )
         self._enqueue_links(item, result)
 
     def _record(self, item: CrawlItem, result: CrawlResult) -> None:
