@@ -61,6 +61,7 @@ class WebDiscoveryService:
         self._policy = policy if policy is not None else AllowAllPolicy()
         self._repository = repository if repository is not None else NullDiscoveryRepository()
         self._scan_prose = scan_prose
+        self._usage: Counter[str] = Counter()
 
     @property
     def pipeline(self) -> DiscoveryPipeline:
@@ -72,8 +73,53 @@ class WebDiscoveryService:
         """Return the policy consulted before a page is fetched."""
         return self._policy
 
+    def start(self, session: ScanSession) -> None:
+        """Open *session*, resetting the tally a summary is built from.
+
+        A caller that crawls several pages calls this once, then
+        :meth:`crawl_page` per page, then :meth:`finish`. One crawl is one
+        discovery session however many pages it turns out to hold.
+        """
+        self._usage = Counter()
+        self._repository.start_session(session)
+        self._pipeline.start(session)
+
+    def finish(self, session: ScanSession) -> DiscoverySummary:
+        """Close *session* and return what it discovered in total."""
+        statistics = self._pipeline.finish(session)
+        self._repository.finish_session(session, statistics)
+        return DiscoverySummary(
+            session=session,
+            statistics=statistics,
+            plugin_usage=to_plugin_usage(self._usage),
+        )
+
     def crawl(self, url: str, session: ScanSession) -> CrawlResult:
-        """Fetch *url* and report the URLs its page contains.
+        """Fetch *url* in a session of its own and report what it contains.
+
+        A whole discovery session for a single page — which is what the
+        one-page workflow wants and what a recursive crawl must not do fifty
+        times over. :class:`~maxicrawler.web.engine.CrawlEngine` opens the
+        session itself and calls :meth:`crawl_page` instead.
+
+        Raises:
+            PolicyRefusedError: the policy refused this URL.
+            FetchError: the page could not be retrieved, or what came back was
+                not a page.
+        """
+        self.start(session)
+        result = self.crawl_page(url, session)
+        self.finish(session)
+        return result
+
+    def crawl_page(self, url: str, session: ScanSession) -> CrawlResult:
+        """Fetch one page and discover the URLs it contains.
+
+        The whole of the crawler's work — fetch, decode, parse, resolve,
+        discover — and none of the session bookkeeping around it. Statistics
+        accumulate across every call between :meth:`start` and :meth:`finish`,
+        so the summary on the result always describes the session so far
+        rather than this page alone.
 
         Raises:
             PolicyRefusedError: the policy refused this URL. The caller named
@@ -118,11 +164,12 @@ class WebDiscoveryService:
     def _discover(
         self, links: tuple[PageLink, ...], session: ScanSession, *, source_url: str
     ) -> DiscoverySummary:
-        """Run every link through the pipeline and return the session summary."""
-        self._repository.start_session(session)
-        self._pipeline.start(session)
+        """Run every link of one page through the pipeline.
+
+        The tally lives on the service rather than in this method, because a
+        crawl of forty pages needs one plugin count, not forty.
+        """
         self._pipeline.record_document()
-        usage: Counter[str] = Counter()
         for link in links:
             result = self._pipeline.discover(link.resolved_url, source_url=source_url)
             if result.is_duplicate:
@@ -130,11 +177,9 @@ class WebDiscoveryService:
             self._repository.save_result(session, result)
             resolution = result.resolution
             if resolution is not None and resolution.plugin is not None:
-                usage[resolution.plugin.name] += 1
-        statistics = self._pipeline.finish(session)
-        self._repository.finish_session(session, statistics)
+                self._usage[resolution.plugin.name] += 1
         return DiscoverySummary(
             session=session,
-            statistics=statistics,
-            plugin_usage=to_plugin_usage(usage),
+            statistics=self._pipeline.statistics,
+            plugin_usage=to_plugin_usage(self._usage),
         )
