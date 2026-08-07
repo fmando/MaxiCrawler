@@ -1,0 +1,439 @@
+"""Tests for the recursive crawl engine, against a local multi-page site."""
+
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime
+
+import pytest
+from web_server import Site, serve
+
+from maxicrawler.crawler import DiscoveryPipeline
+from maxicrawler.events import EventBus
+from maxicrawler.web import PolicyRefusedError, UrllibPageFetcher, WebDiscoveryService
+from maxicrawler.web.engine import CrawlEngine
+from maxicrawler.web.frontier import CrawlItem, FifoFrontier, visit_key
+from maxicrawler.web.policy import PolicyDecision, SameDomainPolicy
+from maxicrawler.web.report import CrawlReport, SkipReason
+from maxicrawler.web.session import CrawlControl, CrawlOptions, CrawlSession, CrawlState
+
+MEGA_LINK = "https://mega.nz/file/AaBbCcDd#0123456789abcdefghijklmnopqrstuvwxyzABC"
+
+TREE = {
+    "/": '<a href="/a">a</a><a href="/b">b</a>',
+    "/a": '<a href="/a1">a1</a><a href="/">home</a>',
+    "/b": '<a href="/b1">b1</a>',
+    "/a1": '<a href="/a2">a2</a>',
+    "/b1": "<p>leaf</p>",
+    "/a2": "<p>leaf</p>",
+}
+
+
+def make_site(pages: dict[str, str] | None = None) -> Site:
+    """Return a local site serving *pages*, defaulting to the tree above."""
+    site = Site()
+    for path, markup in (pages if pages is not None else TREE).items():
+        site.add_html(path, markup)
+    return site
+
+
+def make_engine(**kwargs: object) -> CrawlEngine:
+    """Return an engine over a real fetcher with a short timeout."""
+    service = WebDiscoveryService(
+        DiscoveryPipeline(EventBus()),
+        fetcher=UrllibPageFetcher(user_agent="MaxiCrawler/test", timeout=5.0),
+    )
+    return CrawlEngine(service, **kwargs)  # type: ignore[arg-type]
+
+
+def make_session(seed: str, **options: object) -> CrawlSession:
+    """Return a crawl session over *seed*."""
+    return CrawlSession(
+        session_id="crawl-1",
+        seed_url=seed,
+        started_at=datetime.now(UTC),
+        options=CrawlOptions(**options),  # type: ignore[arg-type]
+    )
+
+
+@contextmanager
+def crawl(
+    site: Site, path: str = "/", *, engine: CrawlEngine | None = None, **options: object
+) -> Iterator[tuple[CrawlReport, str]]:
+    """Run a crawl over *site* and yield the report with the base URL."""
+    with serve(site) as base:
+        runner = engine if engine is not None else make_engine()
+        yield runner.run(make_session(f"{base}{path}", **options)), base
+
+
+def visited_paths(report: CrawlReport, base: str) -> list[str]:
+    """Return the paths of every page the crawl fetched, in order."""
+    return [page.url.removeprefix(base) for page in report.pages]
+
+
+# --- recursion ---------------------------------------------------------------
+
+
+def test_depth_zero_fetches_the_seed_alone() -> None:
+    with crawl(make_site()) as (report, base):
+        assert visited_paths(report, base) == ["/"]
+        assert report.state is CrawlState.COMPLETED
+
+
+def test_depth_one_fetches_the_seed_and_what_it_links_to() -> None:
+    with crawl(make_site(), max_depth=1) as (report, base):
+        assert sorted(visited_paths(report, base)) == ["/", "/a", "/b"]
+
+
+def test_depth_two_reaches_one_level_further() -> None:
+    with crawl(make_site(), max_depth=2) as (report, base):
+        assert sorted(visited_paths(report, base)) == ["/", "/a", "/a1", "/b", "/b1"]
+
+
+def test_depth_three_reaches_the_whole_tree() -> None:
+    with crawl(make_site(), max_depth=3) as (report, base):
+        assert sorted(visited_paths(report, base)) == ["/", "/a", "/a1", "/a2", "/b", "/b1"]
+
+
+def test_a_deeper_limit_than_the_site_still_terminates() -> None:
+    with crawl(make_site(), max_depth=10) as (report, base):
+        assert len(report.pages) == 6
+        assert report.state is CrawlState.COMPLETED
+
+
+def test_pages_are_fetched_breadth_first() -> None:
+    with crawl(make_site(), max_depth=2) as (report, base):
+        depths = [page.depth for page in report.pages]
+
+    assert depths == sorted(depths)
+
+
+def test_a_page_records_where_it_was_linked_from() -> None:
+    with crawl(make_site(), max_depth=1) as (report, base):
+        children = [page for page in report.pages if page.depth == 1]
+
+    assert all(page.discovered_from == f"{base}/" for page in children)
+    assert report.pages[0].discovered_from is None
+
+
+# --- depth limiting ----------------------------------------------------------
+
+
+def test_links_at_the_maximum_depth_are_discovered_but_not_followed() -> None:
+    """Discovery counts them; the frontier never gets them."""
+    with crawl(make_site(), max_depth=1) as (report, base):
+        assert sorted(visited_paths(report, base)) == ["/", "/a", "/b"]
+        assert report.links_discovered > len(report.pages)
+        assert dict(report.statistics.skips_by_reason)[SkipReason.TOO_DEEP] > 0
+
+
+def test_the_deepest_level_reached_is_reported() -> None:
+    with crawl(make_site(), max_depth=2) as (report, base):
+        assert report.statistics.max_depth_reached == 2
+
+
+# --- scope -------------------------------------------------------------------
+
+
+def test_an_external_link_is_followed_when_no_scope_is_set() -> None:
+    """Hunting for share links is a first-class workflow, so this is default."""
+    site = make_site({"/": f'<a href="{MEGA_LINK}">share</a>'})
+
+    with crawl(site, max_depth=1) as (report, base):
+        assert dict(report.statistics.skips_by_reason).get(SkipReason.OUT_OF_SCOPE) is None
+
+
+def test_a_scope_keeps_the_crawl_on_its_own_host() -> None:
+    site = make_site({"/": f'<a href="/a">a</a><a href="{MEGA_LINK}">share</a>', "/a": "<p>x</p>"})
+
+    with serve(site) as base:
+        engine = make_engine(policy=SameDomainPolicy(f"{base}/"))
+        report = engine.run(make_session(f"{base}/", max_depth=2))
+
+    assert sorted(visited_paths(report, base)) == ["/", "/a"]
+    assert dict(report.statistics.skips_by_reason)[SkipReason.OUT_OF_SCOPE] == 1
+
+
+def test_a_mega_link_out_of_scope_is_still_discovered_and_classified() -> None:
+    """Skipping a fetch must not skip the discovery."""
+    site = make_site({"/": f'<a href="{MEGA_LINK}">share</a>'})
+
+    with serve(site) as base:
+        engine = make_engine(policy=SameDomainPolicy(f"{base}/"))
+        report = engine.run(make_session(f"{base}/", max_depth=2))
+
+    usage = {entry.name: entry.count for entry in report.summary.plugin_usage}
+    assert usage["mega"] == 1
+
+
+# --- duplicates and cycles ---------------------------------------------------
+
+
+def test_a_cycle_terminates() -> None:
+    site = make_site({"/": '<a href="/a">a</a>', "/a": '<a href="/">home</a>'})
+
+    with crawl(site, max_depth=10) as (report, base):
+        assert sorted(visited_paths(report, base)) == ["/", "/a"]
+        assert report.state is CrawlState.COMPLETED
+
+
+def test_a_self_link_terminates() -> None:
+    site = make_site({"/": '<a href="/">itself</a>'})
+
+    with crawl(site, max_depth=5) as (report, base):
+        assert visited_paths(report, base) == ["/"]
+
+
+def test_a_page_linked_from_many_pages_is_fetched_once() -> None:
+    site = make_site(
+        {
+            "/": '<a href="/a">a</a><a href="/b">b</a>',
+            "/a": '<a href="/shared">shared</a>',
+            "/b": '<a href="/shared">shared</a>',
+            "/shared": "<p>x</p>",
+        }
+    )
+
+    with crawl(site, max_depth=3) as (report, base):
+        assert visited_paths(report, base).count("/shared") == 1
+
+
+def test_two_anchors_into_one_page_are_one_fetch() -> None:
+    site = make_site({"/": '<a href="/a#intro">i</a><a href="/a#setup">s</a>', "/a": "<p>x</p>"})
+
+    with crawl(site, max_depth=1) as (report, base):
+        assert len(report.pages) == 2
+        assert dict(report.statistics.skips_by_reason)[SkipReason.ALREADY_SEEN] == 1
+
+
+def test_a_link_that_cannot_be_canonicalized_is_counted_as_unusable() -> None:
+    engine = make_engine()
+    engine._consider(CrawlItem(url="https://", depth=0))  # noqa: SLF001
+
+    assert engine.frontier.pending == 0
+
+
+# --- redirects ---------------------------------------------------------------
+
+
+def test_a_redirect_target_linked_directly_is_not_fetched_twice() -> None:
+    site = Site()
+    site.add_html("/", '<a href="/old">old</a><a href="/new">new</a>')
+    site.add("/old", status=302, location="/new", body=b"", content_type=None)
+    site.add_html("/new", "<p>arrived</p>")
+
+    with crawl(site, max_depth=2) as (report, base):
+        fetched = [page.final_url for page in report.pages if page.succeeded]
+
+    assert fetched.count(f"{base}/new") == 1
+
+
+def test_a_redirect_records_both_urls() -> None:
+    site = Site()
+    site.add_html("/", '<a href="/old">old</a>')
+    site.add("/old", status=302, location="/new", body=b"", content_type=None)
+    site.add_html("/new", "<p>arrived</p>")
+
+    with crawl(site, max_depth=1) as (report, base):
+        moved = report.pages[1]
+
+    assert moved.url == f"{base}/old"
+    assert moved.final_url == f"{base}/new"
+    assert moved.was_redirected is True
+
+
+def test_a_redirect_loop_fails_one_page_without_stopping_the_crawl() -> None:
+    site = Site()
+    site.add_html("/", '<a href="/loop">loop</a><a href="/fine">fine</a>')
+    site.add("/loop", status=302, location="/loop", body=b"", content_type=None)
+    site.add_html("/fine", "<p>x</p>")
+
+    with crawl(site, max_depth=1) as (report, base):
+        assert report.statistics.pages_visited == 2
+        assert report.statistics.pages_failed == 1
+        assert report.state is CrawlState.COMPLETED
+
+
+# --- failures ----------------------------------------------------------------
+
+
+def test_one_missing_page_does_not_stop_the_crawl() -> None:
+    site = make_site({"/": '<a href="/gone">gone</a><a href="/fine">fine</a>', "/fine": "<p>x</p>"})
+
+    with crawl(site, max_depth=1) as (report, base):
+        assert report.statistics.pages_failed == 1
+        assert report.statistics.pages_visited == 2
+        assert report.failures[0].error is not None
+
+
+def test_a_non_html_link_fails_that_page_only() -> None:
+    site = make_site({"/": '<a href="/data.json">data</a>'})
+    site.add("/data.json", body=b"{}", content_type="application/json")
+
+    with crawl(site, max_depth=1) as (report, base):
+        assert report.statistics.pages_failed == 1
+        assert report.state is CrawlState.COMPLETED
+
+
+def test_a_seed_that_cannot_be_read_stops_everything() -> None:
+    site = Site()
+
+    with serve(site) as base, pytest.raises(Exception, match="HTTP 404"):
+        make_engine().run(make_session(f"{base}/missing"))
+
+
+def test_a_seed_refused_by_the_policy_says_so() -> None:
+    site = make_site()
+
+    with serve(site) as base:
+        engine = make_engine(policy=SameDomainPolicy("https://elsewhere.test/"))
+        with pytest.raises(PolicyRefusedError, match="nothing to crawl"):
+            engine.run(make_session(f"{base}/", max_depth=1))
+
+
+# --- limits and termination --------------------------------------------------
+
+
+def test_the_page_ceiling_stops_the_crawl_and_says_so() -> None:
+    with crawl(make_site(), max_depth=5, max_pages=3) as (report, base):
+        assert len(report.pages) == 3
+        assert report.state is CrawlState.PAGE_LIMIT
+        assert report.statistics.frontier_remaining > 0
+
+
+def test_an_exhausted_frontier_completes_with_nothing_left() -> None:
+    with crawl(make_site(), max_depth=5) as (report, base):
+        assert report.state is CrawlState.COMPLETED
+        assert report.statistics.frontier_remaining == 0
+        assert report.was_complete is True
+
+
+def test_a_requested_stop_ends_the_crawl_with_a_full_report() -> None:
+    control = CrawlControl()
+    site = make_site()
+
+    class StopAfterFirst:
+        """Presses the stop button once the first page is done."""
+
+        def __init__(self) -> None:
+            self.seen = 0
+
+        def may_fetch(self, url: str) -> PolicyDecision:
+            self.seen += 1
+            if self.seen > 1:
+                control.request_stop()
+            return PolicyDecision.allow()
+
+    with serve(site) as base:
+        engine = make_engine(control=control, policy=StopAfterFirst())
+        report = engine.run(make_session(f"{base}/", max_depth=5))
+
+    assert report.state is CrawlState.INTERRUPTED
+    assert control.state is CrawlState.INTERRUPTED
+    assert report.statistics.pages_visited >= 1
+    assert report.summary.documents_processed == report.statistics.pages_visited
+
+
+def test_the_control_reports_the_terminal_state() -> None:
+    control = CrawlControl()
+
+    with crawl(make_site(), engine=make_engine(control=control)) as (report, base):
+        pass
+
+    assert control.state is CrawlState.COMPLETED
+
+
+# --- statistics --------------------------------------------------------------
+
+
+def test_pages_visited_equals_documents_processed() -> None:
+    with crawl(make_site(), max_depth=2) as (report, base):
+        assert report.statistics.pages_visited == report.summary.documents_processed
+
+
+def test_every_skipped_url_is_counted_with_a_reason() -> None:
+    with crawl(make_site(), max_depth=1) as (report, base):
+        by_reason = dict(report.statistics.skips_by_reason)
+
+    assert sum(by_reason.values()) == report.statistics.pages_skipped
+    assert report.statistics.pages_skipped > 0
+
+
+def test_the_crawl_reports_how_long_it_took() -> None:
+    with crawl(make_site(), max_depth=1) as (report, base):
+        assert report.statistics.elapsed_seconds >= 0.0
+
+
+def test_the_report_names_the_seed_and_the_session() -> None:
+    with crawl(make_site()) as (report, base):
+        assert report.seed_url == f"{base}/"
+        assert report.session.session_id == "crawl-1"
+
+
+def test_the_discovery_session_is_opened_once_for_the_whole_crawl() -> None:
+    from maxicrawler.events import ScanFinished, ScanStarted
+
+    bus = EventBus()
+    seen: list[object] = []
+    for event_type in (ScanStarted, ScanFinished):
+        bus.subscribe(event_type, seen.append)
+    service = WebDiscoveryService(
+        DiscoveryPipeline(bus),
+        fetcher=UrllibPageFetcher(user_agent="MaxiCrawler/test", timeout=5.0),
+    )
+
+    with serve(make_site()) as base:
+        CrawlEngine(service).run(make_session(f"{base}/", max_depth=2))
+
+    assert [type(event) for event in seen] == [ScanStarted, ScanFinished]
+
+
+# --- reuse and seams ---------------------------------------------------------
+
+
+def test_a_second_run_reports_its_own_numbers() -> None:
+    engine = make_engine()
+    site = make_site()
+
+    with serve(site) as base:
+        first = engine.run(make_session(f"{base}/", max_depth=1))
+        second = engine.run(make_session(f"{base}/a2", max_depth=0))
+
+    assert len(first.pages) == 3
+    assert len(second.pages) == 1
+
+
+def test_a_second_run_still_remembers_what_was_already_fetched() -> None:
+    """Counters reset between runs; identity deliberately does not.
+
+    That is what lets several seeds be crawled without fetching a page they
+    share, and it is why the visited set is injected rather than owned.
+    """
+    engine = make_engine()
+    site = make_site()
+
+    with serve(site) as base:
+        engine.run(make_session(f"{base}/", max_depth=1))
+        with pytest.raises(PolicyRefusedError, match="already seen"):
+            engine.run(make_session(f"{base}/a", max_depth=0))
+
+
+def test_a_supplied_frontier_and_visited_set_are_used() -> None:
+    frontier = FifoFrontier()
+    engine = make_engine(frontier=frontier)
+
+    with crawl(make_site(), engine=engine, max_depth=1) as (report, base):
+        assert engine.frontier is frontier
+        assert visit_key(f"{base}/") in engine.visited
+
+
+def test_a_visited_set_seeded_with_a_page_skips_it() -> None:
+    from maxicrawler.web.frontier import InMemoryVisitedSet
+
+    site = make_site({"/": '<a href="/a">a</a>', "/a": "<p>x</p>"})
+
+    with serve(site) as base:
+        visited = InMemoryVisitedSet([visit_key(f"{base}/a")])
+        engine = make_engine(visited=visited)
+        report = engine.run(make_session(f"{base}/", max_depth=1))
+
+    assert visited_paths(report, base) == ["/"]
