@@ -14,6 +14,9 @@ from maxicrawler.cli.crawling import (
     render_crawl,
     render_crawl_json,
 )
+from maxicrawler.cli.crawling import (
+    exit_code_for as crawl_exit_code_for,
+)
 from maxicrawler.cli.downloads import (
     exit_code_for as download_exit_code_for,
 )
@@ -35,7 +38,11 @@ from maxicrawler.crawler import (
     LocalDiscoveryService,
     NullDiscoveryRepository,
 )
-from maxicrawler.database import SQLiteDatabase, SQLiteDiscoveryRepository
+from maxicrawler.database import (
+    SQLiteCrawlRepository,
+    SQLiteDatabase,
+    SQLiteDiscoveryRepository,
+)
 from maxicrawler.domain import (
     Availability,
     ResourceInspection,
@@ -71,6 +78,9 @@ from maxicrawler.web import (
     UrllibPageFetcher,
     WebDiscoveryService,
 )
+from maxicrawler.web.engine import CrawlEngine
+from maxicrawler.web.repository import CrawlRepository, NullCrawlRepository
+from maxicrawler.web.session import CrawlOptions, CrawlSession, RequestContext
 
 app = typer.Typer(help="Configuration and runtime tools for MaxiCrawler.", no_args_is_help=True)
 ConfigPath = Annotated[Path, typer.Option(help="TOML configuration file to use.")]
@@ -122,7 +132,25 @@ def discover(
 
 @app.command()
 def crawl(
-    url: Annotated[str, typer.Argument(help="Web page to crawl.", show_default=False)],
+    url: Annotated[str, typer.Argument(help="Web page to start from.", show_default=False)],
+    depth: Annotated[
+        int | None,
+        typer.Option("--depth", "-d", help="How many links deep to follow. 0 is the seed alone."),
+    ] = None,
+    same_domain: Annotated[
+        bool | None,
+        typer.Option(
+            "--same-domain/--any-domain",
+            help="Stay on the seed's host, or follow links anywhere.",
+        ),
+    ] = None,
+    include_subdomains: Annotated[
+        bool,
+        typer.Option("--include-subdomains", help="Count subdomains as the same domain."),
+    ] = False,
+    max_pages: Annotated[
+        int | None, typer.Option("--max-pages", help="Stop after this many pages.")
+    ] = None,
     config_path: Annotated[
         Path, typer.Option("--config", help="TOML configuration file to use.")
     ] = DEFAULT_CONFIG_PATH,
@@ -137,44 +165,51 @@ def crawl(
         typer.Option("--prose/--no-prose", help="Also read URLs written as plain text."),
     ] = True,
 ) -> None:
-    """Fetch one web page and discover the URLs it contains.
+    """Crawl a website, following links from the page you name.
 
-    Exactly one page is fetched; links are reported, never followed. Nothing is
-    downloaded and no provider is contacted — the URLs found here are run
-    through the same discovery pipeline and the same plugins as the ones
-    discover finds in a local document.
+    By default exactly one page is fetched and its links are reported without
+    being followed. --depth 2 follows them two levels, --depth 3 three, and so
+    on. Whatever is found goes through the same discovery pipeline and the same
+    plugins as the URLs discover finds in a local document.
 
-    Only HTML is read. JavaScript is not executed, no cookie is stored, and no
-    form is submitted, so a page that builds its links in the browser will
-    appear to have fewer of them than it shows a reader.
+    Links are followed onto other hosts unless --same-domain says otherwise,
+    because finding a share link on Mega or Pixeldrain is as much the point as
+    walking one site. --max-pages is the ceiling that keeps that finite.
 
-    robots.txt is not consulted yet. One page named by its operator is what a
-    browser fetches when the same person types the same address.
+    Nothing is downloaded and no provider is contacted. Only HTML is read:
+    JavaScript is not executed, no cookie is stored and no form is submitted,
+    so a page that builds its links in the browser will appear to have fewer of
+    them than it shows a reader.
 
-    The exit code is 0 when the page was read, 5 when it could not be
-    retrieved, and 6 when what answered was not a page.
+    robots.txt is not consulted yet. What you point this at is your
+    responsibility.
+
+    The exit code is 0 when the crawl ran to an end or to a limit it was given,
+    5 when the starting page could not be retrieved, 6 when it was not a page,
+    and 7 when the crawl was interrupted.
     """
     try:
         require_http_scheme(url)
     except ValueError as error:
         raise typer.BadParameter(f"{error}: {url}") from error
     settings = Settings.from_toml(config_path)
-    repository = _build_repository(settings, persist=persist)
-    service = WebDiscoveryService(
-        DiscoveryPipeline(EventBus()),
-        fetcher=UrllibPageFetcher(
-            user_agent=settings.user_agent,
-            timeout=settings.network_timeout,
-            max_response_bytes=settings.max_page_bytes,
-            max_redirects=settings.max_redirects,
-        ),
-        parser=HtmlLinkParser(max_links=settings.max_links),
-        repository=repository,
+    options = CrawlOptions(
+        max_depth=settings.crawl_depth if depth is None else depth,
+        max_pages=settings.crawl_max_pages if max_pages is None else max_pages,
+        same_domain=settings.crawl_same_domain if same_domain is None else same_domain,
+        include_subdomains=include_subdomains,
         scan_prose=prose,
     )
-    session = ScanSession(session_id=uuid4().hex, started_at=datetime.now(UTC))
+    session = CrawlSession(
+        session_id=uuid4().hex,
+        seed_url=url,
+        started_at=datetime.now(UTC),
+        options=options,
+        context=RequestContext(user_agent=settings.user_agent),
+    )
+    engine = _build_engine(settings, session, persist=persist)
     try:
-        result = service.crawl(url, session)
+        report = engine.run(session)
     except ContentTypeError as error:
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(EXIT_NOT_A_PAGE) from error
@@ -182,7 +217,8 @@ def crawl(
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(EXIT_FETCH_FAILED) from error
     render = render_crawl_json if as_json else render_crawl
-    typer.echo(render(result))
+    typer.echo(render(report))
+    raise typer.Exit(crawl_exit_code_for(report))
 
 
 @app.command()
@@ -307,6 +343,40 @@ def _build_repository(settings: Settings, *, persist: bool) -> DiscoveryReposito
     repository = SQLiteDiscoveryRepository(SQLiteDatabase(settings.database_path))
     repository.initialize()
     return repository
+
+
+def _build_crawl_repository(settings: Settings, *, persist: bool) -> CrawlRepository:
+    """Return the repository the crawl summary should be written to."""
+    if not persist:
+        return NullCrawlRepository()
+    repository = SQLiteCrawlRepository(SQLiteDatabase(settings.database_path))
+    repository.initialize()
+    return repository
+
+
+def _build_engine(settings: Settings, session: CrawlSession, *, persist: bool) -> CrawlEngine:
+    """Return the crawl engine wired for *session*.
+
+    The composition root, and the only place the crawl layer meets the
+    database, the plugin registry and the event bus.
+    """
+    options = session.options
+    service = WebDiscoveryService(
+        DiscoveryPipeline(EventBus()),
+        fetcher=UrllibPageFetcher(
+            user_agent=session.context.user_agent,
+            timeout=settings.network_timeout,
+            max_response_bytes=settings.max_page_bytes,
+            max_redirects=settings.max_redirects,
+        ),
+        parser=HtmlLinkParser(max_links=settings.max_links),
+        repository=_build_repository(settings, persist=persist),
+        scan_prose=options.scan_prose,
+    )
+    return CrawlEngine(
+        service,
+        repository=_build_crawl_repository(settings, persist=persist),
+    )
 
 
 def _classify(url: str) -> UrlClassification:

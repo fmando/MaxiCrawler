@@ -135,11 +135,36 @@ def test_the_deepest_level_reached_is_reported() -> None:
 
 
 def test_an_external_link_is_followed_when_no_scope_is_set() -> None:
-    """Hunting for share links is a first-class workflow, so this is default."""
-    site = make_site({"/": f'<a href="{MEGA_LINK}">share</a>'})
+    """Hunting for share links is a first-class workflow, so this is default.
 
-    with crawl(site, max_depth=1) as (report, base):
-        assert dict(report.statistics.skips_by_reason).get(SkipReason.OUT_OF_SCOPE) is None
+    "Elsewhere" is the same local server under its other hostname: 127.0.0.1
+    and localhost are one machine but two hosts, which exercises the scope rule
+    without the suite ever leaving this one.
+    """
+    site = Site()
+
+    with serve(site) as base:
+        elsewhere = f"http://localhost:{base.rsplit(':', 1)[1]}"
+        site.add_html("/", f'<a href="{elsewhere}/away">away</a>')
+        site.add_html("/away", "<p>elsewhere</p>")
+        report = make_engine().run(make_session(f"{base}/", max_depth=1))
+
+    assert dict(report.statistics.skips_by_reason).get(SkipReason.OUT_OF_SCOPE) is None
+    assert [outcome.url for outcome in report.pages][1] == f"{elsewhere}/away"
+
+
+def test_a_scope_refuses_the_same_machine_under_another_hostname() -> None:
+    site = Site()
+
+    with serve(site) as base:
+        elsewhere = f"http://localhost:{base.rsplit(':', 1)[1]}"
+        site.add_html("/", f'<a href="{elsewhere}/away">away</a>')
+        site.add_html("/away", "<p>elsewhere</p>")
+        engine = make_engine(policy=SameDomainPolicy(f"{base}/"))
+        report = engine.run(make_session(f"{base}/", max_depth=1))
+
+    assert len(report.pages) == 1
+    assert dict(report.statistics.skips_by_reason)[SkipReason.OUT_OF_SCOPE] == 1
 
 
 def test_a_scope_keeps_the_crawl_on_its_own_host() -> None:
@@ -522,3 +547,38 @@ def test_an_interrupted_crawl_still_announces_its_end() -> None:
 def test_a_crawl_without_a_bus_publishes_nothing_and_still_works() -> None:
     with crawl(make_site(), max_depth=1) as (report, base):
         assert report.state is CrawlState.COMPLETED
+
+
+def test_the_domain_option_is_honoured_without_wiring_a_policy() -> None:
+    """An option that only works when a caller also injects a policy is a trap.
+
+    Wired that way, a report and a database row would claim the crawl stayed on
+    one host while it happily wandered off it -- which is exactly what happened
+    until the outbound-connection guard caught it.
+    """
+    site = Site()
+
+    with serve(site) as base:
+        elsewhere = f"http://localhost:{base.rsplit(':', 1)[1]}"
+        site.add_html("/", f'<a href="{elsewhere}/away">away</a><a href="/a">a</a>')
+        site.add_html("/away", "<p>elsewhere</p>")
+        site.add_html("/a", "<p>x</p>")
+        report = make_engine().run(make_session(f"{base}/", max_depth=1, same_domain=True))
+
+    assert sorted(visited_paths(report, base)) == ["/", "/a"]
+    assert dict(report.statistics.skips_by_reason)[SkipReason.OUT_OF_SCOPE] == 1
+
+
+def test_an_injected_policy_is_asked_alongside_the_domain_option() -> None:
+    class RefuseLeaves:
+        def may_fetch(self, url: str) -> PolicyDecision:
+            if url.endswith("/a1"):
+                return PolicyDecision.refuse("no leaves")
+            return PolicyDecision.allow()
+
+    with serve(make_site()) as base:
+        engine = make_engine(policy=RefuseLeaves())
+        report = engine.run(make_session(f"{base}/", max_depth=3, same_domain=True))
+
+    assert "/a1" not in visited_paths(report, base)
+    assert "/b1" in visited_paths(report, base)

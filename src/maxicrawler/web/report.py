@@ -22,6 +22,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from maxicrawler.crawler import DiscoverySummary
+from maxicrawler.web.models import LinkKind
 from maxicrawler.web.session import CrawlSession, CrawlState
 
 
@@ -94,6 +95,9 @@ class CrawlStatistics:
     pages_failed: int = 0
     pages_skipped: int = 0
     skips_by_reason: tuple[tuple[SkipReason, int], ...] = ()
+    links_by_kind: tuple[tuple[LinkKind, int], ...] = ()
+    """Every link found, grouped by how it was written, in enum order."""
+
     max_depth_reached: int = 0
     frontier_remaining: int = 0
     """Pages still queued when the crawl stopped; non-zero after a limit."""
@@ -112,17 +116,20 @@ class CrawlStatistics:
         pages_visited: int,
         pages_failed: int,
         skips: Counter[SkipReason],
+        kinds: Counter[LinkKind] | None = None,
         max_depth_reached: int,
         frontier_remaining: int,
         elapsed_seconds: float,
     ) -> "CrawlStatistics":
         """Return the counters for one crawl, ordering skips by frequency."""
         ordered = sorted(skips.items(), key=lambda entry: (-entry[1], str(entry[0])))
+        counted = kinds or Counter()
         return cls(
             pages_visited=pages_visited,
             pages_failed=pages_failed,
             pages_skipped=sum(skips.values()),
             skips_by_reason=tuple(ordered),
+            links_by_kind=tuple((kind, counted[kind]) for kind in LinkKind if counted[kind]),
             max_depth_reached=max_depth_reached,
             frontier_remaining=frontier_remaining,
             elapsed_seconds=elapsed_seconds,

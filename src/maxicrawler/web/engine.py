@@ -45,8 +45,8 @@ from maxicrawler.web.frontier import (
     VisitedSet,
     visit_key,
 )
-from maxicrawler.web.models import CrawlResult
-from maxicrawler.web.policy import AllowAllPolicy, CrawlPolicy
+from maxicrawler.web.models import CrawlResult, LinkKind
+from maxicrawler.web.policy import AllowAllPolicy, CompositePolicy, CrawlPolicy, SameDomainPolicy
 from maxicrawler.web.report import CrawlReport, CrawlStatistics, PageOutcome, SkipReason
 from maxicrawler.web.repository import CrawlRepository, NullCrawlRepository
 from maxicrawler.web.service import WebDiscoveryService
@@ -79,7 +79,9 @@ class CrawlEngine:
         self._policy = policy if policy is not None else AllowAllPolicy()
         self._control = control if control is not None else CrawlControl()
         self._event_bus = event_bus
+        self._scope: CrawlPolicy = self._policy
         self._skips: Counter[SkipReason] = Counter()
+        self._kinds: Counter[LinkKind] = Counter()
         self._pages: list[PageOutcome] = []
         self._fetched: set[str] = set()
         self._deepest = 0
@@ -156,6 +158,7 @@ class CrawlEngine:
                 pages_visited=visited,
                 pages_failed=failed,
                 skips=self._skips,
+                kinds=self._kinds,
                 max_depth_reached=self._deepest,
                 frontier_remaining=self._frontier.pending,
                 elapsed_seconds=monotonic() - started,
@@ -188,9 +191,28 @@ class CrawlEngine:
         makes crawling three seeds without revisiting a shared page work.
         """
         self._skips = Counter()
+        self._kinds = Counter()
         self._pages = []
         self._deepest = 0
         self._max_depth = session.options.max_depth
+        self._scope = self._scope_for(session)
+
+    def _scope_for(self, session: CrawlSession) -> CrawlPolicy:
+        """Return the policy this crawl is actually held to.
+
+        The engine derives the domain restriction from the session rather than
+        leaving it to whoever wired the engine. An option that only takes
+        effect when a caller separately injects a matching policy is a trap:
+        the report and the database row would claim the crawl stayed on one
+        host while it wandered. An injected policy still applies — it is asked
+        alongside, and the first refusal wins.
+        """
+        if not session.options.same_domain:
+            return self._policy
+        scope = SameDomainPolicy(
+            session.seed_url, include_subdomains=session.options.include_subdomains
+        )
+        return CompositePolicy([scope, self._policy])
 
     def _seed(self, session: CrawlSession) -> None:
         """Queue the starting point, or say why there is nothing to crawl."""
@@ -286,6 +308,7 @@ class CrawlEngine:
         """Offer everything this page linked to for the next round."""
         depth = item.depth + 1
         for link in result.links:
+            self._kinds[link.kind] += 1
             self._consider(
                 CrawlItem(url=link.resolved_url, depth=depth, discovered_from=result.final_url)
             )
@@ -305,7 +328,7 @@ class CrawlEngine:
         if item.depth > self._max_depth:
             self._skips[SkipReason.TOO_DEEP] += 1
             return
-        if not self._policy.may_fetch(item.url).allowed:
+        if not self._scope.may_fetch(item.url).allowed:
             self._skips[SkipReason.OUT_OF_SCOPE] += 1
             return
         try:

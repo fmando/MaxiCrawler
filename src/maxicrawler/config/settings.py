@@ -35,6 +35,20 @@ class Settings:
     max_links: int = 10_000
     """How many links one page may contribute before the rest are dropped."""
 
+    crawl_depth: int = 0
+    """Default link distance a crawl follows; zero fetches the seed alone."""
+
+    crawl_max_pages: int = 50
+    """Default ceiling on how many pages one crawl fetches."""
+
+    crawl_same_domain: bool = False
+    """Whether a crawl stays on the seed's host unless told otherwise.
+
+    Off, so that following a share link to Mega or Pixeldrain keeps working.
+    Configurable here rather than hard-coded, because which of the two
+    workflows an installation mostly serves is an installation's business.
+    """
+
     def __post_init__(self) -> None:
         if not self.user_agent.strip():
             msg = "user_agent must not be empty"
@@ -62,6 +76,12 @@ class Settings:
             raise ValueError(msg)
         if self.max_links < 1:
             msg = "max_links must be at least 1"
+            raise ValueError(msg)
+        if self.crawl_depth < 0:
+            msg = "crawl_depth must not be negative"
+            raise ValueError(msg)
+        if self.crawl_max_pages < 1:
+            msg = "crawl_max_pages must be at least 1"
             raise ValueError(msg)
 
     @classmethod
@@ -91,6 +111,11 @@ class Settings:
             max_page_bytes=_int_value(app_config, "max_page_bytes", defaults.max_page_bytes),
             max_redirects=_int_value(app_config, "max_redirects", defaults.max_redirects),
             max_links=_int_value(app_config, "max_links", defaults.max_links),
+            crawl_depth=_int_value(app_config, "crawl_depth", defaults.crawl_depth),
+            crawl_max_pages=_int_value(app_config, "crawl_max_pages", defaults.crawl_max_pages),
+            crawl_same_domain=_bool_value(
+                app_config, "crawl_same_domain", defaults.crawl_same_domain
+            ),
         )
 
     def to_toml(self) -> str:
@@ -107,6 +132,9 @@ class Settings:
             f"max_page_bytes = {self.max_page_bytes}\n"
             f"max_redirects = {self.max_redirects}\n"
             f"max_links = {self.max_links}\n"
+            f"crawl_depth = {self.crawl_depth}\n"
+            f"crawl_max_pages = {self.crawl_max_pages}\n"
+            f"crawl_same_domain = {str(self.crawl_same_domain).lower()}\n"
         )
 
 
@@ -122,6 +150,14 @@ def _int_value(values: dict[str, Any], key: str, default: int) -> int:
     value = values.get(key, default)
     if isinstance(value, bool) or not isinstance(value, int):
         msg = f"{key} must be an integer"
+        raise ValueError(msg)
+    return value
+
+
+def _bool_value(values: dict[str, Any], key: str, default: bool) -> bool:
+    value = values.get(key, default)
+    if not isinstance(value, bool):
+        msg = f"{key} must be true or false"
         raise ValueError(msg)
     return value
 
