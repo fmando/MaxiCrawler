@@ -213,3 +213,86 @@ rebound without a lock and its duplicate detector holds a plain set, so
 parallel crawling needs either a lock there or one pipeline per worker with
 merged `Statistics`. That is a contained change to an existing class, and it
 is recorded here rather than discovered later.
+
+## ADR-018: The engine is a loop above the service, not a recursive service
+
+Recursion lives in `maxicrawler.web.engine`, which calls
+`WebDiscoveryService.crawl_page()` in a loop. The service still answers one
+question — *"which URLs does this page contain?"* — and knows nothing about
+frontiers, depth or scope.
+
+The alternative, a `depth` parameter on the service, would have put frontier
+state inside fetch → parse → discover. That is precisely what makes recursion a
+redesign rather than an addition: a service that owns a visited set cannot be
+called by a scheduler, cannot be driven by a queue it does not own, and cannot
+be reused for a single page without carrying the machinery for many.
+
+`crawl()` kept its signature and its meaning: a whole discovery session for one
+page. `start()` / `crawl_page()` / `finish()` is the same thing taken apart, and
+the engine is the only caller that needs the pieces.
+
+## ADR-019: The visited key is not the discovery key
+
+Two questions that look identical and are not:
+
+| | Question | Key |
+| --- | --- | --- |
+| `DuplicateDetector` | *"have I **discovered** this URL?"* | fragment **kept** |
+| `VisitedSet` | *"have I **fetched** this page?"* | fragment **removed** |
+
+`normalize_url` preserves fragments because a legacy Mega share keeps its
+handle and decryption key there (ADR-007). But `page#intro` and `page#setup`
+are one page to fetch. A crawler sharing one key with discovery would either
+fetch a page once per anchor in its own navigation menu, or destroy every Mega
+link it found.
+
+Enqueue-time identity is not sufficient on its own. When `/old` and `/new` are
+both linked from a page, both are queued before anyone knows a redirect makes
+them the same page, so pages that actually answered are tracked separately and
+checked again when an item is popped.
+
+`<link rel="canonical">` is recorded and never acted on. It is a claim by the
+page, not a fact about the URL, and skipping a URL that was never fetched loses
+every outgoing link on it. Content-level de-duplication belongs beside a
+content fingerprint, which this project does not have yet.
+
+## ADR-020: A session carries request context; a report never carries a credential
+
+"Session" names two things in a crawler, and they are separate types here.
+`CrawlSession` is the run — identity, seed, options, start time — and it is what
+gets summarized, serialized and stored. `RequestContext` is how requests are
+made, and it is the declared home of the cookie jar, credential and proxy that
+come later.
+
+The division with the fetcher is the other half. **The context holds the data; a
+fetcher decorator holds the behaviour.** Performing a login, refreshing a CSRF
+token or retrying a 401 belongs to something wrapping a `PageFetcher`, which is
+already a protocol, so neither the engine nor the discovery service changes when
+authentication arrives. The crawler never learns *how* it works.
+
+A report can reach a context by traversal, so the enforceable rule is narrower
+than "the report holds no credential": **nothing that serializes a report writes
+the context.** Neither the JSON renderer nor the SQLite adapter reads it, and
+each asserts that where it lives — the database file is searched for the secret,
+and both modules' syntax trees are checked.
+
+## ADR-021: The frontier orders, the visited set identifies
+
+`Frontier` decides *what comes next* and nothing else. It does not deduplicate,
+does not know about depth, and does not know about scope; by the time an item
+reaches it, the engine's single gate has already decided the page will be
+fetched. Mercator's crawler splits prioritisation from politeness for the same
+reason.
+
+A queue that also owned identity could not later be swapped for one that owns
+only order — and a priority frontier, per-host politeness queues, a persistent
+frontier and a distributed one are all changes to order alone.
+
+One limitation is recorded rather than hidden: `pop()` returning `None` means
+*"nothing left"*, and a scheduler needs to distinguish that from *"nothing
+yet"*. That is one added member on the protocol and one branch in the loop.
+
+The engine derives the scope from the session rather than trusting a caller to
+inject a matching policy. An option that silently does nothing unless wired
+correctly would let a report and a database row claim a crawl stayed on one
+host while it wandered off it.

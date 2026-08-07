@@ -16,8 +16,11 @@ config, utils
 downloader → providers → plugins (pure URL parsing only); never the reverse
           ↘ library → domain
           ↘ documents, extractors (reused for reading a source of links)
+web.engine → web.service → web.fetcher / parser / resolve / encoding
+           ↘ web.frontier, web.session, web.report, web.policy
+           ↘ web.repository port ← database implements it structurally
 web → crawler (pipeline, repository port, summary)
-    ↘ extractors (the prose-URL rule)
+    ↘ extractors (the prose-URL rule), events
     ↘ domain, utils; never providers, downloader, or library
 crawler → extractors → documents
        ↘ plugins (protocol, registry, resolver)
@@ -52,8 +55,8 @@ SQLite metadata storage, plugin discovery, and a CLI. The `crawler`,
 or crawling behavior is implemented yet.
 
 The `crawler` and `extractors` packages were filled in by later sprints,
-`downloader` by Sprint 7, and the `web` package was added by Sprint 8, as
-described below.
+`downloader` by Sprint 7, the `web` package by Sprint 8, and the crawl engine
+inside it by Sprint 9, as described below.
 
 Sprint 2 introduces a pure domain layer and synchronous events. The discovery
 pipeline is an in-memory application service: it accepts caller-provided URL
@@ -85,6 +88,11 @@ Sprint 8 adds the web layer, described under
 [The web layer](#the-web-layer). It is the first station of the chain and the
 first code that retrieves a document MaxiCrawler was not given. It fetches
 exactly one page and downloads nothing.
+
+Sprint 9 adds the crawl engine, described under
+[The crawl engine](#the-crawl-engine). It makes the crawler recursive purely by
+addition: a frontier, a visited set and a loop above the existing service,
+which itself keeps answering one question about one page.
 
 ## Plugin architecture
 
@@ -884,6 +892,254 @@ JavaScript, no headless browser, no sitemaps, no `srcset`, no canonical-URL
 de-duplication, no conditional requests, and no connection reuse. A page that
 builds its links in the browser will appear to have fewer than a reader sees.
 
+## The crawl engine
+
+Sprint 9 turns the single-page crawler into a recursive one, and does it
+entirely by addition: not one line of `fetcher`, `parser`, `resolve` or
+`encoding` changed.
+
+### Layers
+
+| Element | Module | Layer |
+| --- | --- | --- |
+| `CrawlItem`, `Frontier`, `FifoFrontier`, `VisitedSet`, `InMemoryVisitedSet`, `visit_key` | `maxicrawler.web.frontier` | Application |
+| `CrawlSession`, `CrawlOptions`, `RequestContext`, `CrawlState`, `CrawlControl` | `maxicrawler.web.session` | Application values |
+| `CrawlReport`, `PageOutcome`, `SkipReason`, `CrawlStatistics` | `maxicrawler.web.report` | Application values |
+| `SameDomainPolicy`, `CompositePolicy` | `maxicrawler.web.policy` | Application policy |
+| `CrawlEngine` | `maxicrawler.web.engine` | Application |
+| `CrawlRepository`, `NullCrawlRepository` | `maxicrawler.web.repository` | Port |
+| `SQLiteCrawlRepository` | `maxicrawler.database.crawls` | Infrastructure |
+| `render_crawl`, `render_crawl_json` | `maxicrawler.cli.crawling` | Interface adapter |
+
+### The one change to existing code
+
+`WebDiscoveryService.crawl()` used to open a discovery session, fetch one page
+and close it again. Called forty times that publishes forty `ScanStarted`
+events and forty separate plugin tallies for what is one crawl. The session
+bookkeeping therefore moved out:
+
+```python
+service.start(scan)  # once
+service.crawl_page(url, scan)  # per page — fetch, decode, parse, resolve, discover
+service.finish(scan)  # once
+```
+
+`crawl()` survives with its signature and behaviour intact; it is three lines
+over the new pair. The service still answers exactly one question.
+
+### The loop
+
+```text
+CrawlEngine.run(session)
+  repository.start_crawl(session)
+  service.start(scan_session)
+  consider(CrawlItem(seed, depth=0))          → nothing queued? that is an error
+
+  while not control.stop_requested:
+      pages == max_pages?          → PAGE_LIMIT
+      item = frontier.pop()        → None? COMPLETED
+      already fetched under another URL? → skip
+      result = service.crawl_page(item.url, scan_session)
+      claim(item.url); claim(result.final_url)
+      record PageOutcome
+      for link in result.links: consider(CrawlItem(link, depth + 1))
+
+  service.finish(scan_session)
+  repository.finish_crawl(session, report)    → CrawlReport
+```
+
+### One gate, and every refusal counted
+
+`_consider()` is the only place a URL is turned away:
+
+```python
+if item.depth > max_depth:
+    skips[TOO_DEEP] += 1
+elif not scope.may_fetch(item.url).allowed:
+    skips[OUT_OF_SCOPE] += 1
+elif not visited.register(visit_key(url)):
+    skips[ALREADY_SEEN] += 1
+else:
+    frontier.push(item)
+```
+
+Two consequences worth stating. The frontier only ever holds URLs that will
+really be fetched, which is what bounds its size without a cap. And a report
+can say *why* a crawl of a large site stopped at four pages, rather than only
+that it did.
+
+The order is deliberate: depth first because it costs nothing and rejects the
+most, identity last — so a URL refused for being off-site is *not* also
+remembered as seen, and a later crawl under a wider scope still finds it. The
+counters therefore count occurrences rather than distinct URLs.
+
+### Identity: two keys, and two moments
+
+`normalize_url` preserves URL fragments, because a legacy Mega share keeps its
+handle and decryption key there. But `page#intro` and `page#setup` are one page
+to fetch, so `visit_key()` strips the fragment. Discovery and the frontier
+answer different questions and must not share a key.
+
+Enqueue-time identity alone is not enough. When `/old` and `/new` are both
+linked from a page, both are queued *before* anyone knows a redirect makes them
+the same page. Pages that actually answered are therefore tracked separately
+and re-checked when an item is popped.
+
+`<link rel="canonical">` is recorded on the outcome and never acted on. It is a
+claim by the page, not a fact about the URL, and skipping a URL never fetched
+loses every outgoing link on it.
+
+### Scope
+
+`SameDomainPolicy` treats `www.example.org` and `example.org` as one site and
+matches subdomains label-wise, so `evilexample.org` is *not* inside
+`example.org` — the classic hole in a same-domain rule. It is not a registrable
+domain in the Public Suffix List sense; computing that needs the list, which is
+a dependency and a file that goes stale, so the limitation is documented and
+only ever narrows the scope.
+
+**It is off by default**, and that is a decision rather than an oversight.
+MaxiCrawler serves two workflows equally: crawling one website, where staying
+on it is the point, and hunting for share links, which live on Mega,
+Pixeldrain and GoFile *by definition*. `--max-pages` and `--depth` are what
+bound a crawl instead. The default is configurable through `crawl_same_domain`.
+
+The engine derives the scope from the session rather than trusting its caller
+to inject a matching policy. An option that silently does nothing unless wired
+correctly would let a report and a database row claim a crawl stayed on one
+host while it wandered off it.
+
+### Ending, and stopping
+
+| State | Meaning |
+| --- | --- |
+| `COMPLETED` | the frontier ran dry |
+| `PAGE_LIMIT` | `--max-pages` was reached; `frontier_remaining` is non-zero |
+| `INTERRUPTED` | Ctrl-C, or `CrawlControl.request_stop()` |
+
+All three produce a full report. Hitting a limit is the crawl doing what it was
+told, so it exits `0`; only an interruption gets a code of its own.
+
+One dead page never stops a run — a failure becomes a `PageOutcome` and the
+loop continues. The seed is the exception: a crawl whose starting point cannot
+be read has nothing to report, so the caller gets an exception.
+
+Ctrl-C is caught in the loop rather than in a signal handler. A handler is
+global process state, hostile to a library caller and awkward to test;
+`CrawlControl` gives a future Stop button exactly the same path.
+
+### Persistence
+
+A crawl stores its summary — what it was told, how it ended, its counters — in
+`crawl_sessions`, keyed by the same identifier as its `scan_sessions` row, so
+the two join without a second key and every URL a crawl found is reachable from
+the crawl that found it.
+
+Page outcomes are deliberately not stored yet. `PageOutcome` exists in memory
+for every page because the report needs it, so adding them is one `save_page`
+member, one call in the loop, and one table.
+
+Note what *is* already stored: every discovered URL, with its plugin and its
+category, through the existing discovery repository. Pages and links are
+different things.
+
+### Where authentication will go
+
+Two seams, and the split is the point:
+
+| | Seam | Holds |
+| --- | --- | --- |
+| **Data** | `RequestContext` on `CrawlSession` | headers today; a cookie jar, a credential, a proxy later |
+| **Behaviour** | a `PageFetcher` decorator | performing a login, refreshing a CSRF token, retrying a 401 |
+
+```python
+fetcher = ThrottledFetcher(AuthenticatedFetcher(UrllibPageFetcher(...), credentials))
+```
+
+Neither `CrawlEngine` nor `WebDiscoveryService` changes by a line, because
+`PageFetcher` is already a protocol and the engine only ever calls
+`crawl_page()`. The crawler never learns *how* authentication works.
+
+A report can reach a context by traversal, so the enforceable rule is that
+**nothing serializing a report writes it**. The JSON renderer and the SQLite
+adapter each assert that where they live: the database file is searched for the
+secret, and both modules' syntax trees are checked for any read of the context.
+
+### The `ThrottledFetcher` extension point
+
+Deliberately not implemented in this sprint. Politeness, rate limits, robots.txt
+and scheduling belong together and are one subject; splitting one of them off
+early would settle the shape of the other three by accident.
+
+The seam is already there and needs nothing new:
+
+```python
+class ThrottledFetcher:  # is itself a PageFetcher
+    def fetch(self, url: str) -> FetchedPage:
+        self._wait_for(host_of(url))
+        return self._inner.fetch(url)
+```
+
+Rate limiting is not a `CrawlPolicy`, on purpose: *"may I fetch this?"* and
+*"may I fetch it **yet**?"* are different questions, and waiting must not happen
+inside a policy check.
+
+### How a scheduler and a web interface plug in
+
+| Concern | Where it goes | Engine changes |
+| --- | --- | --- |
+| Which URL next | a `Frontier` implementation | none |
+| Politeness per host | `ThrottledFetcher` | none |
+| Persistent queue, resumable crawl | `SqliteFrontier`, a persistent `VisitedSet` | none |
+| Parallel workers | a thread pool around `pop()` | the loop only |
+| Waiting rather than finishing | `next_available_in()` on `Frontier` | one branch |
+| Live progress | `CrawlStarted`, `PageCrawled`, `PageFailed`, `CrawlFinished` on the event bus | none |
+| A Stop button | `CrawlControl.request_stop()` | none |
+| Crawl history | `CrawlRepository.stored_crawls()` | none |
+
+`pop()` returning `None` currently means *"nothing left"*; a scheduler needs to
+tell that apart from *"nothing yet"*. Recorded rather than hidden.
+
+**The blocker for parallelism is named and is not the engine.**
+`DiscoveryPipeline` is not thread-safe: `_statistics` is rebound without a lock
+and `DuplicateDetector` holds a plain `set`. That needs a lock, or one pipeline
+per worker with merged `Statistics`, before a second worker exists.
+
+### Outlook: crawl jobs
+
+A `CrawlSession` describes one crawl. It will most likely become part of a
+larger **crawl job** — the unit a web interface manages, starts, stops and
+lists:
+
+```text
+Job
+ ├── CrawlSession      which seed, which limits, how it ended
+ ├── Discovery         which URLs were found and classified
+ ├── Download Queue    which of them should be fetched
+ └── Result            what ended up in the library
+```
+
+The class keeps its name. A job is a bracket *around* a session, its discovery
+and its downloads — not a rename of any of them, and none of the four stations
+needs to learn anything about the others that it does not already know.
+
+### Testing, and one mistake worth recording
+
+The suite makes no outbound connections, and this sprint is where that stopped
+being free. With links followed off-host by default, a fixture holding a real
+URL quietly turns the test suite into a client of somebody else's server — which
+is exactly what happened while these tests were being written.
+
+Two things fixed it. Fixtures reach "elsewhere" through the *same* local server
+under its other hostname: `127.0.0.1` and `localhost` are one machine but two
+hosts, which exercises the scope rule without leaving it. And
+`tests/test_no_outbound_connections.py` guards `socket.create_connection`, so a
+repeat fails loudly instead of silently.
+
+That guard immediately paid for itself: it found that `CrawlOptions.same_domain`
+was honoured only by the CLI, so an engine used directly ignored it while the
+report still claimed the crawl had stayed put.
+
 ## Design rules
 
 1. Keep public interfaces typed and small.
@@ -930,3 +1186,14 @@ builds its links in the browser will appear to have fewer than a reader sees.
     Recursion belongs to the caller.
 25. A URL found on a page goes through the same pipeline and the same plugins
     as one found in a file. Never write a second scanner.
+26. Recursion is a loop above the crawler, never a parameter inside it.
+27. The frontier orders; the visited set identifies. Never one class for both.
+28. The key for *"already fetched"* is not the key for *"already discovered"*.
+    Discovery keeps fragments; the frontier drops them.
+29. Every URL a crawl turns away is counted with its reason.
+30. An option must take effect where it is declared. Deriving scope from the
+    session beats trusting a caller to inject a matching policy.
+31. A session carries request context; nothing that serializes a report writes
+    it. Assert that where the serializer lives.
+32. Tests never leave this machine. "Elsewhere" is the same server under
+    another hostname.

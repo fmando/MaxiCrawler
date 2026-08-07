@@ -21,9 +21,12 @@ The mission, core principles, and non-goals are described in
     long-lived, self-describing store
 -   0.8 Web Discovery ✅ — one page is fetched, parsed, and fed to the existing
     discovery pipeline
--   0.9 Desktop GUI
--   0.10 Scheduler & Automation
--   0.11 REST API
+-   0.9 Recursive Crawling ✅ — a frontier, a visited set and a crawl engine
+    above the single-page crawler
+-   0.10 Politeness & robots.txt
+-   0.11 Desktop GUI
+-   0.12 Scheduler & Automation
+-   0.13 REST API
 -   1.0 Stable Release
 
 ## The chain
@@ -34,6 +37,8 @@ Website → Crawler → Discovery → Plugin → Provider → Download Manager �
 
 Each station answers exactly one question:
 
+-   **Crawl Engine** — *"Which page comes next?"* Owns the frontier, the
+    visited set and the limits; fetches nothing itself.
 -   **Crawler** — *"Which URLs does this page contain?"* Fetches one page over
     HTTP; knows no provider, no download, and no library.
 -   **Discovery** — *"Which URLs exist?"* Normalizes, deduplicates, and
@@ -51,14 +56,19 @@ not change.
 
 ## Next
 
--   Recursive crawling — a frontier modelled on `DownloadQueue`, plus a depth
-    limit in the existing `CrawlPolicy`; the crawler itself does not change
--   robots.txt — a `RobotsPolicy` behind the same one-method seam, reading
-    through the same fetcher
--   Per-host politeness — a `PageFetcher` that wraps another one, so neither
-    the crawler nor the crawl loop learns about timing
+-   robots.txt — a `RobotsPolicy` behind the existing one-method `CrawlPolicy`
+    seam, reading through the same fetcher. The most pressing item on this
+    list: recursion means a crawl now fetches many pages rather than one
+-   Per-host politeness — a `ThrottledFetcher` wrapping another `PageFetcher`,
+    so neither the engine nor the crawler learns about timing
+-   Per-page persistence — one `save_page` member on `CrawlRepository`, one
+    call in the engine loop, and one table; `PageOutcome` already exists
+-   A priority frontier, and a persistent one for resumable crawls — both are
+    the same three-method protocol
 -   Making `DiscoveryPipeline` thread-safe, which parallel crawling needs
     before a frontier can be drained by more than one worker
+-   Crawl jobs — the unit a web interface manages, holding a `CrawlSession`
+    beside its discovery results and its downloads
 -   Further providers: Pixeldrain, GoFile, MediaFire
 -   Parallel downloads — a thread pool around the drain loop; the queue and the
     worker are already built for it
