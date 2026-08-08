@@ -975,16 +975,49 @@ counters therefore count occurrences rather than distinct URLs.
 
 ### Only what could be a page is followed
 
-A stylesheet, a script and an image are resources, not documents to walk. They
-are discovered, classified and counted like every other URL — finding resources
-is the whole point — but they are never fetched, because following one buys a
-round trip that ends in *"this is not a page"*, which the markup already said.
+Three filters, in order of what they cost, and the order matters: each one only
+handles what the cheaper one before it could not.
 
-The four kinds that remain are the ones a reader could follow: a link, a frame,
-a meta refresh, and a URL somebody wrote out in the text.
+**1. The kind of link it was written as.** A stylesheet, a script and an image
+are resources, not documents to walk. The four kinds that remain are the ones a
+reader could follow: a link, a frame, a meta refresh, and a URL somebody wrote
+out in the text. Costs nothing.
 
-This came out of the sprint's own acceptance run, which fetched seven CSS, JS
-and icon files and reported them as failed pages.
+**2. The extension its path ends in.** An `<a href="…​.pdf">` is an anchor, so
+filter 1 lets it through, and it is still never a page.
+`NON_PAGE_SUFFIXES` in `maxicrawler.web.resolve` is deliberately biased: a
+suffix missing from it costs one wasted request, while a suffix wrongly *in* it
+silently loses a page. So `.xml` is absent, and nothing a server routinely
+renders as HTML was ever a candidate. Costs nothing.
+
+**3. The content type of the reply.** What is left is what a URL cannot reveal —
+`/download?id=7` says nothing, its answer says `application/pdf`. Checked from
+the headers before the body is read, so it costs one round trip and no download.
+
+In all three cases the URL is **discovered, classified, counted and stored**
+exactly like any other; finding resources is the whole point of this project.
+Only the fetch is skipped, and every skip is counted under `not a page link`.
+
+A wrong content type is a *skip*, not a failure: `Pages failed` means something
+went wrong, and being told "this is not a page" is an answer rather than a
+fault. It does still cost a request, so the page ceiling counts **requests
+issued** rather than pages read — otherwise a site whose links all answer with
+something else could draw an unbounded number of them. `CrawlStatistics`
+therefore stores `pages_attempted`, and the report shows it when it differs
+from pages read plus pages failed, where it is the line that explains why a
+crawl stopped.
+
+One exception, deliberately: **a URL the operator names is always attempted.**
+An explicit instruction outranks a heuristic, and being told what actually came
+back beats being told the URL looked wrong. So `crawl <a pdf>` still reports the
+content type and exits 6.
+
+All of this came out of two real runs. The sprint's own acceptance run fetched
+seven CSS, JS and icon files and called them failed pages. Then a crawl of a
+sheet-music site spent **22 of 50 attempts** on `<a href="….pdf">` links and
+stopped at the ceiling having reached only depth 1 of the five it was given —
+the links had all been discovered and classified before any of those requests
+was made.
 
 ### Identity: two keys, and two moments
 
@@ -1204,9 +1237,15 @@ report still claimed the crawl had stayed put.
 28. The key for *"already fetched"* is not the key for *"already discovered"*.
     Discovery keeps fragments; the frontier drops them.
 29. Every URL a crawl turns away is counted with its reason.
-30. An option must take effect where it is declared. Deriving scope from the
+30. Never request what a URL already rules out. Filter by link kind, then by
+    extension, then by the content type of the reply — cheapest first.
+31. A URL the operator names is always attempted. An explicit instruction
+    outranks a heuristic.
+32. "This is not a page" is an answer, not a failure. It still costs a request,
+    so a ceiling counts requests issued rather than pages read.
+33. An option must take effect where it is declared. Deriving scope from the
     session beats trusting a caller to inject a matching policy.
-31. A session carries request context; nothing that serializes a report writes
+34. A session carries request context; nothing that serializes a report writes
     it. Assert that where the serializer lives.
-32. Tests never leave this machine. "Elsewhere" is the same server under
+35. Tests never leave this machine. "Elsewhere" is the same server under
     another hostname.
