@@ -49,6 +49,7 @@ from maxicrawler.web.models import CrawlResult, LinkKind
 from maxicrawler.web.policy import AllowAllPolicy, CompositePolicy, CrawlPolicy, SameDomainPolicy
 from maxicrawler.web.report import CrawlReport, CrawlStatistics, PageOutcome, SkipReason
 from maxicrawler.web.repository import CrawlRepository, NullCrawlRepository
+from maxicrawler.web.resolve import looks_like_a_page
 from maxicrawler.web.service import WebDiscoveryService
 from maxicrawler.web.session import CrawlControl, CrawlSession, CrawlState
 
@@ -321,12 +322,19 @@ class CrawlEngine:
 
         Everything is counted and everything reached the discovery pipeline
         already; only what could plausibly *be* a page is offered to the
-        frontier.
+        frontier. Two filters, and both save a request rather than interpret an
+        answer: the kind of link it was written as, and the extension its path
+        ends in.
+
+        This governs what the crawler picks up on its own. A URL the operator
+        named on the command line is always attempted — an explicit instruction
+        outranks a heuristic, and being told what came back beats being told it
+        looked wrong.
         """
         depth = item.depth + 1
         for link in result.links:
             self._kinds[link.kind] += 1
-            if link.kind not in FOLLOWABLE_KINDS:
+            if link.kind not in FOLLOWABLE_KINDS or not looks_like_a_page(link.resolved_url):
                 self._skips[SkipReason.NOT_A_PAGE] += 1
                 continue
             self._consider(

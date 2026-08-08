@@ -52,6 +52,96 @@ def is_http_url(url: str) -> bool:
     return parsed.scheme.lower() in HTTP_SCHEMES and bool(parsed.hostname)
 
 
+NON_PAGE_SUFFIXES = frozenset(
+    {
+        # documents
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".xls",
+        ".xlsx",
+        ".ppt",
+        ".pptx",
+        ".odt",
+        ".ods",
+        ".odp",
+        ".rtf",
+        ".epub",
+        ".mobi",
+        ".txt",
+        ".csv",
+        # archives and images
+        ".zip",
+        ".rar",
+        ".7z",
+        ".tar",
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".iso",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".bmp",
+        ".webp",
+        ".svg",
+        ".ico",
+        ".tif",
+        ".tiff",
+        # audio, video and binaries
+        ".mp3",
+        ".wav",
+        ".flac",
+        ".ogg",
+        ".m4a",
+        ".aac",
+        ".mp4",
+        ".m4v",
+        ".mkv",
+        ".avi",
+        ".mov",
+        ".webm",
+        ".wmv",
+        ".exe",
+        ".msi",
+        ".dmg",
+        ".deb",
+        ".rpm",
+        ".apk",
+        ".torrent",
+        # assets that are occasionally linked from an anchor
+        ".css",
+        ".js",
+        ".json",
+    }
+)
+"""File extensions that are never an HTML page.
+
+Deliberately conservative, and biased in one direction: a suffix missing from
+this set costs one wasted request, while a suffix wrongly *in* it silently
+loses a page. So ``.xml`` is absent — a document served as XHTML or a feed is
+plausible enough not to guess about — and anything that a server routinely
+renders as HTML (``.php``, ``.aspx``, ``.jsp``) was never a candidate.
+
+The set is data, so teaching the crawler about one more archive format is an
+entry rather than a change.
+"""
+
+
+def looks_like_a_page(url: str) -> bool:
+    """Return whether *url* could plausibly answer with an HTML page.
+
+    Judged from the path's extension alone, which is a heuristic and is
+    treated as one: it is used to avoid *asking*, never to decide what an
+    answer meant. A server that returns a PDF from ``/download?id=7`` is still
+    caught by the content type of its reply.
+    """
+    path = urlsplit(url).path
+    suffix = path[path.rfind(".") :].lower() if "." in path.rsplit("/", 1)[-1] else ""
+    return suffix not in NON_PAGE_SUFFIXES
+
+
 def resolve_link(base_url: str, raw_url: str) -> str | None:
     """Return *raw_url* as an absolute HTTP(S) URL, or ``None``.
 
