@@ -1,6 +1,8 @@
 """Tests for persisting the summary of a crawl."""
 
 import ast
+import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -8,6 +10,7 @@ import pytest
 
 from maxicrawler.crawler import DiscoverySummary, PluginUsage
 from maxicrawler.database import SQLiteCrawlRepository, SQLiteDatabase
+from maxicrawler.database.crawls import ADDED_COLUMNS
 from maxicrawler.domain import ScanSession, Statistics
 from maxicrawler.web.report import CrawlReport, CrawlStatistics, PageOutcome
 from maxicrawler.web.repository import CrawlRepository, NullCrawlRepository
@@ -136,10 +139,10 @@ def test_the_scope_options_are_kept_so_the_counters_can_be_read(
     stored = repository.stored_crawl("crawl-1")
 
     assert stored is not None
-    assert stored.options.max_depth == 2
-    assert stored.options.max_pages == 20
-    assert stored.options.same_domain is True
-    assert stored.options.include_subdomains is False
+    assert stored.max_depth == 2
+    assert stored.max_pages == 20
+    assert stored.same_domain is True
+    assert stored.include_subdomains is False
 
 
 @pytest.mark.parametrize(
@@ -281,3 +284,137 @@ def test_the_attempt_count_round_trips(repository: SQLiteCrawlRepository) -> Non
     stored = repository.stored_crawl("crawl-1")
     assert stored is not None
     assert stored.pages_attempted == 18
+
+
+# --- migrating a database from an earlier release -----------------------------
+
+SPRINT_9_SCHEMA = """
+CREATE TABLE crawl_sessions (
+    session_id TEXT PRIMARY KEY,
+    seed_url TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    state TEXT NOT NULL,
+    max_depth INTEGER NOT NULL DEFAULT 0,
+    max_pages INTEGER NOT NULL DEFAULT 0,
+    same_domain INTEGER NOT NULL DEFAULT 0,
+    include_subdomains INTEGER NOT NULL DEFAULT 0,
+    pages_visited INTEGER NOT NULL DEFAULT 0,
+    pages_failed INTEGER NOT NULL DEFAULT 0,
+    pages_skipped INTEGER NOT NULL DEFAULT 0,
+    links_discovered INTEGER NOT NULL DEFAULT 0,
+    max_depth_reached INTEGER NOT NULL DEFAULT 0,
+    frontier_remaining INTEGER NOT NULL DEFAULT 0,
+    elapsed_seconds REAL NOT NULL DEFAULT 0.0
+)
+"""
+"""``crawl_sessions`` exactly as the release that introduced it created it."""
+
+SPRINT_9_COLUMNS = frozenset(
+    {
+        "session_id",
+        "seed_url",
+        "started_at",
+        "finished_at",
+        "state",
+        "max_depth",
+        "max_pages",
+        "same_domain",
+        "include_subdomains",
+        "pages_visited",
+        "pages_failed",
+        "pages_skipped",
+        "links_discovered",
+        "max_depth_reached",
+        "frontier_remaining",
+        "elapsed_seconds",
+    }
+)
+
+
+def make_old_database(path: Path, *, with_row: bool = True) -> SQLiteCrawlRepository:
+    """Return a repository over a database written by the earlier release."""
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute(SPRINT_9_SCHEMA)
+        if with_row:
+            connection.execute(
+                "INSERT INTO crawl_sessions(session_id, seed_url, started_at, state, "
+                "max_depth, max_pages, pages_visited, links_discovered) "
+                "VALUES('older', 'https://older.test/', '2026-08-01T09:00:00+00:00', "
+                "'completed', 2, 50, 7, 300)"
+            )
+    return SQLiteCrawlRepository(SQLiteDatabase(path))
+
+
+def test_a_database_from_the_earlier_release_gains_the_new_column(tmp_path: Path) -> None:
+    """The reported bug: `no such column: pages_attempted` on an existing file."""
+    store = make_old_database(tmp_path / "maxicrawler.db")
+
+    added = store.initialize()
+
+    assert added == ("pages_attempted",)
+    assert "pages_attempted" in store.database.table_columns("crawl_sessions")
+
+
+def test_a_migrated_database_can_finish_a_crawl(tmp_path: Path) -> None:
+    """Where the failure actually landed: at the end, writing the summary."""
+    store = make_old_database(tmp_path / "maxicrawler.db")
+    store.initialize()
+    session = make_session()
+
+    store.start_crawl(session)
+    store.finish_crawl(session, make_report(session))
+
+    stored = store.stored_crawl("crawl-1")
+    assert stored is not None
+    assert stored.pages_attempted == 18
+
+
+def test_migrating_leaves_the_earlier_rows_readable(tmp_path: Path) -> None:
+    store = make_old_database(tmp_path / "maxicrawler.db")
+    store.initialize()
+
+    stored = store.stored_crawl("older")
+
+    assert stored is not None
+    assert stored.seed_url == "https://older.test/"
+    assert stored.pages_visited == 7
+    assert stored.links_discovered == 300
+    assert stored.pages_attempted == 0
+
+
+def test_migrating_twice_changes_nothing(tmp_path: Path) -> None:
+    store = make_old_database(tmp_path / "maxicrawler.db")
+
+    assert store.initialize() == ("pages_attempted",)
+    assert store.initialize() == ()
+    assert store.initialize() == ()
+
+
+def test_a_fresh_database_needs_no_migration(tmp_path: Path) -> None:
+    store = SQLiteCrawlRepository(SQLiteDatabase(tmp_path / "fresh.db"))
+
+    assert store.initialize() == ()
+    assert "pages_attempted" in store.database.table_columns("crawl_sessions")
+
+
+def test_every_column_added_since_the_first_release_is_declared() -> None:
+    """The guard against this bug returning.
+
+    Adding a column to SCHEMA without declaring it in ADDED_COLUMNS fails here,
+    rather than in an operator's crawl three weeks later.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as directory:
+        store = SQLiteCrawlRepository(SQLiteDatabase(Path(directory) / "current.db"))
+        store.initialize()
+        current = store.database.table_columns("crawl_sessions")
+
+    assert current == SPRINT_9_COLUMNS | set(ADDED_COLUMNS)
+
+
+def test_every_added_column_carries_a_default() -> None:
+    """Without one, ALTER TABLE refuses to add it to a table holding rows."""
+    for name, definition in ADDED_COLUMNS.items():
+        assert "DEFAULT" in definition.upper(), name

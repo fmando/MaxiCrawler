@@ -18,13 +18,32 @@ exists for one.
 """
 
 import sqlite3
+from collections.abc import Mapping
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 
 from maxicrawler.database.sqlite import SQLiteDatabase
 from maxicrawler.web.report import CrawlReport
-from maxicrawler.web.session import CrawlOptions, CrawlSession, CrawlState
+from maxicrawler.web.session import CrawlSession, CrawlState
+
+TABLE = "crawl_sessions"
+"""The one table this adapter owns."""
+
+ADDED_COLUMNS: Mapping[str, str] = {
+    "pages_attempted": "INTEGER NOT NULL DEFAULT 0",
+}
+"""Columns that arrived after ``crawl_sessions`` was first released.
+
+``CREATE TABLE IF NOT EXISTS`` does nothing to a table that already exists, so a
+database written by an earlier release keeps the shape it was created with. Every
+column added since then is declared here and appended by :meth:`initialize`.
+
+Each definition must carry a default, because an existing row has to stay valid
+without being rewritten. ``tests/test_crawl_repository.py`` asserts that this
+mapping and the ``CREATE TABLE`` above it stay in step, so forgetting an entry
+fails a test rather than an operator's crawl.
+"""
 
 SCHEMA = (
     """
@@ -59,6 +78,13 @@ class StoredCrawl:
     A summary, not a recipe: the options that defined the *scope* of the crawl
     are kept because they explain the counters beside them, while one that only
     shaped what was read from a page is not.
+
+    The scope fields are held **flat, not as a**
+    :class:`~maxicrawler.web.session.CrawlOptions`. A stored row is a record of
+    what happened, and reading a record must not re-impose today's rules on it:
+    building an options object here made a row whose ``max_pages`` predates the
+    current validation crash the reader instead of being reported. What was
+    written is what is read back.
     """
 
     session_id: str
@@ -66,7 +92,10 @@ class StoredCrawl:
     started_at: datetime
     finished_at: datetime | None
     state: CrawlState
-    options: CrawlOptions
+    max_depth: int
+    max_pages: int
+    same_domain: bool
+    include_subdomains: bool
     pages_visited: int
     pages_failed: int
     pages_attempted: int
@@ -92,11 +121,21 @@ class SQLiteCrawlRepository:
         """Return the underlying database adapter."""
         return self._database
 
-    def initialize(self) -> None:
-        """Create the crawl table if it does not exist yet."""
+    def initialize(self) -> tuple[str, ...]:
+        """Create the crawl table, or bring an existing one up to date.
+
+        Safe to call on every run, and it has to be: a database written by an
+        earlier release is otherwise missing the columns this one writes, and
+        the failure lands at the *end* of a crawl — after all the work, when the
+        summary is written.
+
+        Returns the columns that had to be appended, so a caller can say what it
+        migrated.
+        """
         with closing(self._database.connect()) as connection, connection:
             for statement in SCHEMA:
                 connection.execute(statement)
+        return self._database.add_missing_columns(TABLE, ADDED_COLUMNS)
 
     def start_crawl(self, session: CrawlSession) -> None:
         """Record the beginning of *session*, replacing any earlier run of it."""
@@ -172,12 +211,10 @@ def _to_stored_crawl(row: sqlite3.Row) -> StoredCrawl:
         started_at=datetime.fromisoformat(str(row["started_at"])),
         finished_at=None if finished_at is None else datetime.fromisoformat(str(finished_at)),
         state=CrawlState(str(row["state"])),
-        options=CrawlOptions(
-            max_depth=int(row["max_depth"]),
-            max_pages=int(row["max_pages"]),
-            same_domain=bool(row["same_domain"]),
-            include_subdomains=bool(row["include_subdomains"]),
-        ),
+        max_depth=int(row["max_depth"]),
+        max_pages=int(row["max_pages"]),
+        same_domain=bool(row["same_domain"]),
+        include_subdomains=bool(row["include_subdomains"]),
         pages_visited=int(row["pages_visited"]),
         pages_failed=int(row["pages_failed"]),
         pages_attempted=int(row["pages_attempted"]),
