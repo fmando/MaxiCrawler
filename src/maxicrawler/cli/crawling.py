@@ -105,6 +105,7 @@ def render_crawl_json(report: CrawlReport) -> str:
         "statistics": {
             "pages_visited": statistics.pages_visited,
             "pages_failed": statistics.pages_failed,
+            "pages_attempted": statistics.pages_attempted,
             "pages_skipped": statistics.pages_skipped,
             "skips_by_reason": {str(reason): count for reason, count in statistics.skips_by_reason},
             "links_by_kind": {str(kind): count for kind, count in statistics.links_by_kind},
@@ -164,6 +165,10 @@ def _render_pages(report: CrawlReport) -> list[str]:
         lines.append(f"  ... and {remaining} more")
     if report.statistics.pages_failed:
         lines.append(f"Pages failed: {report.statistics.pages_failed}")
+    if report.statistics.requests_without_a_page:
+        # Only when it differs, and then it explains the ceiling: these
+        # requests cost a round trip without producing a page or a failure.
+        lines.append(f"Pages attempted: {report.statistics.pages_attempted}")
     lines.extend(_render_skips(report))
     return lines
 

@@ -101,6 +101,15 @@ class CrawlStatistics:
     """Pages fetched and read. Equals ``documents_processed``."""
 
     pages_failed: int = 0
+    pages_attempted: int = 0
+    """Requests the crawl actually issued, and what the page ceiling counts.
+
+    Larger than ``pages_visited + pages_failed`` when a server answered with
+    something that was not a page: that costs a request but is neither a page
+    read nor a failure. The ceiling is measured against this so a site full of
+    such links cannot draw an unbounded number of requests.
+    """
+
     pages_skipped: int = 0
     skips_by_reason: tuple[tuple[SkipReason, int], ...] = ()
     links_by_kind: tuple[tuple[LinkKind, int], ...] = ()
@@ -113,9 +122,9 @@ class CrawlStatistics:
     elapsed_seconds: float = 0.0
 
     @property
-    def pages_attempted(self) -> int:
-        """Return how many pages were fetched or tried."""
-        return self.pages_visited + self.pages_failed
+    def requests_without_a_page(self) -> int:
+        """Return how many requests answered with something that was not a page."""
+        return max(0, self.pages_attempted - self.pages_visited - self.pages_failed)
 
     @classmethod
     def of(
@@ -123,6 +132,7 @@ class CrawlStatistics:
         *,
         pages_visited: int,
         pages_failed: int,
+        pages_attempted: int,
         skips: Counter[SkipReason],
         kinds: Counter[LinkKind] | None = None,
         max_depth_reached: int,
@@ -135,6 +145,7 @@ class CrawlStatistics:
         return cls(
             pages_visited=pages_visited,
             pages_failed=pages_failed,
+            pages_attempted=pages_attempted,
             pages_skipped=sum(skips.values()),
             skips_by_reason=tuple(ordered),
             links_by_kind=tuple((kind, counted[kind]) for kind in LinkKind if counted[kind]),

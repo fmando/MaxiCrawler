@@ -522,3 +522,47 @@ def test_the_configured_user_agent_is_sent() -> None:
         runner.invoke(app, ["crawl", f"{base}/", "--no-persist"])
 
     assert "MaxiCrawler" in site.requests[0].headers["User-Agent"]
+
+
+def test_the_report_explains_a_ceiling_that_pages_do_not_add_up_to() -> None:
+    statistics = CrawlStatistics(pages_visited=46, pages_failed=0, pages_attempted=50)
+    pages = tuple(page(f"https://example.test/{index}", 1) for index in range(46))
+
+    text = render_crawl(make_report(pages=pages, statistics=statistics))
+
+    assert "Pages visited: 46" in text
+    assert "Pages attempted: 50" in text
+
+
+def test_the_report_stays_quiet_when_every_request_produced_a_page() -> None:
+    statistics = CrawlStatistics(pages_visited=2, pages_failed=1, pages_attempted=3)
+    pages = (page("https://example.test/", 0), page("https://example.test/a", 1))
+
+    text = render_crawl(make_report(pages=pages, statistics=statistics))
+
+    assert "Pages attempted" not in text
+
+
+def test_the_json_report_carries_the_attempt_count() -> None:
+    statistics = CrawlStatistics(pages_visited=46, pages_failed=0, pages_attempted=50)
+
+    document = json.loads(render_crawl_json(make_report(statistics=statistics)))
+
+    assert document["statistics"]["pages_attempted"] == 50
+
+
+def test_a_file_link_is_reported_but_never_requested() -> None:
+    """The behaviour a real crawl of a sheet-music site was losing 44% to."""
+    site = make_site({"/": '<a href="/sheet.pdf">sheet</a><a href="/a">a</a>', "/a": "<p>x</p>"})
+    site.add("/sheet.pdf", body=b"%PDF-1.7", content_type="application/pdf")
+
+    with serve(site) as base:
+        result = runner.invoke(
+            app, ["crawl", f"{base}/", "--depth", "1", "--same-domain", "--no-persist"]
+        )
+
+    assert result.exit_code == EXIT_CRAWLED
+    assert "Pages visited: 2" in result.stdout
+    assert "Pages failed" not in result.stdout
+    assert "not a page link: 1" in result.stdout
+    assert "/sheet.pdf" not in {request.path for request in site.requests}

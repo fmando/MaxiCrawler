@@ -36,7 +36,7 @@ from maxicrawler.events import (
     PageCrawled,
     PageFailed,
 )
-from maxicrawler.web.errors import CrawlError, PolicyRefusedError
+from maxicrawler.web.errors import ContentTypeError, CrawlError, PolicyRefusedError
 from maxicrawler.web.frontier import (
     CrawlItem,
     FifoFrontier,
@@ -97,6 +97,7 @@ class CrawlEngine:
         self._kinds: Counter[LinkKind] = Counter()
         self._pages: list[PageOutcome] = []
         self._fetched: set[str] = set()
+        self._attempts = 0
         self._deepest = 0
         self._max_depth = 0
 
@@ -170,6 +171,7 @@ class CrawlEngine:
             statistics=CrawlStatistics.of(
                 pages_visited=visited,
                 pages_failed=failed,
+                pages_attempted=self._attempts,
                 skips=self._skips,
                 kinds=self._kinds,
                 max_depth_reached=self._deepest,
@@ -206,6 +208,7 @@ class CrawlEngine:
         self._skips = Counter()
         self._kinds = Counter()
         self._pages = []
+        self._attempts = 0
         self._deepest = 0
         self._max_depth = session.options.max_depth
         self._scope = self._scope_for(session)
@@ -242,7 +245,10 @@ class CrawlEngine:
         while True:
             if self._control.stop_requested:
                 return CrawlState.INTERRUPTED
-            if len(self._pages) >= options.max_pages:
+            if self._attempts >= options.max_pages:
+                # Requests, not pages read. A site whose links all answer with
+                # something other than a page must not be able to draw an
+                # unbounded number of them.
                 return CrawlState.PAGE_LIMIT
             item = self._frontier.pop()
             if item is None:
@@ -258,8 +264,17 @@ class CrawlEngine:
     def _visit(self, item: CrawlItem, session: CrawlSession) -> None:
         """Fetch one page, record what happened, and queue what it linked to."""
         self._deepest = max(self._deepest, item.depth)
+        self._attempts += 1
         try:
             result = self._service.crawl_page(item.url, session.scan_session)
+        except ContentTypeError:
+            # Not a failure. We asked "is this a page?" and got a clear no,
+            # which is the same answer the extension filter gives for free —
+            # this is the residue it cannot judge from a URL alone.
+            if not self._pages:
+                raise
+            self._skips[SkipReason.NOT_A_PAGE] += 1
+            return
         except CrawlError as error:
             if not self._pages:
                 raise

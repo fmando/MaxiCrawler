@@ -50,6 +50,7 @@ def make_report(
         statistics=CrawlStatistics(
             pages_visited=14,
             pages_failed=1,
+            pages_attempted=18,
             pages_skipped=128,
             max_depth_reached=2,
             frontier_remaining=3,
@@ -268,3 +269,15 @@ def test_the_schema_has_no_column_for_a_credential() -> None:
 
     for forbidden in ("cookie", "header", "auth", "token", "password", "proxy"):
         assert forbidden not in schema
+
+
+def test_the_attempt_count_round_trips(repository: SQLiteCrawlRepository) -> None:
+    """It explains a ceiling that pages_visited plus pages_failed does not."""
+    session = make_session()
+    repository.start_crawl(session)
+
+    repository.finish_crawl(session, make_report(session))
+
+    stored = repository.stored_crawl("crawl-1")
+    assert stored is not None
+    assert stored.pages_attempted == 18
