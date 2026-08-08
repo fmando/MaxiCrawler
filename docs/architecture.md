@@ -1081,6 +1081,31 @@ A crawl stores its summary — what it was told, how it ended, its counters — 
 the two join without a second key and every URL a crawl found is reachable from
 the crawl that found it.
 
+Every adapter creates its tables with `CREATE TABLE IF NOT EXISTS`, which does
+nothing at all to a table that already exists. A release that appends a column
+therefore leaves every existing database behind, and — because the new column is
+only named in the *write* at the end of a crawl — the failure lands after all
+the work is done. That happened once, with `pages_attempted`.
+
+So each adapter also declares which of its columns arrived after the table's
+first release (`ADDED_COLUMNS`), and `initialize()` appends the missing ones.
+Every definition carries a default, because an existing row has to stay valid
+without being rewritten, and a test asserts that the declaration and the
+`CREATE TABLE` stay in step — forgetting an entry fails a test rather than
+someone's crawl.
+
+This is not schema versioning and does not pretend to be: it cannot rename a
+column, change a type, or backfill from another table. When one of those is
+needed the answer is a `user_version` and an ordered list of migrations, which
+is the discipline `library.json` already has (ADR-013). Recorded in
+ROADMAP.md.
+
+A stored row is also read back **flat**, not turned into a validated domain
+object. `StoredCrawl` holds `max_depth` and `max_pages` as integers rather than
+a `CrawlOptions`, because reading a record must not re-impose today's rules on
+it — a row written before a validation rule existed has to be reportable, not a
+crash in the reader.
+
 Page outcomes are deliberately not stored yet. `PageOutcome` exists in memory
 for every page because the report needs it, so adding them is one `save_page`
 member, one call in the loop, and one table.
@@ -1243,9 +1268,13 @@ report still claimed the crawl had stayed put.
     outranks a heuristic.
 32. "This is not a page" is an answer, not a failure. It still costs a request,
     so a ceiling counts requests issued rather than pages read.
-33. An option must take effect where it is declared. Deriving scope from the
+33. A schema that gains a column gains a migration in the same commit.
+    `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists.
+34. A stored row is read back as data, not re-validated as a domain object.
+    A record written under older rules must stay readable.
+35. An option must take effect where it is declared. Deriving scope from the
     session beats trusting a caller to inject a matching policy.
-34. A session carries request context; nothing that serializes a report writes
+36. A session carries request context; nothing that serializes a report writes
     it. Assert that where the serializer lives.
-35. Tests never leave this machine. "Elsewhere" is the same server under
+37. Tests never leave this machine. "Elsewhere" is the same server under
     another hostname.

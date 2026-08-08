@@ -61,6 +61,12 @@ not change.
     list: recursion means a crawl now fetches many pages rather than one
 -   Per-host politeness — a `ThrottledFetcher` wrapping another `PageFetcher`,
     so neither the engine nor the crawler learns about timing
+-   Real schema versioning for the SQLite metadata database. Today each adapter
+    creates its tables with `CREATE TABLE IF NOT EXISTS` and declares the
+    columns it has added since, which covers an appended column and nothing
+    else. Renaming a column, changing a type, or backfilling a value needs a
+    `user_version` and an ordered list of migrations — the same discipline
+    `library.json` already has (ADR-013)
 -   Per-page persistence — one `save_page` member on `CrawlRepository`, one
     call in the engine loop, and one table; `PageOutcome` already exists
 -   A priority frontier, and a persistent one for resumable crawls — both are

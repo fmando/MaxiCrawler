@@ -3,6 +3,14 @@
 The adapter satisfies :class:`~maxicrawler.crawler.DiscoveryRepository`
 structurally and deliberately does not import it, so the ``database`` package
 stays independent of the discovery layer.
+
+These tables have not gained a column since they were introduced, so there is
+nothing to migrate. **If one is added, adding it to the ``CREATE TABLE`` below
+is not enough**: ``IF NOT EXISTS`` does nothing to a table that already exists,
+and every database written by an earlier release would keep its old shape until
+the first write failed. See
+:data:`maxicrawler.database.crawls.ADDED_COLUMNS` for how ``crawl_sessions``
+handles it, and copy that.
 """
 
 import sqlite3
