@@ -382,3 +382,116 @@ def test_malformed_markup_still_yields_its_links() -> None:
         result = make_service().crawl(f"{base}/", make_session())
 
     assert any(link.resolved_url.endswith("/a") for link in result.links)
+
+
+# --- one page versus one session ---------------------------------------------
+
+
+TWO_PAGE_SITE = {
+    "/a": '<a href="/one">one</a><a href="/two">two</a>',
+    "/b": '<a href="/two">two again</a><a href="/three">three</a>',
+}
+
+
+def test_crawling_two_pages_in_one_session_opens_it_once() -> None:
+    site = Site()
+    for path, markup in TWO_PAGE_SITE.items():
+        site.add_html(path, markup)
+    bus = EventBus()
+    starts: list[object] = []
+    finishes: list[object] = []
+    bus.subscribe(ScanStarted, starts.append)
+    bus.subscribe(ScanFinished, finishes.append)
+    service = make_service(pipeline=DiscoveryPipeline(bus))
+    session = make_session()
+
+    with serve(site) as base:
+        service.start(session)
+        service.crawl_page(f"{base}/a", session)
+        service.crawl_page(f"{base}/b", session)
+        summary = service.finish(session)
+
+    assert len(starts) == 1
+    assert len(finishes) == 1
+    assert summary.documents_processed == 2
+
+
+def test_statistics_accumulate_across_pages() -> None:
+    site = Site()
+    for path, markup in TWO_PAGE_SITE.items():
+        site.add_html(path, markup)
+    service = make_service()
+    session = make_session()
+
+    with serve(site) as base:
+        service.start(session)
+        service.crawl_page(f"{base}/a", session)
+        service.crawl_page(f"{base}/b", session)
+        summary = service.finish(session)
+
+    assert summary.total_urls == 4
+    assert summary.unique_urls == 3
+    assert summary.duplicates_removed == 1
+
+
+def test_plugin_usage_is_counted_once_for_the_whole_session() -> None:
+    site = Site()
+    site.add_html("/a", f'<a href="{MEGA_LINK}">share</a>')
+    site.add_html("/b", '<a href="/plain">plain</a>')
+    service = make_service()
+    session = make_session()
+
+    with serve(site) as base:
+        service.start(session)
+        service.crawl_page(f"{base}/a", session)
+        service.crawl_page(f"{base}/b", session)
+        summary = service.finish(session)
+
+    usage = {entry.name: entry.count for entry in summary.plugin_usage}
+    assert usage == {"generic": 1, "mega": 1}
+
+
+def test_a_page_result_reports_the_session_so_far() -> None:
+    site = Site()
+    for path, markup in TWO_PAGE_SITE.items():
+        site.add_html(path, markup)
+    service = make_service()
+    session = make_session()
+
+    with serve(site) as base:
+        service.start(session)
+        first = service.crawl_page(f"{base}/a", session)
+        second = service.crawl_page(f"{base}/b", session)
+        service.finish(session)
+
+    assert first.summary.documents_processed == 1
+    assert second.summary.documents_processed == 2
+
+
+def test_starting_a_second_session_resets_the_plugin_tally() -> None:
+    site = Site()
+    site.add_html("/a", f'<a href="{MEGA_LINK}">share</a>')
+    service = make_service()
+
+    with serve(site) as base:
+        service.start(make_session())
+        service.crawl_page(f"{base}/a", make_session())
+        second = ScanSession(session_id="crawl-2", started_at=datetime.now(UTC))
+        service.start(second)
+        summary = service.finish(second)
+
+    assert summary.plugin_usage == ()
+
+
+def test_crawl_still_opens_and_closes_a_session_of_its_own() -> None:
+    site = Site()
+    site.add_html("/a", '<a href="/one">one</a>')
+    bus = EventBus()
+    seen: list[object] = []
+    for event_type in (ScanStarted, ScanFinished):
+        bus.subscribe(event_type, seen.append)
+
+    with serve(site) as base:
+        make_service(pipeline=DiscoveryPipeline(bus)).crawl(f"{base}/a", make_session())
+
+    assert [type(event) for event in seen] == [ScanStarted, ScanFinished]

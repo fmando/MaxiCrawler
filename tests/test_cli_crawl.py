@@ -1,9 +1,11 @@
 """Tests for the crawl command and its renderers."""
 
+import ast
 import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 from web_server import Site, serve
 
@@ -11,271 +13,465 @@ from maxicrawler.cli import app
 from maxicrawler.cli.crawling import (
     EXIT_CRAWLED,
     EXIT_FETCH_FAILED,
+    EXIT_INTERRUPTED,
     EXIT_NOT_A_PAGE,
+    MAX_LISTED_PAGES,
+    exit_code_for,
     render_crawl,
     render_crawl_json,
 )
 from maxicrawler.crawler import DiscoverySummary, PluginUsage
+from maxicrawler.database import SQLiteCrawlRepository, SQLiteDatabase
 from maxicrawler.domain import ScanSession, Statistics
-from maxicrawler.web import CrawlResult, HtmlDocument, LinkKind, PageInfo, PageLink
+from maxicrawler.web import LinkKind
+from maxicrawler.web.report import CrawlReport, CrawlStatistics, PageOutcome, SkipReason
+from maxicrawler.web.session import CrawlOptions, CrawlSession, CrawlState, RequestContext
 
 runner = CliRunner()
 MEGA_LINK = "https://mega.nz/file/AaBbCcDd#0123456789abcdefghijklmnopqrstuvwxyzABC"
+STARTED = datetime(2026, 8, 7, tzinfo=UTC)
 
-PAGE = f"""
-<html>
-  <head><title>Example Domain</title></head>
-  <body>
-    <a href="/one">one</a>
-    <a href="/two">two</a>
-    <a href="/one">one again</a>
-    <a href="{MEGA_LINK}">share</a>
-    <img src="/pic.png">
-    <a href="mailto:someone@example.test">mail</a>
-  </body>
-</html>
-"""
+# The Mega link is here so a plugin has something to classify. Every test that
+# crawls this tree recursively restricts the scope, so the link is discovered
+# and counted but never fetched: the suite must not leave this machine, and
+# with --any-domain as the default that is a fixture's responsibility.
+TREE = {
+    "/": f'<a href="/a">a</a><a href="/b">b</a><a href="{MEGA_LINK}">share</a>',
+    "/a": '<a href="/a1">a1</a><a href="/">home</a>',
+    "/b": '<a href="/a1">a1 too</a>',
+    "/a1": "<p>leaf</p>",
+}
+
+
+def make_site(pages: dict[str, str] | None = None) -> Site:
+    """Return a local site serving *pages*."""
+    site = Site()
+    for path, markup in (pages if pages is not None else TREE).items():
+        site.add_html(path, markup)
+    return site
 
 
 # --- the renderers, without a network ----------------------------------------
 
 
-def make_result(
+def make_report(
     *,
-    requested_url: str = "https://example.test/",
-    final_url: str = "https://example.test/",
-    redirects: tuple[str, ...] = (),
-    base_url: str | None = None,
-    title: str | None = "Example Domain",
-    canonical_url: str | None = None,
-    links: tuple[PageLink, ...] = (),
-    skipped_links: int = 0,
-    truncated: bool = False,
-    content_encoding: str | None = None,
-) -> CrawlResult:
-    """Return a crawl result without fetching anything."""
-    page = PageInfo(
-        requested_url=requested_url,
-        final_url=final_url,
-        status=200,
-        size=1256,
-        encoding="utf-8",
-        content_type="text/html",
-        content_encoding=content_encoding,
-        redirects=redirects,
-    )
-    document = HtmlDocument(
-        url=final_url,
-        base_url=base_url if base_url is not None else final_url,
-        encoding="utf-8",
-        title=title,
-        canonical_url=canonical_url,
-        links=links,
-        skipped_links=skipped_links,
-        truncated=truncated,
+    state: CrawlState = CrawlState.COMPLETED,
+    options: CrawlOptions | None = None,
+    pages: tuple[PageOutcome, ...] = (),
+    statistics: CrawlStatistics | None = None,
+    context: RequestContext | None = None,
+) -> CrawlReport:
+    """Return a crawl report without running a crawl."""
+    session = CrawlSession(
+        session_id="crawl-1",
+        seed_url="https://example.test/",
+        started_at=STARTED,
+        options=options or CrawlOptions(max_depth=2, max_pages=50),
+        context=context or RequestContext(user_agent="MaxiCrawler/test"),
     )
     summary = DiscoverySummary(
-        session=ScanSession("s1", datetime(2026, 8, 6, tzinfo=UTC)),
-        statistics=Statistics(documents_processed=1, discovered_urls=30, duplicate_urls=7),
+        session=ScanSession("crawl-1", STARTED),
+        statistics=Statistics(documents_processed=3, discovered_urls=30, duplicate_urls=7),
         plugin_usage=(PluginUsage("generic", 28), PluginUsage("mega", 2)),
     )
-    return CrawlResult(page=page, document=document, summary=summary)
+    return CrawlReport(
+        session=session,
+        state=state,
+        statistics=statistics or CrawlStatistics(pages_visited=3, elapsed_seconds=6.25),
+        summary=summary,
+        pages=pages,
+        finished_at=STARTED,
+    )
 
 
-def make_link(url: str, kind: LinkKind = LinkKind.ANCHOR) -> PageLink:
-    """Return a resolved link of *kind*."""
-    return PageLink(raw_url=url, resolved_url=url, kind=kind, tag="a", attribute="href")
+def page(url: str, depth: int = 0, **kwargs: object) -> PageOutcome:
+    """Return a page outcome for *url*."""
+    values: dict[str, object] = {"status": 200, "final_url": url}
+    values.update(kwargs)
+    return PageOutcome(url=url, depth=depth, **values)  # type: ignore[arg-type]
 
 
-def test_the_report_names_the_requested_url_and_what_came_back() -> None:
-    report = render_crawl(make_result())
+def test_the_report_heads_with_the_seed_and_what_was_asked_for() -> None:
+    text = render_crawl(make_report())
 
-    assert "Fetched:   https://example.test/" in report
-    assert "Status:    200 text/html (utf-8, 1256 bytes)" in report
+    assert "Crawl:     https://example.test/  (depth 2, any domain, max 50 pages)" in text
+    assert "Finished:  completed in 6.2s" in text
 
 
-def test_the_report_names_a_redirect_target() -> None:
-    report = render_crawl(
-        make_result(
-            requested_url="http://example.test/old",
-            final_url="https://www.example.test/new",
-            redirects=("https://www.example.test/new",),
+def test_the_report_names_a_domain_restriction() -> None:
+    text = render_crawl(make_report(options=CrawlOptions(max_depth=1, same_domain=True)))
+
+    assert "same domain" in text
+
+
+def test_the_report_names_included_subdomains() -> None:
+    options = CrawlOptions(max_depth=1, same_domain=True, include_subdomains=True)
+
+    assert "same domain and subdomains" in render_crawl(make_report(options=options))
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        (CrawlState.COMPLETED, "completed"),
+        (CrawlState.PAGE_LIMIT, "stopped at the page limit"),
+        (CrawlState.INTERRUPTED, "interrupted"),
+    ],
+)
+def test_every_ending_is_named_in_words(state: CrawlState, expected: str) -> None:
+    assert expected in render_crawl(make_report(state=state))
+
+
+def test_a_single_page_crawl_keeps_its_detail() -> None:
+    text = render_crawl(
+        make_report(
+            options=CrawlOptions(max_depth=0),
+            pages=(page("https://example.test/", title="Example Domain"),),
         )
     )
 
-    assert "Fetched:   http://example.test/old" in report
-    assert "Redirects: 1 -> https://www.example.test/new" in report
+    assert "Fetched:   https://example.test/" in text
+    assert "Status:    200" in text
+    assert "Title:     Example Domain" in text
 
 
-def test_the_report_stays_quiet_when_nothing_redirected() -> None:
-    assert "Redirects:" not in render_crawl(make_result())
-
-
-def test_the_report_names_a_declared_base_url() -> None:
-    report = render_crawl(make_result(base_url="https://cdn.test/a/"))
-
-    assert "Base URL:  https://cdn.test/a/" in report
-
-
-def test_the_report_stays_quiet_about_an_undeclared_base_url() -> None:
-    assert "Base URL:" not in render_crawl(make_result())
-
-
-def test_the_report_counts_links_by_kind() -> None:
-    report = render_crawl(
-        make_result(
-            links=(
-                make_link("https://example.test/a"),
-                make_link("https://example.test/b"),
-                make_link("https://example.test/c.png", LinkKind.IMAGE),
-            ),
-            skipped_links=5,
-        )
+def test_a_single_page_crawl_names_a_redirect() -> None:
+    text = render_crawl(
+        make_report(pages=(page("https://example.test/old", final_url="https://example.test/new"),))
     )
 
-    assert "Links found: 3" in report
-    assert "  anchor: 2" in report
-    assert "  image: 1" in report
-    assert "Skipped (not HTTP(S)): 5" in report
+    assert "Final URL: https://example.test/new" in text
 
 
-def test_the_report_omits_a_zero_skip_count() -> None:
-    assert "Skipped" not in render_crawl(make_result())
+def test_a_single_page_crawl_reports_a_canonical_claim() -> None:
+    text = render_crawl(
+        make_report(pages=(page("https://example.test/a", canonical_url="https://example.test/b"),))
+    )
+
+    assert "Canonical: https://example.test/b" in text
 
 
-def test_the_report_warns_when_the_link_limit_was_reached() -> None:
-    assert "more links than the configured limit" in render_crawl(make_result(truncated=True))
+def test_a_multi_page_crawl_lists_one_line_each() -> None:
+    pages = (
+        page("https://example.test/", 0),
+        page("https://example.test/a", 1),
+        page("https://example.test/gone", 1, status=None, error="HTTP 404", final_url=None),
+    )
+
+    text = render_crawl(
+        make_report(pages=pages, statistics=CrawlStatistics(pages_visited=2, pages_failed=1))
+    )
+
+    assert "Pages visited: 2" in text
+    assert "200  d0  https://example.test/" in text
+    assert "err  d1  https://example.test/gone  (failed)" in text
+    assert "Pages failed: 1" in text
+
+
+def test_a_long_page_list_is_summarized() -> None:
+    pages = tuple(page(f"https://example.test/{index}", 1) for index in range(MAX_LISTED_PAGES + 5))
+
+    text = render_crawl(make_report(pages=pages))
+
+    assert "... and 5 more" in text
+
+
+def test_the_report_names_why_urls_were_skipped() -> None:
+    statistics = CrawlStatistics(
+        pages_visited=3,
+        pages_skipped=128,
+        skips_by_reason=(
+            (SkipReason.OUT_OF_SCOPE, 96),
+            (SkipReason.ALREADY_SEEN, 30),
+            (SkipReason.TOO_DEEP, 2),
+        ),
+    )
+    pages = (page("https://example.test/", 0), page("https://example.test/a", 1))
+
+    text = render_crawl(make_report(pages=pages, statistics=statistics))
+
+    assert "Pages skipped: 128" in text
+    assert "  out of scope: 96" in text
+    assert "  already seen: 30" in text
+    assert "  too deep: 2" in text
+
+
+def test_the_report_groups_links_by_how_they_were_written() -> None:
+    statistics = CrawlStatistics(
+        pages_visited=3,
+        links_by_kind=((LinkKind.ANCHOR, 30), (LinkKind.IMAGE, 6), (LinkKind.TEXT, 1)),
+    )
+
+    text = render_crawl(make_report(statistics=statistics))
+
+    assert "Links found: 37" in text
+    assert "  anchor: 30" in text
+    assert "  image: 6" in text
+    assert "  plain text: 1" in text
 
 
 def test_the_report_ends_with_the_shared_discovery_summary() -> None:
-    report = render_crawl(make_result())
+    text = render_crawl(make_report())
 
-    assert "Documents processed: 1" in report
-    assert "URLs discovered: 37" in report
-    assert "Unique URLs: 30" in report
-    assert "Duplicates removed: 7" in report
-    assert "Plugin usage:" in report
-    assert "generic: 28" in report
-    assert "mega: 2" in report
+    assert "Documents processed: 3" in text
+    assert "Unique URLs: 30" in text
+    assert "Duplicates removed: 7" in text
+    assert "generic: 28" in text
+    assert "mega: 2" in text
 
 
-def test_the_report_names_a_content_encoding_when_one_was_used() -> None:
-    report = render_crawl(make_result(content_encoding="gzip"))
-
-    assert "(utf-8, gzip, 1256 bytes)" in report
+# --- exit codes --------------------------------------------------------------
 
 
-def test_the_json_report_states_both_urls() -> None:
-    document = json.loads(
-        render_crawl_json(
-            make_result(
-                requested_url="http://example.test/old",
-                final_url="https://www.example.test/new",
-                redirects=("https://www.example.test/new",),
-            )
-        )
+@pytest.mark.parametrize(
+    ("state", "code"),
+    [
+        (CrawlState.COMPLETED, EXIT_CRAWLED),
+        (CrawlState.PAGE_LIMIT, EXIT_CRAWLED),
+        (CrawlState.INTERRUPTED, EXIT_INTERRUPTED),
+    ],
+)
+def test_a_limit_is_not_a_failure_but_an_interruption_is_reported(
+    state: CrawlState, code: int
+) -> None:
+    assert exit_code_for(make_report(state=state)) == code
+
+
+# --- the JSON document -------------------------------------------------------
+
+
+def test_the_json_report_states_the_crawl_and_its_options() -> None:
+    document = json.loads(render_crawl_json(make_report()))
+
+    assert document["seed_url"] == "https://example.test/"
+    assert document["state"] == "completed"
+    assert document["options"] == {
+        "max_depth": 2,
+        "max_pages": 50,
+        "same_domain": False,
+        "include_subdomains": False,
+    }
+
+
+def test_the_json_report_lists_every_page_with_both_urls() -> None:
+    pages = (page("https://example.test/old", 0, final_url="https://example.test/new"),)
+
+    document = json.loads(render_crawl_json(make_report(pages=pages)))
+
+    assert document["pages"][0]["url"] == "https://example.test/old"
+    assert document["pages"][0]["final_url"] == "https://example.test/new"
+    assert document["pages"][0]["depth"] == 0
+
+
+def test_the_json_report_carries_the_counters() -> None:
+    statistics = CrawlStatistics(
+        pages_visited=3,
+        pages_skipped=5,
+        skips_by_reason=((SkipReason.TOO_DEEP, 5),),
+        links_by_kind=((LinkKind.ANCHOR, 30),),
+        max_depth_reached=2,
     )
 
-    assert document["requested_url"] == "http://example.test/old"
-    assert document["final_url"] == "https://www.example.test/new"
-    assert document["redirects"] == ["https://www.example.test/new"]
+    document = json.loads(render_crawl_json(make_report(statistics=statistics)))
 
-
-def test_the_json_report_lists_every_link_with_its_kind() -> None:
-    result = make_result(links=(make_link("https://example.test/a.png", LinkKind.IMAGE),))
-
-    document = json.loads(render_crawl_json(result))
-
-    assert document["links"] == [
-        {
-            "raw_url": "https://example.test/a.png",
-            "url": "https://example.test/a.png",
-            "kind": "image",
-            "tag": "a",
-            "attribute": "href",
-        }
-    ]
-
-
-def test_the_json_report_carries_the_discovery_counters() -> None:
-    document = json.loads(render_crawl_json(make_result()))
-
+    assert document["statistics"]["pages_visited"] == 3
+    assert document["statistics"]["skips_by_reason"] == {"too deep": 5}
+    assert document["statistics"]["links_by_kind"] == {"anchor": 30}
     assert document["discovery"]["unique_urls"] == 30
-    assert document["discovery"]["plugin_usage"][0] == {"name": "generic", "count": 28}
+
+
+def test_the_json_report_never_carries_the_request_context() -> None:
+    """The other place besides the database where a credential could escape."""
+    context = RequestContext.of(
+        user_agent="MaxiCrawler/test",
+        headers={"Authorization": "Bearer SuperSecretValue"},
+    )
+
+    document = render_crawl_json(make_report(context=context))
+
+    assert "SuperSecretValue" not in document
+    assert "Authorization" not in document
+    assert "user_agent" not in document
+
+
+def test_the_renderer_reads_no_request_context() -> None:
+    """Asserted from the syntax tree, so widening it has to be deliberate."""
+    tree = ast.parse(Path("src/maxicrawler/cli/crawling.py").read_text(encoding="utf-8"))
+
+    attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+
+    assert "context" not in attributes
+    assert "headers" not in attributes
 
 
 # --- the command -------------------------------------------------------------
 
 
-def test_the_command_reports_a_crawled_page(tmp_path: Path) -> None:
-    site = Site()
-    site.add_html("/", PAGE)
+def test_one_page_is_crawled_by_default() -> None:
+    site = make_site()
 
     with serve(site) as base:
         result = runner.invoke(app, ["crawl", f"{base}/", "--no-persist"])
 
     assert result.exit_code == EXIT_CRAWLED
-    assert "Title:     Example Domain" in result.stdout
-    assert "Links found: 5" in result.stdout
+    assert "depth 0" in result.stdout
+    assert "Fetched:   " in result.stdout
     assert "Documents processed: 1" in result.stdout
+
+
+def test_a_depth_follows_links() -> None:
+    site = make_site()
+
+    with serve(site) as base:
+        result = runner.invoke(
+            app, ["crawl", f"{base}/", "--same-domain", "--depth", "2", "--no-persist"]
+        )
+
+    assert result.exit_code == EXIT_CRAWLED
+    assert "Pages visited: 4" in result.stdout
     assert "mega: 1" in result.stdout
 
 
-def test_the_command_counts_duplicates_through_the_shared_pipeline() -> None:
-    site = Site()
-    site.add_html("/", PAGE)
+def test_the_short_depth_flag_works() -> None:
+    site = make_site()
 
     with serve(site) as base:
-        result = runner.invoke(app, ["crawl", f"{base}/", "--no-persist"])
+        result = runner.invoke(
+            app, ["crawl", f"{base}/", "-d", "1", "--same-domain", "--no-persist"]
+        )
 
-    assert "Unique URLs: 4" in result.stdout
-    assert "Duplicates removed: 1" in result.stdout
+    assert "Pages visited: 3" in result.stdout
 
 
-def test_the_command_can_report_json() -> None:
+def test_external_links_are_followed_unless_told_otherwise() -> None:
+    """ "Elsewhere" is this same server under its other hostname.
+
+    127.0.0.1 and localhost are one machine but two hosts, so the scope rule is
+    exercised without the suite ever reaching the internet.
+    """
     site = Site()
-    site.add_html("/", PAGE)
 
     with serve(site) as base:
-        result = runner.invoke(app, ["crawl", f"{base}/", "--no-persist", "--json"])
-        document = json.loads(result.stdout)
+        elsewhere = f"http://localhost:{base.rsplit(':', 1)[1]}"
+        site.add_html("/", f'<a href="{elsewhere}/away">away</a>')
+        site.add_html("/away", "<p>elsewhere</p>")
+        result = runner.invoke(app, ["crawl", f"{base}/", "--depth", "1", "--no-persist"])
 
-        assert document["requested_url"] == f"{base}/"
-        assert document["final_url"] == f"{base}/"
-
-    assert document["title"] == "Example Domain"
-
-
-def test_the_command_can_skip_prose_urls() -> None:
-    site = Site()
-    site.add_html("/", f"<p>{MEGA_LINK}</p>")
-
-    with serve(site) as base:
-        with_prose = runner.invoke(app, ["crawl", f"{base}/", "--no-persist"])
-        without = runner.invoke(app, ["crawl", f"{base}/", "--no-persist", "--no-prose"])
-
-    assert "Links found: 1" in with_prose.stdout
-    assert "Links found: 0" in without.stdout
+    assert "out of scope" not in result.stdout
+    assert "Pages visited: 2" in result.stdout
 
 
-def test_the_command_persists_into_the_database(tmp_path: Path) -> None:
-    config = tmp_path / "maxicrawler.toml"
-    config.write_text(
-        f'[maxicrawler]\ndatabase_path = "{(tmp_path / "urls.db").as_posix()}"\n',
-        encoding="utf-8",
-    )
-    site = Site()
-    site.add_html("/", PAGE)
+def test_same_domain_keeps_the_crawl_at_home() -> None:
+    site = make_site()
 
     with serve(site) as base:
-        result = runner.invoke(app, ["crawl", f"{base}/", "--config", str(config)])
+        result = runner.invoke(
+            app, ["crawl", f"{base}/", "--depth", "2", "--same-domain", "--no-persist"]
+        )
+
+    assert "same domain" in result.stdout
+    assert "out of scope: 1" in result.stdout
+
+
+def test_the_page_ceiling_is_honoured_and_named() -> None:
+    site = make_site()
+
+    with serve(site) as base:
+        result = runner.invoke(
+            app,
+            [
+                "crawl",
+                f"{base}/",
+                "--same-domain",
+                "--depth",
+                "3",
+                "--max-pages",
+                "2",
+                "--no-persist",
+            ],
+        )
 
     assert result.exit_code == EXIT_CRAWLED
-    assert (tmp_path / "urls.db").exists()
+    assert "stopped at the page limit" in result.stdout
+    assert "Pages visited: 2" in result.stdout
 
 
-def test_a_missing_page_exits_with_the_fetch_code() -> None:
-    site = Site()
+def test_a_recursive_crawl_can_report_json() -> None:
+    site = make_site()
+
+    with serve(site) as base:
+        result = runner.invoke(
+            app, ["crawl", f"{base}/", "--same-domain", "--depth", "1", "--json", "--no-persist"]
+        )
+        document = json.loads(result.stdout)
+
+        assert document["seed_url"] == f"{base}/"
+
+    assert len(document["pages"]) == 3
+    assert document["state"] == "completed"
+
+
+def test_the_crawl_summary_is_persisted(tmp_path: Path) -> None:
+    config = tmp_path / "maxicrawler.toml"
+    database = tmp_path / "urls.db"
+    config.write_text(f'[maxicrawler]\ndatabase_path = "{database.as_posix()}"\n', encoding="utf-8")
+    site = make_site()
+
+    with serve(site) as base:
+        result = runner.invoke(
+            app, ["crawl", f"{base}/", "--same-domain", "--depth", "1", "--config", str(config)]
+        )
+
+    assert result.exit_code == EXIT_CRAWLED
+    stored = SQLiteCrawlRepository(SQLiteDatabase(database)).stored_crawls()
+    assert len(stored) == 1
+    assert stored[0].pages_visited == 3
+    assert stored[0].state is CrawlState.COMPLETED
+
+
+def test_the_defaults_are_configurable(tmp_path: Path) -> None:
+    """The domain restriction stays opt-in, but an installation may flip it."""
+    config = tmp_path / "maxicrawler.toml"
+    config.write_text(
+        "[maxicrawler]\ncrawl_depth = 2\ncrawl_max_pages = 2\ncrawl_same_domain = true\n",
+        encoding="utf-8",
+    )
+    site = make_site()
+
+    with serve(site) as base:
+        result = runner.invoke(app, ["crawl", f"{base}/", "--config", str(config), "--no-persist"])
+
+    assert "depth 2, same domain, max 2 pages" in result.stdout
+
+
+def test_a_flag_overrides_the_configured_default(tmp_path: Path) -> None:
+    config = tmp_path / "maxicrawler.toml"
+    config.write_text("[maxicrawler]\ncrawl_same_domain = true\n", encoding="utf-8")
+    site = make_site()
+
+    with serve(site) as base:
+        result = runner.invoke(
+            app, ["crawl", f"{base}/", "--any-domain", "--config", str(config), "--no-persist"]
+        )
+
+    assert "any domain" in result.stdout
+
+
+def test_one_broken_page_does_not_fail_the_command() -> None:
+    site = make_site({"/": '<a href="/gone">gone</a><a href="/a">a</a>', "/a": "<p>x</p>"})
+
+    with serve(site) as base:
+        result = runner.invoke(
+            app, ["crawl", f"{base}/", "--same-domain", "--depth", "1", "--no-persist"]
+        )
+
+    assert result.exit_code == EXIT_CRAWLED
+    assert "Pages failed: 1" in result.stdout
+
+
+def test_a_missing_seed_exits_with_the_fetch_code() -> None:
+    site = make_site()
 
     with serve(site) as base:
         result = runner.invoke(app, ["crawl", f"{base}/nope", "--no-persist"])
@@ -284,14 +480,8 @@ def test_a_missing_page_exits_with_the_fetch_code() -> None:
     assert "HTTP 404" in result.stderr
 
 
-def test_an_unreachable_host_exits_with_the_fetch_code() -> None:
-    result = runner.invoke(app, ["crawl", "http://127.0.0.1:1/", "--no-persist"])
-
-    assert result.exit_code == EXIT_FETCH_FAILED
-
-
-def test_a_response_that_is_not_a_page_has_its_own_exit_code() -> None:
-    site = Site()
+def test_a_seed_that_is_not_a_page_has_its_own_exit_code() -> None:
+    site = make_site()
     site.add("/data.json", body=b"{}", content_type="application/json")
 
     with serve(site) as base:
@@ -308,42 +498,27 @@ def test_a_non_http_url_is_rejected_as_a_bad_argument() -> None:
     assert "unsupported URL scheme" in result.stderr
 
 
-def test_a_url_without_a_scheme_is_rejected_as_a_bad_argument() -> None:
-    result = runner.invoke(app, ["crawl", "example.test", "--no-persist"])
+def test_an_impossible_depth_is_refused() -> None:
+    result = runner.invoke(app, ["crawl", "https://example.test/", "--depth", "-1"])
 
-    assert result.exit_code == 2
+    assert result.exit_code != 0
+
+
+def test_prose_urls_can_be_turned_off() -> None:
+    site = make_site({"/": f"<p>{MEGA_LINK}</p>"})
+
+    with serve(site) as base:
+        with_prose = runner.invoke(app, ["crawl", f"{base}/", "--no-persist"])
+        without = runner.invoke(app, ["crawl", f"{base}/", "--no-prose", "--no-persist"])
+
+    assert "Links found: 1" in with_prose.stdout
+    assert "Links found: 0" in without.stdout
 
 
 def test_the_configured_user_agent_is_sent() -> None:
-    site = Site()
-    site.add_html("/", PAGE)
+    site = make_site()
 
     with serve(site) as base:
         runner.invoke(app, ["crawl", f"{base}/", "--no-persist"])
 
     assert "MaxiCrawler" in site.requests[0].headers["User-Agent"]
-
-
-def test_the_configured_link_limit_is_honoured(tmp_path: Path) -> None:
-    config = tmp_path / "maxicrawler.toml"
-    config.write_text("[maxicrawler]\nmax_links = 2\n", encoding="utf-8")
-    site = Site()
-    site.add_html("/", PAGE)
-
-    with serve(site) as base:
-        result = runner.invoke(app, ["crawl", f"{base}/", "--config", str(config), "--no-persist"])
-
-    assert "Links found: 2" in result.stdout
-    assert "more links than the configured limit" in result.stdout
-
-
-def test_the_configured_page_limit_is_honoured(tmp_path: Path) -> None:
-    config = tmp_path / "maxicrawler.toml"
-    config.write_text("[maxicrawler]\nmax_page_bytes = 32\n", encoding="utf-8")
-    site = Site()
-    site.add_html("/", PAGE)
-
-    with serve(site) as base:
-        result = runner.invoke(app, ["crawl", f"{base}/", "--config", str(config), "--no-persist"])
-
-    assert result.exit_code == EXIT_FETCH_FAILED

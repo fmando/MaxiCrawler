@@ -25,6 +25,7 @@ Jede Station beantwortet genau eine Frage:
 
 | Station | Paket | Frage | I/O |
 | --- | --- | --- | --- |
+| Crawl Engine | `maxicrawler.web.engine` | *"Which page comes next?"* | delegiert |
 | Crawler | `maxicrawler.web` | *"Which URLs does this page contain?"* | Netzwerk |
 | Discovery | `maxicrawler.crawler` | *"Which URLs exist?"* | Dateisystem |
 | Plugin | `maxicrawler.plugins` | *"Can I classify this URL?"* | keins |
@@ -55,6 +56,26 @@ unverändert an die Discovery-Pipeline. Ein auf einer Webseite gefundener Link
 wird deshalb von genau denselben Plugins klassifiziert wie einer aus einer
 lokalen Datei.
 
+## Ausblick: Crawl Jobs
+
+Eine `CrawlSession` beschreibt heute genau einen Crawl-Lauf. Sie wird
+voraussichtlich zum Bestandteil eines größeren **Crawl Jobs** werden — das ist
+die Einheit, die eine spätere Weboberfläche verwaltet, startet, anhält und in
+einer Liste zeigt:
+
+```text
+Job
+ ├── CrawlSession      welcher Seed, welche Grenzen, wie es endete
+ ├── Discovery         welche URLs dabei gefunden und klassifiziert wurden
+ ├── Download Queue    was davon geholt werden soll
+ └── Result            was am Ende in der Library liegt
+```
+
+Die interne Klasse behält ihren Namen. Ein Job ist eine Klammer *um* Session,
+Discovery und Downloads, keine Umbenennung einer von ihnen — und keine der
+vier Stationen muss dafür etwas voneinander wissen, was sie heute nicht schon
+weiß.
+
 ## Regeln
 
 -   Domain kennt keine Infrastruktur.
@@ -64,7 +85,15 @@ lokalen Datei.
 -   Ein Abruf ist in jeder Dimension begrenzt: Schema, Umleitungen, Content-Type,
     Antwortgröße vor **und** nach dem Entpacken.
 -   Höflichkeit ist ein Policy-Objekt, keine Bedingung in der Abrufschleife.
--   Der Crawler holt genau eine Seite. Rekursion ist Sache des Aufrufers.
+-   Der Crawler holt genau eine Seite. Rekursion ist Sache des Aufrufers — der
+    `CrawlEngine` ist eine Schleife *über* dem Crawler, nie eine Änderung darin.
+-   Der Frontier bestimmt die Reihenfolge, das VisitedSet die Identität. Nie
+    beides in einer Klasse.
+-   Der Schlüssel für „schon geholt" ist nicht der für „schon gefunden":
+    Discovery behält Fragmente, der Frontier verwirft sie.
+-   Eine `CrawlSession` beschreibt den Lauf. Wie Anfragen gestellt werden —
+    Header, später Cookies, Zugangsdaten, Proxy — trägt der `RequestContext`,
+    und nichts, was einen Report serialisiert, schreibt ihn.
 -   Plugins kommunizieren über definierte Schnittstellen.
 -   Plugins führen kein I/O aus; Provider führen I/O nur über `HttpTransport`
     und `StreamTransport` aus.

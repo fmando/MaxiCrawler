@@ -13,7 +13,8 @@ what the project deliberately will not do.
 ## Features
 
 - Clear package boundaries for crawling, extraction, downloads, storage, plugins, GUI, and API layers.
-- A web crawler that discovers the links on a page and feeds them to the same discovery pipeline local documents use.
+- A recursive web crawler with a pluggable frontier, depth and scope limits, and a crawl summary you can stop, resume the design of, and store.
+- Links found on a page feed the same discovery pipeline and the same plugins local documents use.
 - A provider-independent download manager: a new host is a plugin and a provider, nothing else.
 - A self-describing library: one directory per resource, with versioned JSON metadata beside it.
 - Typed interfaces and strict static checking with mypy.
@@ -52,10 +53,14 @@ Discover the URLs in a folder of local documents:
 uv run maxicrawler discover ./docs
 ```
 
-Discover the URLs on a web page:
+Discover the URLs on a web page, or crawl a site two levels deep:
 
 ```bash
 uv run maxicrawler crawl https://example.org
+```
+
+```bash
+uv run maxicrawler crawl https://example.org --depth 2 --same-domain
 ```
 
 Ask what a share link points at, without downloading it:
@@ -90,6 +95,7 @@ replaceable:
 
 | Station | Package | Question | Network |
 | --- | --- | --- | --- |
+| Crawl Engine | `maxicrawler.web.engine` | *"Which page comes next?"* | delegates |
 | Crawler | `maxicrawler.web` | *"Which URLs does this page contain?"* | required |
 | Discovery | `maxicrawler.crawler` | *"Which URLs exist?"* | never |
 | Plugin | `maxicrawler.plugins` | *"Can I classify this URL?"* | never |
@@ -887,6 +893,155 @@ print(result.summary.unique_urls)
 same call serves a script, a future API, and a future GUI. A long crawl needs
 no polling either: the pipeline already publishes `ScanStarted`,
 `UrlDiscovered`, and `ScanFinished` on the event bus.
+
+## Sprint 9: the crawl engine
+
+Sprint 9 makes the crawler recursive, and does it entirely by addition — not one
+line of the fetcher, the parser or the resolver changed.
+
+```bash
+maxicrawler crawl https://example.org --depth 2
+```
+
+```text
+Crawl:     https://example.org/  (depth 2, any domain, max 50 pages)
+Finished:  completed in 6.2s
+
+Pages visited: 14
+  200  d0  https://example.org/
+  200  d1  https://example.org/docs/
+  404  d2  https://example.org/docs/old  (failed)
+  ...
+Pages failed: 1
+Pages skipped: 128
+  out of scope: 96
+  already seen: 30
+  too deep: 2
+
+Links found: 412
+  anchor: 380
+  image: 25
+  plain text: 7
+
+Documents processed: 14
+URLs discovered: 412
+Unique URLs: 284
+Duplicates removed: 128
+
+Plugin usage:
+generic: 281
+mega: 3
+```
+
+The last block is the renderer `discover` uses, because they are the same
+numbers from the same pipeline. `Documents processed` and `Pages visited` are
+one number seen twice, not two numbers to add up.
+
+### Options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--depth`, `-d` | `0` | link distance from the start page; 0 fetches it alone |
+| `--same-domain` / `--any-domain` | any domain | stay on the starting host |
+| `--include-subdomains` | off | treat `docs.example.org` as the same domain |
+| `--max-pages` | `50` | stop after this many pages |
+| `--json` | off | the machine-readable report |
+| `--prose` / `--no-prose` | prose | also read URLs written as plain text |
+| `--persist` / `--no-persist` | persist | store the summary and the URLs |
+
+Every default except the last two is configurable — `crawl_depth`,
+`crawl_max_pages` and `crawl_same_domain` in `maxicrawler.toml`.
+
+### Links off-site are followed by default
+
+That is a decision, not an oversight. MaxiCrawler serves two workflows equally:
+
+- **crawling one website**, where `--same-domain` is what you want;
+- **hunting for share links**, where the interesting URLs are on Mega,
+  Pixeldrain, GoFile or Dropbox *by definition* — restricting by default would
+  quietly break it.
+
+`--depth` and `--max-pages` are what keep a crawl finite, and both are on by
+default. A crawl with no `--depth` still fetches exactly one page.
+
+### What it will not do twice
+
+- The same page linked from forty pages is fetched once.
+- `page#intro` and `page#setup` are one page. URL fragments are kept everywhere
+  else, because a legacy Mega share carries its key in one — but they never
+  make two pages out of one.
+- A page reached through a redirect is not fetched again through a link
+  pointing straight at the redirect's target.
+- A cycle terminates, and so does a page that links to itself.
+
+Stylesheets, scripts and images are found and classified but never *followed*.
+They are resources, not pages, and fetching one only to be told so is a wasted
+request. Links, frames, meta refreshes and URLs written in prose are followed.
+
+`<link rel="canonical">` is recorded and reported but never used to skip a URL.
+A page can declare a canonical it does not equal, and skipping a URL that was
+never fetched loses every link on it.
+
+### Stopping
+
+Ctrl-C stops the crawl and still prints the full report of what was done; the
+exit code is 7. Reaching `--max-pages` is not a failure — the crawl did what it
+was told — so that exits 0 and says so in words.
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | the crawl ran to an end, or to a limit it was given |
+| 5 | the starting page could not be retrieved |
+| 6 | the starting page was not a page |
+| 7 | the crawl was interrupted |
+
+### Still not done, on purpose
+
+- **robots.txt.** Unchanged from Sprint 8, and the stakes are higher now that a
+  crawl fetches many pages rather than one. The `CrawlPolicy` seam is there and
+  a `RobotsPolicy` will read `/robots.txt` through the same fetcher. Until then,
+  **what you point this at is your responsibility.**
+- **No delay between requests.** Politeness, rate limits and scheduling belong
+  with robots.txt and are one subject; the `ThrottledFetcher` seam is documented
+  and empty.
+- **No parallelism, no downloads, no JavaScript, no cookies, no login.** The
+  crawler discovers; downloading stays a separate pipeline.
+
+### Using the engine from Python
+
+```python
+from datetime import UTC, datetime
+
+from maxicrawler.crawler import DiscoveryPipeline
+from maxicrawler.events import EventBus, PageCrawled
+from maxicrawler.web import UrllibPageFetcher, WebDiscoveryService
+from maxicrawler.web.engine import CrawlEngine
+from maxicrawler.web.session import CrawlOptions, CrawlSession
+
+bus = EventBus()
+bus.subscribe(PageCrawled, lambda event: print(event.depth, event.url))
+
+service = WebDiscoveryService(
+    DiscoveryPipeline(bus),
+    fetcher=UrllibPageFetcher(user_agent="MaxiCrawler/0.1.0"),
+)
+engine = CrawlEngine(service, event_bus=bus)
+report = engine.run(
+    CrawlSession(
+        session_id="demo",
+        seed_url="https://example.org",
+        started_at=datetime.now(UTC),
+        options=CrawlOptions(max_depth=2, same_domain=True),
+    )
+)
+
+print(report.state, report.pages_visited, report.links_discovered)
+```
+
+`engine.control.request_stop()` stops a running crawl from another thread — the
+same path Ctrl-C takes, and the one a future Stop button will use. `CrawlReport`
+is immutable and takes no terminal, so the CLI, a future API and a future GUI
+all render the same value.
 
 ## Documentation
 

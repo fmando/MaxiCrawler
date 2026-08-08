@@ -40,6 +40,17 @@ Download tests write only into pytest's `tmp_path`, and the download manager is
 driven against a stub provider, so a full run touches neither the network nor
 anything outside the temporary directory.
 
+Since the crawler became recursive, "no outbound connections" is no longer
+free: links are followed off-host by default, so a fixture holding a real URL
+turns the suite into a client of somebody else's server. It happened once while
+Sprint 9 was being written.
+
+Two things prevent a repeat. A fixture reaches "elsewhere" through the *same*
+local server under its other hostname — `127.0.0.1` and `localhost` are one
+machine but two hosts, which exercises the scope rule without leaving it. And
+`tests/test_no_outbound_connections.py` guards `socket.create_connection`, so
+the mistake fails loudly rather than silently.
+
 The web crawler is tested against a throwaway server on `127.0.0.1`
 (`tests/web_server.py`) rather than a mocked `urllib`. Redirects, compressed
 bodies, and content-type refusals are exactly where the bugs live, and none of
