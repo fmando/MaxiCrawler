@@ -974,9 +974,27 @@ default. A crawl with no `--depth` still fetches exactly one page.
   pointing straight at the redirect's target.
 - A cycle terminates, and so does a page that links to itself.
 
-Stylesheets, scripts and images are found and classified but never *followed*.
-They are resources, not pages, and fetching one only to be told so is a wasted
-request. Links, frames, meta refreshes and URLs written in prose are followed.
+### Files are documented, not fetched
+
+A link to a PDF, a ZIP, an MP3 or an image is **discovered, classified, counted
+and stored** like every other URL — that is the point of the tool. It is simply
+never *requested*, because a file cannot answer with a page and asking costs a
+round trip to be told what the URL already said.
+
+Three filters do it, and each only handles what the cheaper one before it
+could not: the kind of link it was written as, the extension its path ends in,
+and — for a URL that gives nothing away, like `/download?id=7` — the content
+type of the reply. All three report the same reason: `not a page link`.
+
+That last case costs one request, so the page ceiling counts **requests
+issued**, not pages read; `Pages attempted` appears in the report when the two
+differ, and is then the line that explains why a crawl stopped. A wrong content
+type is not counted under `Pages failed`: being told "this is not a page" is an
+answer, not a fault.
+
+A URL **you** name is always attempted. An explicit instruction outranks a
+heuristic, so `maxicrawler crawl https://example.org/sheet.pdf` tells you what
+actually came back.
 
 `<link rel="canonical">` is recorded and reported but never used to skip a URL.
 A page can declare a canonical it does not equal, and skipping a URL that was

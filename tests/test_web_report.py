@@ -117,6 +117,7 @@ def test_statistics_total_the_skips_they_were_given() -> None:
     statistics = CrawlStatistics.of(
         pages_visited=14,
         pages_failed=1,
+        pages_attempted=18,
         skips=skips,
         max_depth_reached=2,
         frontier_remaining=0,
@@ -124,7 +125,8 @@ def test_statistics_total_the_skips_they_were_given() -> None:
     )
 
     assert statistics.pages_skipped == 128
-    assert statistics.pages_attempted == 15
+    assert statistics.pages_attempted == 18
+    assert statistics.requests_without_a_page == 3
 
 
 def test_skips_are_ordered_by_frequency_then_by_name() -> None:
@@ -135,6 +137,7 @@ def test_skips_are_ordered_by_frequency_then_by_name() -> None:
     statistics = CrawlStatistics.of(
         pages_visited=1,
         pages_failed=0,
+        pages_attempted=1,
         skips=skips,
         max_depth_reached=1,
         frontier_remaining=0,
@@ -152,6 +155,7 @@ def test_statistics_without_skips_report_none() -> None:
     statistics = CrawlStatistics.of(
         pages_visited=1,
         pages_failed=0,
+        pages_attempted=1,
         skips=Counter(),
         max_depth_reached=0,
         frontier_remaining=0,
@@ -236,3 +240,17 @@ def test_the_report_does_not_copy_the_request_context() -> None:
 
     assert "context" not in CrawlReport.__slots__
     assert report.session.context is report.session.context
+
+
+def test_requests_without_a_page_is_the_difference() -> None:
+    """The gap between what was asked for and what turned out to be a page."""
+    statistics = CrawlStatistics(pages_visited=46, pages_failed=0, pages_attempted=50)
+
+    assert statistics.requests_without_a_page == 4
+
+
+def test_requests_without_a_page_never_goes_negative() -> None:
+    """A statistics object built by hand must not report nonsense."""
+    statistics = CrawlStatistics(pages_visited=3, pages_failed=0)
+
+    assert statistics.requests_without_a_page == 0

@@ -3,7 +3,14 @@
 import pytest
 
 from maxicrawler.web import LinkKind, ParsedHtml, RawLink
-from maxicrawler.web.resolve import is_http_url, resolve_base_url, resolve_link, resolve_links
+from maxicrawler.web.resolve import (
+    NON_PAGE_SUFFIXES,
+    is_http_url,
+    looks_like_a_page,
+    resolve_base_url,
+    resolve_link,
+    resolve_links,
+)
 
 PAGE = "https://example.test/docs/guide.html"
 
@@ -254,3 +261,57 @@ def test_truncation_is_carried_over() -> None:
 )
 def test_is_http_url(url: str, expected: bool) -> None:
     assert is_http_url(url) is expected
+
+
+# --- what could be a page ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.test/",
+        "https://example.test/docs",
+        "https://example.test/docs/",
+        "https://example.test/index.html",
+        "https://example.test/page.htm",
+        "https://example.test/view.php",
+        "https://example.test/view.aspx",
+        "https://example.test/download?id=7",
+        "https://example.test/a.b.c/page",
+        "https://example.test/feed.xml",
+        "https://mega.nz/file/AaBbCcDd#key",
+    ],
+)
+def test_a_url_that_could_be_a_page(url: str) -> None:
+    assert looks_like_a_page(url) is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.test/sheet.pdf",
+        "https://example.test/sheet.PDF",
+        "https://example.test/archive.zip",
+        "https://example.test/song.mp3",
+        "https://example.test/clip.mp4",
+        "https://example.test/photo.jpeg",
+        "https://example.test/style.css",
+        "https://example.test/app.js",
+        "https://example.test/notes.txt",
+        "https://example.test/deep/path/report.docx",
+        "https://example.test/sheet.pdf?download=1",
+        "https://example.test/sheet.pdf#page=3",
+    ],
+)
+def test_a_url_that_could_not_be_a_page(url: str) -> None:
+    assert looks_like_a_page(url) is False
+
+
+def test_a_dot_in_a_directory_is_not_an_extension() -> None:
+    assert looks_like_a_page("https://example.test/v1.2/overview") is True
+
+
+def test_the_suffix_set_leaves_out_what_a_server_renders_as_html() -> None:
+    """A suffix wrongly in the set silently loses a page, so the bias is one-way."""
+    for suffix in (".php", ".aspx", ".jsp", ".html", ".htm", ".xml"):
+        assert suffix not in NON_PAGE_SUFFIXES

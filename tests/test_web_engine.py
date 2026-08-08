@@ -9,7 +9,13 @@ from web_server import Site, serve
 
 from maxicrawler.crawler import DiscoveryPipeline
 from maxicrawler.events import EventBus
-from maxicrawler.web import LinkKind, PolicyRefusedError, UrllibPageFetcher, WebDiscoveryService
+from maxicrawler.web import (
+    ContentTypeError,
+    LinkKind,
+    PolicyRefusedError,
+    UrllibPageFetcher,
+    WebDiscoveryService,
+)
 from maxicrawler.web.engine import CrawlEngine
 from maxicrawler.web.frontier import CrawlItem, FifoFrontier, visit_key
 from maxicrawler.web.policy import PolicyDecision, SameDomainPolicy
@@ -290,12 +296,14 @@ def test_one_missing_page_does_not_stop_the_crawl() -> None:
         assert report.failures[0].error is not None
 
 
-def test_a_non_html_link_fails_that_page_only() -> None:
+def test_a_link_whose_extension_gives_it_away_is_not_even_requested() -> None:
     site = make_site({"/": '<a href="/data.json">data</a>'})
     site.add("/data.json", body=b"{}", content_type="application/json")
 
     with crawl(site, max_depth=1) as (report, base):
-        assert report.statistics.pages_failed == 1
+        assert report.statistics.pages_failed == 0
+        assert dict(report.statistics.skips_by_reason)[SkipReason.NOT_A_PAGE] == 1
+        assert "/data.json" not in {request.path for request in site.requests}
         assert report.state is CrawlState.COMPLETED
 
 
@@ -637,3 +645,107 @@ def test_a_url_written_in_prose_is_followed() -> None:
         report = make_engine().run(make_session(f"{base}/", max_depth=1))
 
     assert sorted(visited_paths(report, base)) == ["/", "/mentioned"]
+
+
+def test_a_link_to_a_file_is_never_requested() -> None:
+    """The crawl that prompted this spent 44% of its budget on PDFs.
+
+    Each one cost a round trip to be told what the URL already said. The link
+    is discovered, classified and reported either way -- that happened when the
+    page holding it was read, before any of this.
+    """
+    site = Site()
+    site.add_html("/", '<a href="/sheet.pdf">sheet</a><a href="/real">real</a>')
+    site.add("/sheet.pdf", body=b"%PDF-1.7", content_type="application/pdf")
+    site.add_html("/real", "<p>x</p>")
+
+    with crawl(site, max_depth=1) as (report, base):
+        requested = {request.path for request in site.requests}
+
+    assert "/sheet.pdf" not in requested
+    assert visited_paths(report, base) == ["/", "/real"]
+    assert report.statistics.pages_failed == 0
+    assert dict(report.statistics.skips_by_reason)[SkipReason.NOT_A_PAGE] == 1
+
+
+def test_a_file_link_is_still_discovered_and_classified() -> None:
+    site = Site()
+    site.add_html("/", '<a href="/sheet.pdf">sheet</a>')
+
+    with crawl(site, max_depth=1) as (report, base):
+        assert report.links_discovered == 1
+        assert report.summary.unique_urls == 1
+        assert report.summary.plugin_usage[0].name == "generic"
+
+
+def test_a_seed_the_operator_named_is_always_attempted() -> None:
+    """An explicit instruction outranks a heuristic.
+
+    Being told what actually came back beats being told the URL looked wrong.
+    """
+    site = Site()
+    site.add("/sheet.pdf", body=b"%PDF-1.7", content_type="application/pdf")
+
+    with serve(site) as base, pytest.raises(ContentTypeError):
+        make_engine().run(make_session(f"{base}/sheet.pdf"))
+
+    assert [request.path for request in site.requests] == ["/sheet.pdf"]
+
+
+def test_a_server_that_answers_with_something_else_is_a_skip_not_a_failure() -> None:
+    """The residue the extension filter cannot judge from a URL alone.
+
+    "/download" says nothing; the reply says application/pdf. That is a clear
+    answer to "is this a page?", so it is counted as a skip -- but it did cost
+    a request, and the ceiling has to know.
+    """
+    site = make_site({"/": '<a href="/download">get it</a><a href="/a">a</a>', "/a": "<p>x</p>"})
+    site.add("/download", body=b"%PDF-1.7", content_type="application/pdf")
+
+    with crawl(site, max_depth=1) as (report, base):
+        assert report.statistics.pages_failed == 0
+        assert report.statistics.pages_visited == 2
+        assert report.statistics.pages_attempted == 3
+        assert report.statistics.requests_without_a_page == 1
+        assert dict(report.statistics.skips_by_reason)[SkipReason.NOT_A_PAGE] == 1
+        assert "/download" in {request.path for request in site.requests}
+
+
+def test_the_ceiling_counts_requests_rather_than_pages_read() -> None:
+    """Otherwise a site of nothing but non-pages draws unbounded requests."""
+    markup = "".join(f'<a href="/d{index}">d{index}</a>' for index in range(20))
+    site = make_site({"/": markup})
+    for index in range(20):
+        site.add(f"/d{index}", body=b"%PDF-1.7", content_type="application/pdf")
+
+    with crawl(site, max_depth=1, max_pages=5) as (report, base):
+        assert report.state is CrawlState.PAGE_LIMIT
+        assert report.statistics.pages_attempted == 5
+        assert report.statistics.pages_visited == 1
+        assert len(site.requests) == 5
+
+
+def test_a_seed_that_is_not_a_page_still_raises() -> None:
+    site = Site()
+    site.add("/thing", body=b"%PDF-1.7", content_type="application/pdf")
+
+    with serve(site) as base, pytest.raises(ContentTypeError):
+        make_engine().run(make_session(f"{base}/thing"))
+
+
+def test_attempts_equal_pages_when_every_answer_was_a_page() -> None:
+    with crawl(make_site(), max_depth=1) as (report, base):
+        statistics = report.statistics
+
+    assert statistics.pages_attempted == statistics.pages_visited + statistics.pages_failed
+    assert statistics.requests_without_a_page == 0
+
+
+def test_a_second_run_resets_the_attempt_count() -> None:
+    engine = make_engine()
+
+    with serve(make_site()) as base:
+        engine.run(make_session(f"{base}/", max_depth=1))
+        second = engine.run(make_session(f"{base}/a2", max_depth=0))
+
+    assert second.statistics.pages_attempted == 1

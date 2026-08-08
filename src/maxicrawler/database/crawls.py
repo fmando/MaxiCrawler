@@ -40,6 +40,7 @@ SCHEMA = (
         include_subdomains INTEGER NOT NULL DEFAULT 0,
         pages_visited INTEGER NOT NULL DEFAULT 0,
         pages_failed INTEGER NOT NULL DEFAULT 0,
+        pages_attempted INTEGER NOT NULL DEFAULT 0,
         pages_skipped INTEGER NOT NULL DEFAULT 0,
         links_discovered INTEGER NOT NULL DEFAULT 0,
         max_depth_reached INTEGER NOT NULL DEFAULT 0,
@@ -68,6 +69,7 @@ class StoredCrawl:
     options: CrawlOptions
     pages_visited: int
     pages_failed: int
+    pages_attempted: int
     pages_skipped: int
     links_discovered: int
     max_depth_reached: int
@@ -126,14 +128,15 @@ class SQLiteCrawlRepository:
         with closing(self._database.connect()) as connection, connection:
             connection.execute(
                 "UPDATE crawl_sessions SET finished_at = ?, state = ?, pages_visited = ?, "
-                "pages_failed = ?, pages_skipped = ?, links_discovered = ?, "
-                "max_depth_reached = ?, frontier_remaining = ?, elapsed_seconds = ? "
-                "WHERE session_id = ?",
+                "pages_failed = ?, pages_attempted = ?, pages_skipped = ?, "
+                "links_discovered = ?, max_depth_reached = ?, frontier_remaining = ?, "
+                "elapsed_seconds = ? WHERE session_id = ?",
                 (
                     report.finished_at.isoformat(),
                     str(report.state),
                     statistics.pages_visited,
                     statistics.pages_failed,
+                    statistics.pages_attempted,
                     statistics.pages_skipped,
                     report.links_discovered,
                     statistics.max_depth_reached,
@@ -177,6 +180,7 @@ def _to_stored_crawl(row: sqlite3.Row) -> StoredCrawl:
         ),
         pages_visited=int(row["pages_visited"]),
         pages_failed=int(row["pages_failed"]),
+        pages_attempted=int(row["pages_attempted"]),
         pages_skipped=int(row["pages_skipped"]),
         links_discovered=int(row["links_discovered"]),
         max_depth_reached=int(row["max_depth_reached"]),
