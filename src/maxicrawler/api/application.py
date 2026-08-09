@@ -78,6 +78,9 @@ def create_app(
             Route("/", routes.dashboard, methods=["GET"], name="dashboard"),
             Route("/crawls", routes.crawls, methods=["GET"], name="crawls"),
             Route("/crawls", routes.start_crawl, methods=["POST"], name="start_crawl"),
+            # Before the page, because `{job_id}` would otherwise swallow the
+            # suffix and answer a request for JSON with HTML.
+            Route("/crawls/{job_id}.json", routes.crawl_json, methods=["GET"], name="crawl_json"),
             Route("/crawls/{job_id}", routes.crawl_detail, methods=["GET"], name="crawl_detail"),
             Route(
                 "/crawls/{job_id}/events",

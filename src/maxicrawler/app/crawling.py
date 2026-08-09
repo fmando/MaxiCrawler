@@ -34,6 +34,7 @@ from maxicrawler.database import (
     SQLiteDatabase,
     SQLiteDiscoveryRepository,
     StoredCrawl,
+    StoredUrl,
 )
 from maxicrawler.events import EventBus
 from maxicrawler.utils import require_http_scheme
@@ -175,3 +176,19 @@ class CrawlService:
         repository = SQLiteCrawlRepository(SQLiteDatabase(self._settings.database_path))
         repository.initialize()
         return repository.stored_crawls()[:limit]
+
+    def discovered_urls(self, session_id: str) -> tuple[StoredUrl, ...]:
+        """Return the URLs one crawl recorded, in the order it found them.
+
+        Empty for a crawl run with ``persist=False``, which is not the same
+        thing as a crawl that found nothing — a caller that shows this has the
+        report's own count to tell the two apart, and should.
+
+        Every row is read rather than a page of them. The crawl's own page
+        ceiling bounds how many there can be, and reading all of them is what
+        lets a caller order them by something other than the insertion order
+        the ``LIMIT`` would have to follow.
+        """
+        repository = SQLiteDiscoveryRepository(SQLiteDatabase(self._settings.database_path))
+        repository.initialize()
+        return repository.stored_urls(session_id)

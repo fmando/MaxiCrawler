@@ -15,5 +15,6 @@ comes before that.
 """
 
 from maxicrawler.app.crawling import CrawlService
+from maxicrawler.app.serialization import crawl_document, page_document
 
-__all__ = ["CrawlService"]
+__all__ = ["CrawlService", "crawl_document", "page_document"]

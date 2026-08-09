@@ -235,6 +235,60 @@ def test_not_persisting_writes_nothing(tmp_path: Path) -> None:
     assert not database.exists()
 
 
+# --- reading back what a crawl recorded --------------------------------------
+
+
+def test_a_recorded_crawl_can_be_asked_for_its_urls(tmp_path: Path) -> None:
+    service = CrawlService(
+        Settings(user_agent="MaxiCrawler/test", database_path=tmp_path / "urls.db")
+    )
+
+    with serve(make_site()) as base:
+        session = service.build_session(f"{base}/", depth=2, same_domain=True)
+        report = service.run(session, persist=True)
+
+    urls = service.discovered_urls(session.session_id)
+
+    assert len(urls) == report.summary.unique_urls
+    assert MEGA_LINK in {stored.record.raw_url for stored in urls}
+
+
+def test_recorded_urls_name_the_plugin_that_claimed_them(tmp_path: Path) -> None:
+    service = CrawlService(
+        Settings(user_agent="MaxiCrawler/test", database_path=tmp_path / "urls.db")
+    )
+
+    with serve(make_site()) as base:
+        session = service.build_session(f"{base}/", depth=2, same_domain=True)
+        service.run(session, persist=True)
+
+    plugins = {stored.plugin_name for stored in service.discovered_urls(session.session_id)}
+
+    assert "mega" in plugins
+
+
+def test_a_crawl_that_did_not_persist_recorded_no_urls(tmp_path: Path) -> None:
+    """Which the interface must not confuse with a crawl that found none."""
+    service = CrawlService(
+        Settings(user_agent="MaxiCrawler/test", database_path=tmp_path / "urls.db")
+    )
+
+    with serve(make_site()) as base:
+        session = service.build_session(f"{base}/", depth=2, same_domain=True)
+        report = service.run(session, persist=False)
+
+    assert service.discovered_urls(session.session_id) == ()
+    assert report.summary.unique_urls > 0
+
+
+def test_asking_for_an_unknown_crawl_is_not_an_error(tmp_path: Path) -> None:
+    service = CrawlService(
+        Settings(user_agent="MaxiCrawler/test", database_path=tmp_path / "urls.db")
+    )
+
+    assert service.discovered_urls("no-such-crawl") == ()
+
+
 # --- the CLI is a client of this service, not a second implementation --------
 
 

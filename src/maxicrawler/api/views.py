@@ -23,11 +23,22 @@ from typing import Any
 
 from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.crawler import PluginUsage
-from maxicrawler.database import StoredCrawl
+from maxicrawler.database import StoredCrawl, StoredUrl
 from maxicrawler.plugins.generic import GENERIC_PLUGIN_NAME
 from maxicrawler.web.models import LinkKind
 from maxicrawler.web.report import CrawlReport, PageOutcome, SkipReason
 from maxicrawler.web.session import CrawlOptions, CrawlState
+
+MAX_LISTED_PAGES = 200
+"""How many pages a report lists before saying how many it left out."""
+
+MAX_LISTED_LINKS = 200
+"""How many discovered URLs a report lists before saying the same.
+
+A crawl of fifty pages routinely finds thousands. A table that long is not a
+report, and the JSON document beside it is the right answer for anyone who
+wants all of them.
+"""
 
 STATE_LABELS: dict[CrawlState, str] = {
     CrawlState.PENDING: "queued",
@@ -115,6 +126,21 @@ class PluginShare:
         """Return the share as a rounded percentage."""
         return f"{self.share * 100:.0f}%"
 
+    @property
+    def count_label(self) -> str:
+        """Return the count as the page prints it."""
+        return format_number(self.count)
+
+    @property
+    def width(self) -> str:
+        """Return the bar width as a CSS percentage.
+
+        Not rounded to whole percent like the label: a plugin accounting for
+        four URLs in ten thousand would otherwise draw a bar of nothing, and a
+        bar that is invisible says "none" where the table says "4".
+        """
+        return f"{max(self.share * 100, 0.4):.2f}%" if self.count else "0%"
+
 
 def plugin_shares(usage: Iterable[PluginUsage]) -> tuple[PluginShare, ...]:
     """Return the plugin distribution, the interesting plugins first.
@@ -140,7 +166,13 @@ def plugin_shares(usage: Iterable[PluginUsage]) -> tuple[PluginShare, ...]:
 
 
 def progress_view(snapshot: JobSnapshot) -> dict[str, Any]:
-    """Return what a running crawl's page shows."""
+    """Return what a running crawl's page shows.
+
+    Every count leaves here as a string a template can print unchanged. That is
+    what lets the browser's live update write values into the page without
+    formatting anything: the numbers it receives are the ones the server would
+    have rendered.
+    """
     return {
         "job_id": snapshot.job_id,
         "seed_url": snapshot.seed_url,
@@ -148,11 +180,11 @@ def progress_view(snapshot: JobSnapshot) -> dict[str, Any]:
         "state_label": _state_label(snapshot),
         "state_tone": _state_tone(snapshot),
         "options": describe_options(snapshot.options),
-        "max_pages": snapshot.options.max_pages,
-        "pages_visited": snapshot.pages_visited,
-        "pages_failed": snapshot.pages_failed,
-        "pages_attempted": snapshot.pages_attempted,
-        "links_found": snapshot.links_found,
+        "max_pages": format_number(snapshot.options.max_pages),
+        "pages_visited": format_number(snapshot.pages_visited),
+        "pages_failed": format_number(snapshot.pages_failed),
+        "pages_attempted": format_number(snapshot.pages_attempted),
+        "links_found": format_number(snapshot.links_found),
         "latest_url": snapshot.latest_url,
         "elapsed": format_duration(snapshot.elapsed_seconds),
         "progress_percent": round(snapshot.progress * 100),
@@ -173,21 +205,62 @@ def report_view(report: CrawlReport) -> dict[str, Any]:
         "state_tone": STATE_TONES[report.state],
         "options": describe_options(report.session.options),
         "elapsed": format_duration(statistics.elapsed_seconds),
-        "finished_at": report.finished_at,
-        "pages_visited": statistics.pages_visited,
-        "pages_failed": statistics.pages_failed,
-        "pages_attempted": statistics.pages_attempted,
-        "pages_skipped": statistics.pages_skipped,
+        "finished_at": format_timestamp(report.finished_at),
+        "pages_visited": format_number(statistics.pages_visited),
+        "pages_failed": format_number(statistics.pages_failed),
+        "pages_attempted": format_number(statistics.pages_attempted),
+        "pages_skipped": format_number(statistics.pages_skipped),
         "max_depth_reached": statistics.max_depth_reached,
-        "frontier_remaining": statistics.frontier_remaining,
-        "requests_without_a_page": statistics.requests_without_a_page,
-        "links_found": summary.total_urls,
-        "unique_urls": summary.unique_urls,
-        "duplicates_removed": summary.duplicates_removed,
-        "unresolved_urls": summary.statistics.unresolved_urls,
+        "frontier_remaining": format_number(statistics.frontier_remaining),
+        "requests_without_a_page": format_number(statistics.requests_without_a_page),
+        "links_found": format_number(summary.total_urls),
+        "unique_urls": format_number(summary.unique_urls),
+        "duplicates_removed": format_number(summary.duplicates_removed),
+        "unresolved_urls": format_number(summary.statistics.unresolved_urls),
+        "has_failures": statistics.pages_failed > 0,
+        "hit_the_page_limit": report.state is CrawlState.PAGE_LIMIT,
+        "left_in_frontier": statistics.frontier_remaining > 0,
+        # Worth a line only when it differs from the two visible counters: it
+        # is what explains a page ceiling arriving sooner than they suggest.
+        # A boolean, so no template ends up comparing a formatted number.
+        "had_answers_that_were_not_pages": statistics.requests_without_a_page > 0,
         "skips": _skip_rows(statistics.skips_by_reason),
         "link_kinds": _kind_rows(statistics.links_by_kind),
         "plugins": plugin_shares(summary.plugin_usage),
+        "json_url": f"/crawls/{report.session.session_id}.json",
+    }
+
+
+def page_table(report: CrawlReport, *, limit: int = MAX_LISTED_PAGES) -> dict[str, Any]:
+    """Return the page table, and an honest count of what it left out."""
+    total = len(report.pages)
+    return {
+        "rows": page_rows(report, limit=limit),
+        "total": format_number(total),
+        "hidden": format_number(max(0, total - limit)),
+        "has_hidden": total > limit,
+    }
+
+
+def link_table(
+    urls: Iterable[StoredUrl], *, discovered: int, limit: int = MAX_LISTED_LINKS
+) -> dict[str, Any]:
+    """Return the link table for the URLs one crawl recorded.
+
+    *discovered* is what the report counted, which is not always what the
+    database holds: a crawl run without persistence records nothing at all. The
+    two numbers are kept apart so the page can say "not recorded" rather than
+    showing an empty table that reads as "nothing found".
+    """
+    recorded = tuple(urls)
+    total = len(recorded)
+    return {
+        "rows": link_rows(recorded, limit=limit),
+        "total": format_number(total),
+        "hidden": format_number(max(0, total - limit)),
+        "has_hidden": total > limit,
+        "discovered": format_number(discovered),
+        "was_recorded": total > 0 or discovered == 0,
     }
 
 
@@ -244,20 +317,59 @@ def _page_row(page: PageOutcome) -> dict[str, Any]:
         "status_label": "err" if page.status is None else str(page.status),
         "title": page.title,
         "canonical_url": page.canonical_url,
-        "link_count": page.link_count,
+        "link_count": format_number(page.link_count),
         "error": page.error,
         "succeeded": page.succeeded,
     }
 
 
+def link_rows(urls: Iterable[StoredUrl], *, limit: int | None = None) -> tuple[dict[str, Any], ...]:
+    """Return one row per recorded URL, the interesting plugins first.
+
+    Same ordering as :func:`plugin_shares`, for the same reason. Discovery
+    order would be the honest default, but a page of share links produces
+    thousands of generic URLs and a handful of Mega ones, and a table cut off
+    at two hundred rows would then contain none of the links this project
+    exists to find. Within each group the discovery order is kept.
+    """
+    ordered = sorted(enumerate(urls), key=lambda entry: (_link_priority(entry[1]), entry[0]))
+    chosen = ordered if limit is None else ordered[:limit]
+    return tuple(_link_row(stored) for _, stored in chosen)
+
+
+def _link_row(stored: StoredUrl) -> dict[str, Any]:
+    """Return one recorded URL as a table row."""
+    record = stored.record
+    return {
+        "url": record.normalized_url,
+        "raw_url": record.raw_url,
+        "was_normalized": record.raw_url != record.normalized_url,
+        "source_url": record.source_url,
+        "plugin": stored.plugin_name or "unresolved",
+        "category": stored.category or "—",
+        # True when a host-specific plugin claimed it rather than the fallback,
+        # which is what the table gives its one piece of emphasis to.
+        "is_notable": _link_priority(stored) == 0,
+    }
+
+
+def _link_priority(stored: StoredUrl) -> int:
+    """Return which group a recorded URL sorts into: host, generic, unresolved."""
+    if stored.plugin_name is None:
+        return 2
+    return 1 if stored.plugin_name == GENERIC_PLUGIN_NAME else 0
+
+
 def _skip_rows(skips: Iterable[tuple[SkipReason, int]]) -> tuple[dict[str, Any], ...]:
     """Return why URLs were turned away, most frequent first."""
-    return tuple({"reason": str(reason), "count": count} for reason, count in skips)
+    return tuple({"reason": str(reason), "count": format_number(count)} for reason, count in skips)
 
 
 def _kind_rows(kinds: Iterable[tuple[LinkKind, int]]) -> tuple[dict[str, Any], ...]:
     """Return how links were written, in the order the report lists them."""
-    return tuple({"kind": KIND_LABELS[kind], "count": count} for kind, count in kinds)
+    return tuple(
+        {"kind": KIND_LABELS[kind], "count": format_number(count)} for kind, count in kinds
+    )
 
 
 def _state_label(snapshot: JobSnapshot) -> str:

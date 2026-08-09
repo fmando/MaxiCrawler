@@ -16,12 +16,13 @@ from urllib.parse import parse_qs
 
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
-from starlette.responses import RedirectResponse, Response, StreamingResponse
+from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.templating import Jinja2Templates
 
 from maxicrawler import __version__
 from maxicrawler.api import stream, views
-from maxicrawler.api.jobs import CrawlJobs
+from maxicrawler.api.jobs import CrawlJob, CrawlJobs
+from maxicrawler.app import crawl_document
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 """Where the pages live. Beside the code, so an installed wheel carries them."""
@@ -52,6 +53,20 @@ def jobs_of(request: Request) -> CrawlJobs:
     """Return the job registry this application is running crawls through."""
     registry: CrawlJobs = request.app.state.jobs
     return registry
+
+
+def _job(request: Request) -> CrawlJob:
+    """Return the crawl this request addresses.
+
+    Raises:
+        HTTPException: this process does not hold that crawl. Which includes
+            one it ran and has since evicted — the registry is a live view, not
+            the record.
+    """
+    job = jobs_of(request).get(request.path_params["job_id"])
+    if job is None:
+        raise HTTPException(status_code=404, detail="no such crawl")
+    return job
 
 
 def page(
@@ -109,19 +124,50 @@ async def start_crawl(request: Request) -> Response:
 
 
 async def crawl_detail(request: Request) -> Response:
-    """Show one crawl as it stands.
+    """Show one crawl as it stands, or everything it found once it is over.
 
     Rendered by the server on every request, so a reload is a complete way to
     follow a crawl. What a live stream adds is convenience, not capability.
     """
-    job = jobs_of(request).get(request.path_params["job_id"])
-    if job is None:
-        raise HTTPException(status_code=404, detail="no such crawl")
-    return page(
-        request,
-        "crawl.html",
-        {"crawl": views.progress_view(job.snapshot())},
-        section="crawls",
+    job = _job(request)
+    context: dict[str, Any] = {"crawl": views.progress_view(job.snapshot())}
+    report = job.report
+    if report is not None:
+        context["report"] = views.report_view(report)
+        context["pages"] = views.page_table(report)
+        context["links"] = views.link_table(
+            jobs_of(request).service.discovered_urls(report.session.session_id),
+            discovered=report.summary.unique_urls,
+        )
+    return page(request, "crawl.html", context, section="crawls")
+
+
+async def crawl_json(request: Request) -> Response:
+    """Answer with the whole report as JSON.
+
+    The same document ``maxicrawler crawl --json`` prints, because it is the
+    same function. A page shows two hundred rows of a crawl that found
+    thousands; this is where the rest of them are.
+    """
+    job = _job(request)
+    report = job.report
+    if report is not None:
+        return JSONResponse(crawl_document(report))
+    # No report, for one of two reasons, and the same answer serves both: a
+    # crawl still running has not written one yet, and a crawl whose seed could
+    # not be read never will. `finished` is what tells a client which it is,
+    # and so whether asking again is worth anything.
+    snapshot = job.snapshot()
+    return JSONResponse(
+        {
+            "session_id": job.id,
+            "seed_url": snapshot.seed_url,
+            "state": str(snapshot.state),
+            "finished": snapshot.is_finished,
+            "error": snapshot.error,
+            "detail": snapshot.error or "the crawl has not finished",
+        },
+        status_code=409,
     )
 
 
@@ -131,9 +177,7 @@ async def crawl_events(request: Request) -> Response:
     Server-sent events rather than WebSockets: the traffic runs one way, and a
     browser reconnects on its own without anything being written for it.
     """
-    job = jobs_of(request).get(request.path_params["job_id"])
-    if job is None:
-        raise HTTPException(status_code=404, detail="no such crawl")
+    job = _job(request)
     return StreamingResponse(
         stream.event_stream(job),
         media_type="text/event-stream",
@@ -153,9 +197,7 @@ async def stop_crawl(request: Request) -> Response:
     off. Stopping is not instant -- the engine finishes the page it is on --
     and the page says so rather than pretending the click was the end of it.
     """
-    job = jobs_of(request).get(request.path_params["job_id"])
-    if job is None:
-        raise HTTPException(status_code=404, detail="no such crawl")
+    job = _job(request)
     job.stop()
     return RedirectResponse(url=f"/crawls/{job.id}", status_code=303)
 

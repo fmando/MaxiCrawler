@@ -17,13 +17,17 @@ from maxicrawler.api.views import (
     describe_scope,
     format_duration,
     format_number,
+    link_rows,
+    link_table,
     page_rows,
+    page_table,
     plugin_shares,
     progress_view,
     report_view,
 )
 from maxicrawler.crawler import DiscoverySummary, PluginUsage
-from maxicrawler.domain import ScanSession, Statistics
+from maxicrawler.database import StoredUrl
+from maxicrawler.domain import ScanSession, Statistics, UrlRecord
 from maxicrawler.web.models import LinkKind
 from maxicrawler.web.report import CrawlReport, CrawlStatistics, PageOutcome, SkipReason
 from maxicrawler.web.session import CrawlOptions, CrawlSession, CrawlState
@@ -180,12 +184,19 @@ def test_a_zero_total_does_not_divide_by_zero() -> None:
 def test_a_running_crawl_reports_its_counters() -> None:
     view = progress_view(make_snapshot(pages_visited=12, pages_failed=1, links_found=340))
 
-    assert view["pages_visited"] == 12
-    assert view["pages_failed"] == 1
-    assert view["pages_attempted"] == 13
-    assert view["links_found"] == 340
+    assert view["pages_visited"] == "12"
+    assert view["pages_failed"] == "1"
+    assert view["pages_attempted"] == "13"
+    assert view["links_found"] == "340"
     assert view["state_label"] == "running"
     assert view["state_tone"] == "busy"
+
+
+def test_a_running_crawl_groups_its_thousands() -> None:
+    """The live update writes these straight into the page, so they arrive ready."""
+    view = progress_view(make_snapshot(links_found=17910))
+
+    assert view["links_found"] == "17,910"
 
 
 def test_progress_is_a_whole_percentage_for_a_bar() -> None:
@@ -227,15 +238,15 @@ def test_the_running_view_formats_its_elapsed_time() -> None:
 def test_a_report_carries_every_counter_the_page_shows() -> None:
     view = report_view(make_report())
 
-    assert view["pages_visited"] == 28
-    assert view["pages_failed"] == 2
-    assert view["pages_attempted"] == 31
-    assert view["pages_skipped"] == 4760
-    assert view["links_found"] == 7648
-    assert view["unique_urls"] == 2919
-    assert view["duplicates_removed"] == 4729
+    assert view["pages_visited"] == "28"
+    assert view["pages_failed"] == "2"
+    assert view["pages_attempted"] == "31"
+    assert view["pages_skipped"] == "4,760"
+    assert view["links_found"] == "7,648"
+    assert view["unique_urls"] == "2,919"
+    assert view["duplicates_removed"] == "4,729"
     assert view["max_depth_reached"] == 2
-    assert view["frontier_remaining"] == 7
+    assert view["frontier_remaining"] == "7"
     assert view["elapsed"] == "18.8 s"
 
 
@@ -243,8 +254,8 @@ def test_a_report_names_why_urls_were_skipped() -> None:
     view = report_view(make_report())
 
     assert view["skips"] == (
-        {"reason": "not a page link", "count": 2616},
-        {"reason": "already seen", "count": 2144},
+        {"reason": "not a page link", "count": "2,616"},
+        {"reason": "already seen", "count": "2,144"},
     )
 
 
@@ -252,8 +263,8 @@ def test_a_report_names_how_links_were_written() -> None:
     view = report_view(make_report())
 
     assert view["link_kinds"] == (
-        {"kind": "anchor", "count": 5022},
-        {"kind": "image", "count": 2502},
+        {"kind": "anchor", "count": "5,022"},
+        {"kind": "image", "count": "2,502"},
     )
 
 
@@ -261,6 +272,51 @@ def test_a_report_puts_mega_before_generic() -> None:
     view = report_view(make_report())
 
     assert [share.name for share in view["plugins"]] == ["mega", "generic"]
+
+
+def test_a_share_carries_what_the_bar_and_the_label_need() -> None:
+    (mega, generic) = report_view(make_report())["plugins"]
+
+    assert mega.count_label == "1,291"
+    assert mega.percent == "44%"
+    assert generic.width.endswith("%")
+
+
+def test_a_share_of_almost_nothing_still_draws_something() -> None:
+    """An invisible bar would say "none" where the count beside it says "4"."""
+    mega, _generic = plugin_shares((PluginUsage("generic", 9996), PluginUsage("mega", 4)))
+
+    assert mega.percent == "0%"
+    assert mega.width == "0.40%"
+
+
+def test_a_plugin_that_claimed_nothing_draws_no_bar() -> None:
+    (share,) = plugin_shares((PluginUsage("generic", 0),))
+
+    assert share.width == "0%"
+
+
+def test_a_report_points_at_the_whole_document() -> None:
+    assert report_view(make_report())["json_url"] == "/crawls/job-1.json"
+
+
+def test_a_report_says_when_it_finished() -> None:
+    assert report_view(make_report())["finished_at"] == "2026-08-09 12:00"
+
+
+def test_a_report_that_ran_out_of_budget_says_so() -> None:
+    assert report_view(make_report(state=CrawlState.PAGE_LIMIT))["hit_the_page_limit"] is True
+    assert report_view(make_report())["hit_the_page_limit"] is False
+
+
+def test_requests_that_produced_no_page_are_flagged_rather_than_compared() -> None:
+    """The ceiling counts these, so a report that hides them explains nothing."""
+    quiet = CrawlStatistics(pages_visited=4, pages_failed=1, pages_attempted=5)
+    noisy = CrawlStatistics(pages_visited=4, pages_failed=1, pages_attempted=9)
+
+    assert report_view(make_report(statistics=quiet))["had_answers_that_were_not_pages"] is False
+    assert report_view(make_report(statistics=noisy))["had_answers_that_were_not_pages"] is True
+    assert report_view(make_report(statistics=noisy))["requests_without_a_page"] == "4"
 
 
 @pytest.mark.parametrize(
@@ -333,6 +389,127 @@ def test_the_page_table_can_be_limited() -> None:
 
 def test_a_crawl_with_no_pages_yields_no_rows() -> None:
     assert page_rows(make_report()) == ()
+
+
+def test_the_page_table_says_how_many_it_left_out() -> None:
+    pages = tuple(
+        PageOutcome(url=f"https://example.test/{index}", depth=1, status=200) for index in range(12)
+    )
+
+    table = page_table(make_report(pages=pages), limit=5)
+
+    assert len(table["rows"]) == 5
+    assert table["total"] == "12"
+    assert table["hidden"] == "7"
+    assert table["has_hidden"] is True
+
+
+def test_a_page_table_that_shows_everything_says_nothing_about_hiding() -> None:
+    pages = (PageOutcome(url="https://example.test/", depth=0, status=200),)
+
+    table = page_table(make_report(pages=pages), limit=5)
+
+    assert table["has_hidden"] is False
+    assert table["hidden"] == "0"
+
+
+# --- the link table ----------------------------------------------------------
+
+
+def make_stored_url(url: str, plugin: str | None, category: str | None = "share") -> StoredUrl:
+    """Return a discovered URL as the database holds it."""
+    return StoredUrl(
+        record=UrlRecord(raw_url=url, normalized_url=url, source_url="https://example.test/"),
+        plugin_name=plugin,
+        category=category,
+    )
+
+
+def test_recorded_urls_become_rows() -> None:
+    stored = make_stored_url("https://mega.nz/file/AaBbCcDd", "mega")
+
+    (row,) = link_rows([stored])
+
+    assert row["url"] == "https://mega.nz/file/AaBbCcDd"
+    assert row["plugin"] == "mega"
+    assert row["category"] == "share"
+    assert row["source_url"] == "https://example.test/"
+    assert row["is_notable"] is True
+
+
+def test_a_link_the_generic_plugin_claimed_is_not_notable() -> None:
+    (row,) = link_rows([make_stored_url("https://example.test/a", "generic")])
+
+    assert row["is_notable"] is False
+
+
+def test_a_link_no_plugin_claimed_says_so() -> None:
+    (row,) = link_rows([make_stored_url("https://example.test/a", None, None)])
+
+    assert row["plugin"] == "unresolved"
+    assert row["is_notable"] is False
+
+
+def test_a_normalized_link_keeps_what_was_written() -> None:
+    stored = StoredUrl(
+        record=UrlRecord(
+            raw_url="https://Example.test/A?b=1#frag", normalized_url="https://example.test/A?b=1"
+        ),
+        plugin_name="generic",
+        category=None,
+    )
+
+    (row,) = link_rows([stored])
+
+    assert row["was_normalized"] is True
+    assert row["raw_url"] == "https://Example.test/A?b=1#frag"
+
+
+def test_host_plugins_come_before_the_fallback() -> None:
+    """A table cut off at two hundred rows must not consist of generic links."""
+    urls = [make_stored_url(f"https://example.test/{index}", "generic") for index in range(5)]
+    urls.append(make_stored_url("https://mega.nz/file/AaBbCcDd", "mega"))
+    urls.append(make_stored_url("https://example.test/x", None, None))
+
+    rows = link_rows(urls)
+
+    assert rows[0]["plugin"] == "mega"
+    assert rows[-1]["plugin"] == "unresolved"
+
+
+def test_discovery_order_survives_inside_a_group() -> None:
+    urls = [make_stored_url(f"https://example.test/{index}", "generic") for index in range(4)]
+
+    rows = link_rows(urls)
+
+    assert [row["url"] for row in rows] == [f"https://example.test/{index}" for index in range(4)]
+
+
+def test_the_link_table_says_how_many_it_left_out() -> None:
+    urls = [make_stored_url(f"https://example.test/{index}", "generic") for index in range(9)]
+
+    table = link_table(urls, discovered=9, limit=4)
+
+    assert len(table["rows"]) == 4
+    assert table["total"] == "9"
+    assert table["hidden"] == "5"
+    assert table["was_recorded"] is True
+
+
+def test_a_crawl_that_recorded_nothing_is_not_a_crawl_that_found_nothing() -> None:
+    """The difference the page has to state rather than show an empty table for."""
+    table = link_table((), discovered=2919)
+
+    assert table["rows"] == ()
+    assert table["was_recorded"] is False
+    assert table["discovered"] == "2,919"
+
+
+def test_a_crawl_that_genuinely_found_nothing_says_that_instead() -> None:
+    table = link_table((), discovered=0)
+
+    assert table["rows"] == ()
+    assert table["was_recorded"] is True
 
 
 # --- the label tables --------------------------------------------------------

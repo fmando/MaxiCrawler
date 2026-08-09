@@ -1,0 +1,53 @@
+{#
+  Every page the crawl reached, in the order it reached them.
+
+  A partial, like every table here, so a later "failures only" filter is a
+  request for this fragment rather than a second rendering in JavaScript.
+#}
+<section class="panel">
+  <h2>
+    Pages
+    <span class="count">{{ pages.total }}</span>
+  </h2>
+
+  {% if pages.rows %}
+    <table class="grid">
+      <thead>
+        <tr>
+          <th class="right">Status</th>
+          <th class="right">Depth</th>
+          <th>URL</th>
+          <th>Title</th>
+          <th class="right">Links</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for page in pages.rows %}
+          <tr>
+            <td class="right num{% if not page.succeeded %} bad-text{% endif %}">{{ page.status_label }}</td>
+            <td class="right num muted">{{ page.depth }}</td>
+            <td class="url">
+              {{ page.url }}
+              {% if page.was_redirected %}
+                <div class="muted small">→ {{ page.final_url }}</div>
+              {% endif %}
+              {% if page.error %}
+                <div class="bad-text small">{{ page.error }}</div>
+              {% endif %}
+            </td>
+            <td>{{ page.title or "" }}</td>
+            <td class="right num">{{ page.link_count }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if pages.has_hidden %}
+      <p class="empty">
+        {{ pages.hidden }} more pages are not shown here.
+        They are all in <a href="{{ report.json_url }}">the JSON report</a>.
+      </p>
+    {% endif %}
+  {% else %}
+    <p class="empty">No pages were read.</p>
+  {% endif %}
+</section>

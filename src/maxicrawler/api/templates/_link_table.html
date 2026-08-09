@@ -1,0 +1,60 @@
+{#
+  The URLs the crawl recorded.
+
+  Host-specific plugins first, then the generic fallback, then whatever could
+  not be resolved -- the same order the distribution uses, and for the same
+  reason: two hundred rows of generic links would otherwise hide the handful
+  this crawl was run to find.
+#}
+<section class="panel">
+  <h2>
+    Discovered links
+    <span class="count">{{ links.total }} unique</span>
+  </h2>
+
+  {% if links.rows %}
+    <table class="grid">
+      <thead>
+        <tr>
+          <th>Plugin</th>
+          <th>Category</th>
+          <th>URL</th>
+          <th>Found on</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for link in links.rows %}
+          <tr>
+            <td{% if not link.is_notable %} class="muted"{% endif %}>{{ link.plugin }}</td>
+            <td class="muted">{{ link.category }}</td>
+            <td class="url">
+              {{ link.url }}
+              {% if link.was_normalized %}
+                <div class="muted small">as written: {{ link.raw_url }}</div>
+              {% endif %}
+            </td>
+            <td class="url muted small">{{ link.source_url or "—" }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if links.has_hidden %}
+      <p class="empty">
+        {{ links.hidden }} more URLs are not shown here.
+        They are all in <a href="{{ report.json_url }}">the JSON report</a>.
+      </p>
+    {% endif %}
+  {% elif links.was_recorded %}
+    <p class="empty">No links were found.</p>
+  {% else %}
+    {#
+      An empty table would read as "nothing found", which is a different claim
+      from "nothing was written down". The crawl counted them; only the
+      database was switched off.
+    #}
+    <p class="empty">
+      This crawl found {{ links.discovered }} unique URLs but recorded none of them:
+      it ran without persistence. The counts above are still what it saw.
+    </p>
+  {% endif %}
+</section>

@@ -93,10 +93,10 @@ def test_a_payload_describes_the_snapshot() -> None:
 
     payload = snapshot_payload(snapshot)
 
-    assert payload["pages_visited"] == 3
-    assert payload["pages_failed"] == 1
-    assert payload["pages_attempted"] == 4
-    assert payload["links_found"] == 42
+    assert payload["pages_visited"] == "3"
+    assert payload["pages_failed"] == "1"
+    assert payload["pages_attempted"] == "4"
+    assert payload["links_found"] == "42"
     assert payload["latest_url"] == "https://example.test/a"
     assert payload["is_finished"] is False
 
@@ -151,7 +151,7 @@ def test_the_first_frame_describes_the_present() -> None:
     event = run(first)
 
     assert event.name == "progress"
-    assert event.data["pages_visited"] == 2
+    assert event.data["pages_visited"] == "2"
 
 
 def test_a_crawl_that_already_finished_says_so_immediately() -> None:
@@ -215,7 +215,7 @@ def test_progress_from_a_worker_thread_reaches_the_stream() -> None:
 
     assert events[0].name == "progress"
     assert events[-1].name == "finished"
-    assert events[-1].data["pages_visited"] == 2
+    assert events[-1].data["pages_visited"] == "2"
     assert events[-1].data["state"] == "completed"
 
 
@@ -242,7 +242,7 @@ def test_a_slow_reader_gets_the_latest_state_not_a_backlog() -> None:
 
     assert len(events) < 20
     assert events[-1].name == "finished"
-    assert events[-1].data["pages_visited"] == 20
+    assert events[-1].data["pages_visited"] == "20"
 
 
 def test_a_quiet_stream_sends_a_heartbeat() -> None:
@@ -358,7 +358,7 @@ def test_a_page_failure_is_counted_in_the_stream() -> None:
             return event
         raise AssertionError("the stream yielded nothing")
 
-    assert run(first).data["pages_failed"] == 1
+    assert run(first).data["pages_failed"] == "1"
 
 
 def test_a_stream_over_a_job_that_never_starts_keeps_breathing() -> None:

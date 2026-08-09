@@ -14,7 +14,7 @@ from maxicrawler import __version__
 from maxicrawler.api import create_app
 from maxicrawler.api.jobs import CrawlJobs
 from maxicrawler.api.routes import SECTIONS, STATIC_DIRECTORY, TEMPLATES
-from maxicrawler.app import CrawlService
+from maxicrawler.app import CrawlService, crawl_document
 from maxicrawler.config import Settings
 from maxicrawler.database import SQLiteCrawlRepository, SQLiteDatabase
 from maxicrawler.web.report import CrawlReport, CrawlStatistics
@@ -230,14 +230,21 @@ def live_client(tmp_path: Path) -> Iterator[TestClient]:
 
 
 def wait_until_finished(test_client: TestClient, job_id: str, *, timeout: float = 20.0) -> str:
-    """Return the crawl page once the crawl behind it has finished."""
+    """Return the crawl page once the crawl behind it has finished.
+
+    Asked of the JSON endpoint rather than by reading words out of the page,
+    which is both the exact condition the page changes on and impossible to
+    fool: a report saying "7 still queued" used to read as a running crawl.
+
+    A crawl that failed never produces a report, so the refusal is asked too.
+    """
     from time import monotonic, sleep
 
     deadline = monotonic() + timeout
     while monotonic() < deadline:
-        body = test_client.get(f"/crawls/{job_id}").text
-        if "running" not in body and "queued" not in body:
-            return body
+        response = test_client.get(f"/crawls/{job_id}.json")
+        if response.status_code == 200 or response.json()["finished"]:
+            return test_client.get(f"/crawls/{job_id}").text
         sleep(0.05)
     raise AssertionError("the crawl did not finish in time")
 
@@ -298,7 +305,8 @@ def test_the_crawl_page_is_rendered_by_the_server(tmp_path: Path) -> None:
         body = wait_until_finished(test_client, job_id)
 
     assert "<script" not in body
-    assert 'id="pages-visited"' in body
+    assert "Pages read" in body
+    assert "Discovered links" in body
 
 
 def test_an_unknown_crawl_is_not_found(tmp_path: Path) -> None:
@@ -563,3 +571,145 @@ def test_the_server_answers_while_a_crawl_is_running(tmp_path: Path) -> None:
 
         test_client.post(f"/crawls/{job_id}/stop")
         wait_until_finished(test_client, job_id)
+
+
+# --- what a finished crawl shows ---------------------------------------------
+
+MEGA_LINK = "https://mega.nz/file/AaBbCcDd#0123456789abcdefghijklmnopqrstuvwxyzABC"
+
+
+@contextmanager
+def recording_client(tmp_path: Path) -> Iterator[TestClient]:
+    """Yield a client whose crawls write their URLs down, as a server's would."""
+    service = CrawlService(
+        Settings(
+            user_agent="MaxiCrawler/test",
+            database_path=tmp_path / "urls.db",
+            network_timeout=5.0,
+        )
+    )
+    jobs = CrawlJobs(service, persist=True)
+    try:
+        with TestClient(create_app(service=service, jobs=jobs)) as test_client:
+            yield test_client
+    finally:
+        jobs.shutdown()
+
+
+def findable_site() -> Site:
+    """Return a small site with something worth finding on it."""
+    site = Site()
+    site.add_html("/", f'<a href="/a">a</a><a href="{MEGA_LINK}">share</a><img src="/i.png">')
+    site.add_html("/a", "<title>Second</title><p>x</p>")
+    return site
+
+
+def test_a_finished_crawl_shows_what_it_found(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = wait_until_finished(test_client, start(test_client, base))
+
+    assert "Pages read" in body
+    assert "Which plugin claimed each URL" in body
+    assert "How links were written" in body
+    assert "<th>Title</th>" in body  # the page table
+    assert "Discovered links" in body
+
+
+def test_a_finished_crawl_lists_the_pages_it_reached(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = wait_until_finished(test_client, start(test_client, base))
+
+    assert f"{base}/a" in body
+    assert "Second" in body
+
+
+def test_a_finished_crawl_lists_what_it_discovered(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = wait_until_finished(test_client, start(test_client, base))
+
+    assert MEGA_LINK.split("#")[0] in body
+    assert ">mega</td>" in body
+
+
+def test_the_link_table_puts_mega_above_the_generic_links(tmp_path: Path) -> None:
+    """The one line this project exists to produce must not be below the fold."""
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = wait_until_finished(test_client, start(test_client, base))
+
+    links = body.split("Discovered links", 1)[1]
+
+    assert links.index(">mega</td>") < links.index(">generic</td>")
+
+
+def test_a_finished_crawl_offers_no_stop_button(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = wait_until_finished(test_client, start(test_client, base))
+
+    assert "Stop</button>" not in body
+    assert "<script" not in body
+
+
+def test_a_crawl_that_recorded_nothing_says_so_rather_than_showing_nothing(
+    tmp_path: Path,
+) -> None:
+    """An empty table would claim it found none, which is a different thing."""
+    with live_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = wait_until_finished(test_client, start(test_client, base))
+
+    assert "recorded none of them" in body
+    assert "without persistence" in body
+
+
+# --- the same report as a document -------------------------------------------
+
+
+def test_the_json_endpoint_answers_with_the_shared_document(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        document = test_client.get(f"/crawls/{job_id}.json").json()
+        registry = test_client.app.state.jobs  # type: ignore[attr-defined]
+        expected = crawl_document(registry.get(job_id).report)
+
+    assert document == expected
+    assert document["session_id"] == job_id
+
+
+def test_the_json_endpoint_does_not_shadow_the_page(tmp_path: Path) -> None:
+    """`{job_id}` would happily swallow the suffix if the order were wrong."""
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+
+        assert "text/html" in test_client.get(f"/crawls/{job_id}").headers["content-type"]
+        assert "json" in test_client.get(f"/crawls/{job_id}.json").headers["content-type"]
+
+
+def test_a_running_crawl_has_no_document_yet(tmp_path: Path) -> None:
+    with live_client(tmp_path) as test_client, serve(slow_site(pages=20)) as base:
+        job_id = start(test_client, base)
+        response = test_client.get(f"/crawls/{job_id}.json")
+        test_client.post(f"/crawls/{job_id}/stop")
+        wait_until_finished(test_client, job_id)
+
+    assert response.status_code == 409
+    assert response.json()["finished"] is False
+
+
+def test_a_crawl_that_never_ran_says_it_will_never_have_one(tmp_path: Path) -> None:
+    """A client must be able to tell "not yet" from "not ever"."""
+    site = Site()
+    site.default.status = 500
+
+    with live_client(tmp_path) as test_client, serve(site) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        payload = test_client.get(f"/crawls/{job_id}.json").json()
+
+    assert payload["finished"] is True
+    assert payload["error"]
+
+
+def test_a_document_for_an_unknown_crawl_is_not_found(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        assert test_client.get("/crawls/nope.json").status_code == 404

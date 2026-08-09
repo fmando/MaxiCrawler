@@ -16,6 +16,8 @@
       <form class="stop" method="post" action="/crawls/{{ crawl.job_id }}/stop">
         <button type="submit">Stop</button>
       </form>
+    {% elif report %}
+      <a class="aside" href="{{ report.json_url }}">JSON</a>
     {% endif %}
   </h2>
 
@@ -24,11 +26,23 @@
 
     {% if crawl.error %}
       <p class="error">{{ crawl.error }}</p>
+    {% elif report %}
+      {% include "_report.html" %}
     {% else %}
+      {#
+        Also the last thing a crawl that has ended but whose report is still
+        being assembled shows. The counters are final by then; only the tables
+        below are missing, and a reload brings them.
+      #}
       {% include "_progress.html" %}
     {% endif %}
   </div>
 </section>
+
+{% if report %}
+  {% include "_page_table.html" %}
+  {% include "_link_table.html" %}
+{% endif %}
 
 {% if not crawl.is_finished %}
   {#

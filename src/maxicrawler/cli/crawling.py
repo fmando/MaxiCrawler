@@ -11,13 +11,18 @@ pages get one line each instead, because forty title lines are not a report.
 Two renderers would have drifted within a sprint.
 
 Nothing here reads :class:`~maxicrawler.web.session.RequestContext`. It is
-reachable from a report by traversal, and this is the other place besides the
+reachable from a report by traversal, and this is one of the places besides the
 database adapter where a credential could escape, so a test asserts the
 omission rather than trusting this sentence.
+
+The JSON document is not built here. It is
+:func:`maxicrawler.app.crawl_document`, because the web interface serves the
+same one, and only the indentation is a terminal decision.
 """
 
 import json
 
+from maxicrawler.app import crawl_document
 from maxicrawler.cli.summary import render_summary
 from maxicrawler.web import LinkKind
 from maxicrawler.web.report import CrawlReport, PageOutcome
@@ -83,65 +88,13 @@ def render_crawl(report: CrawlReport) -> str:
 
 
 def render_crawl_json(report: CrawlReport) -> str:
-    """Return *report* as a JSON document.
+    """Return *report* as a JSON document, indented for a scrollback.
 
-    The shape a future API or user interface would serve. It states the crawl,
-    every page it reached and the counters — and nothing about how the requests
-    were made.
+    The document itself comes from :func:`maxicrawler.app.crawl_document`, which
+    the web interface serves as well. Only the indentation is a terminal
+    decision, and it is the only thing this function adds.
     """
-    statistics = report.statistics
-    document = {
-        "session_id": report.session.session_id,
-        "seed_url": report.seed_url,
-        "state": str(report.state),
-        "started_at": report.session.started_at.isoformat(),
-        "finished_at": report.finished_at.isoformat(),
-        "options": {
-            "max_depth": report.session.options.max_depth,
-            "max_pages": report.session.options.max_pages,
-            "same_domain": report.session.options.same_domain,
-            "include_subdomains": report.session.options.include_subdomains,
-        },
-        "statistics": {
-            "pages_visited": statistics.pages_visited,
-            "pages_failed": statistics.pages_failed,
-            "pages_attempted": statistics.pages_attempted,
-            "pages_skipped": statistics.pages_skipped,
-            "skips_by_reason": {str(reason): count for reason, count in statistics.skips_by_reason},
-            "links_by_kind": {str(kind): count for kind, count in statistics.links_by_kind},
-            "links_discovered": report.links_discovered,
-            "max_depth_reached": statistics.max_depth_reached,
-            "frontier_remaining": statistics.frontier_remaining,
-            "elapsed_seconds": round(statistics.elapsed_seconds, 3),
-        },
-        "pages": [_page_document(page) for page in report.pages],
-        "discovery": {
-            "documents_processed": report.summary.documents_processed,
-            "total_urls": report.summary.total_urls,
-            "unique_urls": report.summary.unique_urls,
-            "duplicates_removed": report.summary.duplicates_removed,
-            "unresolved_urls": report.summary.statistics.unresolved_urls,
-            "plugin_usage": [
-                {"name": usage.name, "count": usage.count} for usage in report.summary.plugin_usage
-            ],
-        },
-    }
-    return json.dumps(document, indent=2, sort_keys=False)
-
-
-def _page_document(page: PageOutcome) -> dict[str, object]:
-    """Return one page outcome as a JSON-ready mapping."""
-    return {
-        "url": page.url,
-        "final_url": page.final_url,
-        "depth": page.depth,
-        "status": page.status,
-        "discovered_from": page.discovered_from,
-        "title": page.title,
-        "canonical_url": page.canonical_url,
-        "link_count": page.link_count,
-        "error": page.error,
-    }
+    return json.dumps(crawl_document(report), indent=2, sort_keys=False)
 
 
 def _describe_options(report: CrawlReport) -> str:
