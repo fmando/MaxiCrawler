@@ -93,10 +93,12 @@ class JobSnapshot:
         """Return how far along the crawl is, between 0 and 1.
 
         Measured against the page ceiling, which is the only bound known in
-        advance — a crawl that runs out of links finishes early, and the bar
-        jumping to full at the end is the honest way to show that.
+        advance. A crawl that *completed* reads as full however little of that
+        budget it used, because the work ran out rather than the budget — but
+        only a completed one. A crawl stopped at 48 of 50 pages showing a full
+        bar would be claiming it finished, which is exactly what it did not do.
         """
-        if self.is_finished:
+        if self.state is CrawlState.COMPLETED:
             return 1.0
         return min(1.0, self.pages_attempted / self.options.max_pages)
 

@@ -248,3 +248,20 @@ footer {
 
 .latest { margin: 0; display: flex; gap: 10px; align-items: baseline; font-size: 13px; }
 .latest .url { font-family: var(--mono); word-break: break-all; }
+
+.stop { display: inline; margin-left: auto; }
+.panel > h2 { display: flex; align-items: center; gap: 10px; }
+
+.stop button {
+  background: transparent;
+  border: 1px solid var(--bad);
+  color: var(--bad);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 12px;
+  cursor: pointer;
+}
+.stop button:hover { background: rgba(192, 83, 83, 0.12); }

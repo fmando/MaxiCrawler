@@ -29,6 +29,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from maxicrawler.api import views
 from maxicrawler.api.jobs import CrawlJob, JobSnapshot
 
 DEFAULT_HEARTBEAT_SECONDS = 15.0
@@ -62,26 +63,14 @@ class ServerEvent:
 
 
 def snapshot_payload(snapshot: JobSnapshot) -> dict[str, Any]:
-    """Return the numbers a browser patches into a running crawl's page.
+    """Return exactly what the page shows, ready to be patched into it.
 
-    Deliberately small and mechanical. Turning them into something a person
-    reads — a percentage, a formatted duration — belongs to
-    :mod:`maxicrawler.api.views`, which the server-rendered page uses too, so
-    the two never disagree about what a crawl looks like.
+    The *same* function that renders the page on the server, not a parallel
+    shape. Sending raw numbers instead would push formatting into the browser —
+    a second implementation of "1 min 23 s" living in JavaScript, free to
+    disagree with the one a reload produces.
     """
-    return {
-        "job_id": snapshot.job_id,
-        "state": str(snapshot.state),
-        "pages_visited": snapshot.pages_visited,
-        "pages_failed": snapshot.pages_failed,
-        "pages_attempted": snapshot.pages_attempted,
-        "links_found": snapshot.links_found,
-        "latest_url": snapshot.latest_url,
-        "elapsed_seconds": round(snapshot.elapsed_seconds, 1),
-        "progress": round(snapshot.progress, 4),
-        "finished": snapshot.is_finished,
-        "error": snapshot.error,
-    }
+    return views.progress_view(snapshot)
 
 
 class SnapshotListener:

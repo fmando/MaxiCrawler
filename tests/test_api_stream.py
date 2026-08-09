@@ -98,9 +98,34 @@ def test_a_payload_describes_the_snapshot() -> None:
     assert payload["pages_attempted"] == 4
     assert payload["links_found"] == 42
     assert payload["latest_url"] == "https://example.test/a"
-    assert payload["elapsed_seconds"] == 1.2
-    assert payload["progress"] == 0.4
-    assert payload["finished"] is False
+    assert payload["is_finished"] is False
+
+
+def test_the_payload_is_what_the_page_itself_shows() -> None:
+    """One rendering, two channels. A second formatter in JavaScript would drift."""
+    from maxicrawler.api.views import progress_view
+
+    snapshot = make_job(max_pages=10).snapshot()
+
+    assert snapshot_payload(snapshot) == progress_view(snapshot)
+
+
+def test_the_payload_carries_values_already_formatted() -> None:
+    snapshot = JobSnapshot(
+        job_id="job-1",
+        seed_url="https://example.test/",
+        state=CrawlState.RUNNING,
+        options=CrawlOptions(max_pages=10),
+        started_at=datetime.now(UTC),
+        pages_visited=4,
+        elapsed_seconds=83.0,
+    )
+
+    payload = snapshot_payload(snapshot)
+
+    assert payload["elapsed"] == "1 min 23 s"
+    assert payload["progress_percent"] == 40
+    assert payload["state_label"] == "running"
 
 
 def test_a_payload_survives_json() -> None:

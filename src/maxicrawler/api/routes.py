@@ -16,11 +16,11 @@ from urllib.parse import parse_qs
 
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
-from starlette.responses import RedirectResponse, Response
+from starlette.responses import RedirectResponse, Response, StreamingResponse
 from starlette.templating import Jinja2Templates
 
 from maxicrawler import __version__
-from maxicrawler.api import views
+from maxicrawler.api import stream, views
 from maxicrawler.api.jobs import CrawlJobs
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -123,6 +123,41 @@ async def crawl_detail(request: Request) -> Response:
         {"crawl": views.progress_view(job.snapshot())},
         section="crawls",
     )
+
+
+async def crawl_events(request: Request) -> Response:
+    """Stream one crawl's progress until it ends.
+
+    Server-sent events rather than WebSockets: the traffic runs one way, and a
+    browser reconnects on its own without anything being written for it.
+    """
+    job = jobs_of(request).get(request.path_params["job_id"])
+    if job is None:
+        raise HTTPException(status_code=404, detail="no such crawl")
+    return StreamingResponse(
+        stream.event_stream(job),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            # Nginx buffers proxied responses by default, which for a stream
+            # means it arrives all at once when the crawl is already over.
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+async def stop_crawl(request: Request) -> Response:
+    """Ask one crawl to stop, and show the page again.
+
+    A plain form and a redirect, so the button works with scripting switched
+    off. Stopping is not instant -- the engine finishes the page it is on --
+    and the page says so rather than pretending the click was the end of it.
+    """
+    job = jobs_of(request).get(request.path_params["job_id"])
+    if job is None:
+        raise HTTPException(status_code=404, detail="no such crawl")
+    job.stop()
+    return RedirectResponse(url=f"/crawls/{job.id}", status_code=303)
 
 
 async def crawls(request: Request) -> Response:

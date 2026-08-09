@@ -412,3 +412,154 @@ def test_a_url_with_a_query_survives_the_form(tmp_path: Path) -> None:
         registry = test_client.app.state.jobs  # type: ignore[attr-defined]
 
     assert registry.get(job_id).session.seed_url.endswith("?q=a%20b&n=1")
+
+
+# --- following a crawl live --------------------------------------------------
+
+
+def slow_site(*, pages: int = 8, delay: float = 0.15) -> Site:
+    """Return a site slow enough that "still running" is a fact, not a race."""
+    site = Site()
+    site.add_html("/", "".join(f'<a href="/p{index}">p{index}</a>' for index in range(pages)))
+    for index in range(pages):
+        site.add_html(f"/p{index}", "<p>x</p>", delay=delay)
+    return site
+
+
+def start(test_client: TestClient, base: str, **fields: str) -> str:
+    """Start a crawl over *base* and return its identifier."""
+    data = {"url": f"{base}/", "depth": "1", "max_pages": "50", "same_domain": "1"}
+    data.update(fields)
+    return str(test_client.post("/crawls", data=data).url).rsplit("/", 1)[1]
+
+
+def test_the_client_script_is_served(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        response = test_client.get("/static/crawl.js")
+
+    assert response.status_code == 200
+    assert "EventSource" in response.text
+
+
+def test_a_running_crawl_offers_the_stream_and_a_stop_button(tmp_path: Path) -> None:
+    with live_client(tmp_path) as test_client, serve(slow_site()) as base:
+        job_id = start(test_client, base)
+        body = test_client.get(f"/crawls/{job_id}").text
+        test_client.post(f"/crawls/{job_id}/stop")
+        wait_until_finished(test_client, job_id)
+
+    assert f'data-stream="/crawls/{job_id}/events"' in body
+    assert "/static/crawl.js" in body
+    assert "Stop</button>" in body
+
+
+def test_a_running_page_carries_its_numbers_without_any_script(tmp_path: Path) -> None:
+    """The script is an enhancement; the page has to be complete without it."""
+    with live_client(tmp_path) as test_client, serve(slow_site()) as base:
+        job_id = start(test_client, base)
+        body = test_client.get(f"/crawls/{job_id}").text
+        test_client.post(f"/crawls/{job_id}/stop")
+        wait_until_finished(test_client, job_id)
+
+    assert 'id="pages-visited"' in body
+    assert "Pages read" in body
+    assert "Links found" in body
+    assert "of 50 pages" in body
+
+
+def test_a_finished_crawl_offers_neither_stream_nor_stop(tmp_path: Path) -> None:
+    site = Site()
+    site.add_html("/", "<p>x</p>")
+
+    with live_client(tmp_path) as test_client, serve(site) as base:
+        job_id = start(test_client, base, depth="0")
+        body = wait_until_finished(test_client, job_id)
+
+    assert "crawl-live" not in body
+    assert "<script" not in body
+    assert "Stop</button>" not in body
+
+
+def test_the_stream_reports_progress_and_ends(tmp_path: Path) -> None:
+    with live_client(tmp_path) as test_client, serve(slow_site(pages=4)) as base:
+        job_id = start(test_client, base)
+        frames = []
+        with test_client.stream("GET", f"/crawls/{job_id}/events") as response:
+            assert response.status_code == 200
+            assert response.headers["content-type"].startswith("text/event-stream")
+            assert response.headers["cache-control"] == "no-cache"
+            for line in response.iter_lines():
+                frames.append(line)
+                if line == "event: finished":
+                    break
+
+    assert frames[0] == "event: progress"
+    assert frames[-1] == "event: finished"
+
+
+def test_the_stream_carries_what_the_page_shows(tmp_path: Path) -> None:
+    """One rendering, two channels: no second formatter in JavaScript."""
+    import json
+
+    with live_client(tmp_path) as test_client, serve(slow_site(pages=3)) as base:
+        job_id = start(test_client, base)
+        payload = None
+        with test_client.stream("GET", f"/crawls/{job_id}/events") as response:
+            for line in response.iter_lines():
+                if line.startswith("data: "):
+                    payload = json.loads(line[6:])
+                    break
+        wait_until_finished(test_client, job_id)
+
+    assert payload is not None
+    assert "elapsed" in payload
+    assert "progress_percent" in payload
+    assert "state_label" in payload
+    assert payload["elapsed"].endswith("s")
+
+
+def test_the_stream_of_an_unknown_crawl_is_not_found(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        assert test_client.get("/crawls/nope/events").status_code == 404
+
+
+# --- stopping ----------------------------------------------------------------
+
+
+def test_stopping_redirects_back_to_the_crawl(tmp_path: Path) -> None:
+    with live_client(tmp_path) as test_client, serve(slow_site()) as base:
+        job_id = start(test_client, base)
+
+        response = test_client.post(f"/crawls/{job_id}/stop", follow_redirects=False)
+
+        assert response.status_code == 303
+        assert response.headers["location"] == f"/crawls/{job_id}"
+        wait_until_finished(test_client, job_id)
+
+
+def test_stopping_ends_the_crawl(tmp_path: Path) -> None:
+    with live_client(tmp_path) as test_client, serve(slow_site(pages=20)) as base:
+        job_id = start(test_client, base)
+        test_client.post(f"/crawls/{job_id}/stop")
+        body = wait_until_finished(test_client, job_id)
+        registry = test_client.app.state.jobs  # type: ignore[attr-defined]
+
+    assert registry.get(job_id).snapshot().state is CrawlState.INTERRUPTED
+    assert "stopped" in body
+
+
+def test_stopping_a_crawl_that_does_not_exist_is_not_found(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        assert test_client.post("/crawls/nope/stop").status_code == 404
+
+
+def test_the_server_answers_while_a_crawl_is_running(tmp_path: Path) -> None:
+    """The property the whole worker-thread design exists to preserve."""
+    with live_client(tmp_path) as test_client, serve(slow_site(pages=20)) as base:
+        job_id = start(test_client, base)
+
+        assert test_client.get("/health").json() == {"status": "ok"}
+        assert test_client.get("/").status_code == 200
+
+        test_client.post(f"/crawls/{job_id}/stop")
+        wait_until_finished(test_client, job_id)

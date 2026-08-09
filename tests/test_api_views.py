@@ -426,3 +426,33 @@ def test_a_row_survives_options_an_older_release_never_recorded() -> None:
 
 def test_no_recorded_crawls_yields_no_rows() -> None:
     assert crawl_rows([]) == ()
+
+
+def test_a_stopped_crawl_does_not_claim_a_full_bar() -> None:
+    """48 of 50 pages with a full bar would be claiming it finished."""
+    view = progress_view(
+        make_snapshot(
+            state=CrawlState.INTERRUPTED, pages_visited=48, options=CrawlOptions(max_pages=50)
+        )
+    )
+
+    assert view["progress_percent"] == 96
+    assert view["is_finished"] is True
+    assert view["state_label"] == "stopped"
+
+
+def test_a_completed_crawl_reads_as_full_however_little_it_used() -> None:
+    """There the budget was never the limit -- the work ran out."""
+    view = progress_view(
+        make_snapshot(
+            state=CrawlState.COMPLETED, pages_visited=6, options=CrawlOptions(max_pages=50)
+        )
+    )
+
+    assert view["progress_percent"] == 100
+
+
+def test_a_crawl_that_never_started_shows_an_empty_bar() -> None:
+    view = progress_view(make_snapshot(error="HTTP 404"))
+
+    assert view["progress_percent"] == 0
