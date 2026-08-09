@@ -3,14 +3,23 @@
 Nothing here binds a socket. ``uvicorn.run`` is the last line of the command
 and the only part that would, so it is replaced and its arguments inspected —
 which is also the only thing worth asserting about it.
+
+Output is read through :func:`plain`, never raw. Typer renders help and usage
+errors through Rich, and forces colour on when it sees ``GITHUB_ACTIONS`` in the
+environment. Rich's highlighter then styles an option name in pieces, so
+``--allow-remote`` leaves as ``-``, ``-allow`` and ``-remote`` with escape
+sequences between them: a substring check against the raw output passes on a
+developer's machine and fails on CI, which is exactly what happened. What a
+person reads is the same either way, and that is what these tests are about.
 """
 
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
-from typer.testing import CliRunner
+from typer.testing import CliRunner, Result
 
 from maxicrawler.cli import app
 from maxicrawler.cli.serving import (
@@ -23,6 +32,13 @@ from maxicrawler.cli.serving import (
 )
 
 runner = CliRunner()
+
+STYLING = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def plain(result: Result) -> str:
+    """Return what the operator reads, with the terminal styling taken out."""
+    return STYLING.sub("", result.output)
 
 
 @pytest.fixture
@@ -110,7 +126,7 @@ def test_serving_locally_needs_no_permission(served: list[dict[str, Any]]) -> No
     assert result.exit_code == 0
     assert served[0]["host"] == "127.0.0.1"
     assert served[0]["port"] == 8000
-    assert "http://127.0.0.1:8000/" in result.stdout
+    assert "http://127.0.0.1:8000/" in plain(result)
 
 
 def test_the_host_and_port_are_passed_through(served: list[dict[str, Any]]) -> None:
@@ -125,7 +141,7 @@ def test_a_remote_address_is_refused(served: list[dict[str, Any]]) -> None:
     result = runner.invoke(app, ["serve", "--host", "0.0.0.0"])
 
     assert result.exit_code != 0
-    assert "--allow-remote" in result.output
+    assert "--allow-remote" in plain(result)
     assert served == []
 
 
@@ -134,7 +150,7 @@ def test_a_remote_address_can_be_asked_for(served: list[dict[str, Any]]) -> None
 
     assert result.exit_code == 0
     assert served[0]["host"] == "0.0.0.0"  # noqa: S104 - the point of the test
-    assert "no authentication" in result.output.replace("\n", " ")
+    assert "no authentication" in plain(result).replace("\n", " ")
 
 
 def test_a_private_address_is_refused_too(served: list[dict[str, Any]]) -> None:
@@ -188,8 +204,8 @@ def test_a_missing_extra_is_a_sentence_rather_than_an_import_error(
     result = runner.invoke(app, ["serve"])
 
     assert result.exit_code == EXIT_WEB_UNAVAILABLE
-    assert "extra" in result.output
-    assert "pip install" in result.output
+    assert "extra" in plain(result)
+    assert "pip install" in plain(result)
 
 
 def test_a_missing_extra_is_refused_before_anything_is_bound(
@@ -222,11 +238,11 @@ def test_the_exit_code_for_a_missing_interface_is_its_own() -> None:
 def test_serve_is_listed_among_the_commands() -> None:
     result = runner.invoke(app, ["--help"])
 
-    assert "serve" in result.output
+    assert "serve" in plain(result)
 
 
 def test_the_help_says_where_it_listens_and_what_that_means() -> None:
     result = runner.invoke(app, ["serve", "--help"])
 
-    assert "127.0.0.1" in result.output
-    assert "--allow-remote" in result.output
+    assert "127.0.0.1" in plain(result)
+    assert "--allow-remote" in plain(result)
