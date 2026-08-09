@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
+from web_server import Site, serve
 
 from maxicrawler import __version__
 from maxicrawler.api import create_app
@@ -205,3 +206,209 @@ def test_the_templates_sit_beside_the_code(tmp_path: Path) -> None:
 def test_the_stylesheet_sits_beside_the_code() -> None:
     assert (STATIC_DIRECTORY / "maxicrawler.css").is_file()
     assert STATIC_DIRECTORY.parent.name == "api"
+
+
+# --- starting a crawl --------------------------------------------------------
+
+
+@contextmanager
+def live_client(tmp_path: Path) -> Iterator[TestClient]:
+    """Yield a client whose crawls really run, against a local site."""
+    service = CrawlService(
+        Settings(
+            user_agent="MaxiCrawler/test",
+            database_path=tmp_path / "urls.db",
+            network_timeout=5.0,
+        )
+    )
+    jobs = CrawlJobs(service, persist=False)
+    try:
+        with TestClient(create_app(service=service, jobs=jobs)) as test_client:
+            yield test_client
+    finally:
+        jobs.shutdown()
+
+
+def wait_until_finished(test_client: TestClient, job_id: str, *, timeout: float = 20.0) -> str:
+    """Return the crawl page once the crawl behind it has finished."""
+    from time import monotonic, sleep
+
+    deadline = monotonic() + timeout
+    while monotonic() < deadline:
+        body = test_client.get(f"/crawls/{job_id}").text
+        if "running" not in body and "queued" not in body:
+            return body
+        sleep(0.05)
+    raise AssertionError("the crawl did not finish in time")
+
+
+def test_the_form_offers_the_configured_defaults(tmp_path: Path) -> None:
+    """The same defaults the CLI applies, through the same service."""
+    with client(tmp_path) as test_client:
+        body = test_client.get("/").text
+
+    assert 'name="depth" value="0"' in body
+    assert 'name="max_pages" value="50"' in body
+    assert 'name="same_domain" value="1">' in body  # unchecked
+
+
+def test_starting_a_crawl_redirects_to_it(tmp_path: Path) -> None:
+    """A redirect, so reloading afterwards does not start a second crawl."""
+    site = Site()
+    site.add_html("/", '<a href="/a">a</a>')
+    site.add_html("/a", "<p>x</p>")
+
+    with live_client(tmp_path) as test_client, serve(site) as base:
+        response = test_client.post(
+            "/crawls",
+            data={"url": f"{base}/", "depth": "1", "max_pages": "10", "same_domain": "1"},
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 303
+        assert response.headers["location"].startswith("/crawls/")
+        wait_until_finished(test_client, response.headers["location"].rsplit("/", 1)[1])
+
+
+def test_a_started_crawl_can_be_watched(tmp_path: Path) -> None:
+    site = Site()
+    site.add_html("/", '<a href="/a">a</a>')
+    site.add_html("/a", "<p>x</p>")
+
+    with live_client(tmp_path) as test_client, serve(site) as base:
+        response = test_client.post(
+            "/crawls", data={"url": f"{base}/", "depth": "1", "same_domain": "1"}
+        )
+        job_id = str(response.url).rsplit("/", 1)[1]
+        body = wait_until_finished(test_client, job_id)
+
+    assert f"{base}/" in body
+    assert "Pages read" in body
+    assert "completed" in body
+
+
+def test_the_crawl_page_is_rendered_by_the_server(tmp_path: Path) -> None:
+    """A reload is a complete way to follow a crawl; a stream only adds ease."""
+    site = Site()
+    site.add_html("/", "<p>x</p>")
+
+    with live_client(tmp_path) as test_client, serve(site) as base:
+        response = test_client.post("/crawls", data={"url": f"{base}/", "same_domain": "1"})
+        job_id = str(response.url).rsplit("/", 1)[1]
+        body = wait_until_finished(test_client, job_id)
+
+    assert "<script" not in body
+    assert 'id="pages-visited"' in body
+
+
+def test_an_unknown_crawl_is_not_found(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        assert test_client.get("/crawls/nope").status_code == 404
+
+
+# --- a form that cannot be honoured ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        ({"url": "", "depth": "1"}, "unsupported URL scheme"),
+        ({"url": "example.test", "depth": "1"}, "unsupported URL scheme"),
+        ({"url": "file:///etc/passwd"}, "unsupported URL scheme"),
+        ({"url": "https://example.test/", "depth": "-1"}, "max_depth must not be negative"),
+        ({"url": "https://example.test/", "max_pages": "0"}, "max_pages must be at least 1"),
+        ({"url": "https://example.test/", "depth": "two"}, "depth must be a whole number"),
+        ({"url": "https://example.test/", "max_pages": "lots"}, "max pages must be a whole number"),
+    ],
+)
+def test_a_form_that_cannot_be_honoured_says_why(
+    tmp_path: Path, data: dict[str, str], expected: str
+) -> None:
+    with client(tmp_path) as test_client:
+        response = test_client.post("/crawls", data=data)
+
+    assert response.status_code == 400
+    assert expected in response.text
+
+
+def test_a_rejected_form_keeps_what_was_typed(tmp_path: Path) -> None:
+    """Losing a pasted URL because the depth was wrong is a small rudeness."""
+    with client(tmp_path) as test_client:
+        response = test_client.post(
+            "/crawls",
+            data={"url": "https://example.test/deep/page", "depth": "-1", "same_domain": "1"},
+        )
+
+    assert 'value="https://example.test/deep/page"' in response.text
+    assert 'name="same_domain" value="1" checked' in response.text
+
+
+def test_a_rejected_form_starts_no_crawl(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        test_client.post("/crawls", data={"url": "not-a-url"})
+        registry = test_client.app.state.jobs  # type: ignore[attr-defined]
+
+    assert registry.recent() == ()
+
+
+def test_an_empty_number_falls_back_to_the_configured_default(tmp_path: Path) -> None:
+    site = Site()
+    site.add_html("/", "<p>x</p>")
+
+    with live_client(tmp_path) as test_client, serve(site) as base:
+        response = test_client.post(
+            "/crawls", data={"url": f"{base}/", "depth": "", "max_pages": ""}
+        )
+        job_id = str(response.url).rsplit("/", 1)[1]
+        wait_until_finished(test_client, job_id)
+        registry = test_client.app.state.jobs  # type: ignore[attr-defined]
+
+    options = registry.get(job_id).session.options
+    assert options.max_depth == 0
+    assert options.max_pages == 50
+
+
+def test_a_recorded_crawl_links_to_its_page(tmp_path: Path) -> None:
+    record_crawl(tmp_path, seed="https://example.test/", state=CrawlState.COMPLETED, pages=3)
+
+    with client(tmp_path) as test_client:
+        body = test_client.get("/").text
+
+    assert 'href="/crawls/crawl-https://example.test/"' in body
+
+
+def test_a_body_that_is_not_a_form_is_refused_clearly(tmp_path: Path) -> None:
+    """Quietly seeing no fields at all would look like an empty submission."""
+    with client(tmp_path) as test_client:
+        response = test_client.post("/crawls", json={"url": "https://example.test/"})
+
+    assert response.status_code == 415
+
+
+def test_a_repeated_field_takes_the_last_value(tmp_path: Path) -> None:
+    """What a browser means when a form somehow submits a name twice."""
+    with client(tmp_path) as test_client:
+        response = test_client.post(
+            "/crawls",
+            content="url=https%3A%2F%2Fexample.test%2F&depth=1&depth=-1",
+            headers={"content-type": "application/x-www-form-urlencoded"},
+        )
+
+    assert response.status_code == 400
+    assert "max_depth must not be negative" in response.text
+
+
+def test_a_url_with_a_query_survives_the_form(tmp_path: Path) -> None:
+    """Percent-encoding is exactly what the standard parser is for."""
+    site = Site()
+    site.add_html("/search", "<p>x</p>")
+
+    with live_client(tmp_path) as test_client, serve(site) as base:
+        response = test_client.post(
+            "/crawls", data={"url": f"{base}/search?q=a%20b&n=1", "same_domain": "1"}
+        )
+        job_id = str(response.url).rsplit("/", 1)[1]
+        wait_until_finished(test_client, job_id)
+        registry = test_client.app.state.jobs  # type: ignore[attr-defined]
+
+    assert registry.get(job_id).session.seed_url.endswith("?q=a%20b&n=1")

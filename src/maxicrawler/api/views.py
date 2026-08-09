@@ -211,6 +211,7 @@ def _crawl_row(crawl: StoredCrawl) -> dict[str, Any]:
     )
     return {
         "job_id": crawl.session_id,
+        "url": f"/crawls/{crawl.session_id}",
         "seed_url": crawl.seed_url,
         "state": str(crawl.state),
         "state_label": STATE_LABELS[crawl.state],

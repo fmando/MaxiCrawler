@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ crawl.seed_url }} · MaxiCrawler{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <h2>
+    <span class="badge {{ crawl.state_tone }}" id="state">{{ crawl.state_label }}</span>
+    <span class="url">{{ crawl.seed_url }}</span>
+  </h2>
+  <div class="body">
+    <p class="muted">{{ crawl.options }}</p>
+
+    {% if crawl.error %}
+      <p class="error">{{ crawl.error }}</p>
+    {% else %}
+      {% include "_progress.html" %}
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

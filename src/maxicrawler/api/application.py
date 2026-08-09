@@ -77,6 +77,8 @@ def create_app(
         routes=[
             Route("/", routes.dashboard, methods=["GET"], name="dashboard"),
             Route("/crawls", routes.crawls, methods=["GET"], name="crawls"),
+            Route("/crawls", routes.start_crawl, methods=["POST"], name="start_crawl"),
+            Route("/crawls/{job_id}", routes.crawl_detail, methods=["GET"], name="crawl_detail"),
             Route("/library", routes.library, methods=["GET"], name="library"),
             Route("/settings", routes.settings, methods=["GET"], name="settings"),
             Route("/health", health, methods=["GET"], name="health"),

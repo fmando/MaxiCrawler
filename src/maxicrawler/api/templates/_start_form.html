@@ -1,0 +1,37 @@
+{#
+  What a crawl is asked for. The same four things the CLI takes, in the same
+  order, with the same defaults -- both read them from the configuration
+  through the one service, so they cannot drift apart.
+
+  On a rejected submission this renders again with what was typed still in it.
+  Losing a URL somebody pasted because the depth was wrong is the kind of small
+  rudeness that makes a tool tiring.
+#}
+<form class="start" method="post" action="{{ form.action }}">
+  {% if form.error %}
+    <p class="error">{{ form.error }}</p>
+  {% endif %}
+
+  <label class="wide">
+    <span>Start URL</span>
+    <input type="text" name="url" value="{{ form.url }}" placeholder="https://example.org"
+           autocomplete="off" spellcheck="false" autofocus>
+  </label>
+
+  <label>
+    <span>Depth</span>
+    <input type="number" name="depth" value="{{ form.depth }}" min="0" max="20">
+  </label>
+
+  <label>
+    <span>Max pages</span>
+    <input type="number" name="max_pages" value="{{ form.max_pages }}" min="1">
+  </label>
+
+  <label class="check">
+    <input type="checkbox" name="same_domain" value="1"{% if form.same_domain %} checked{% endif %}>
+    <span>Same domain only</span>
+  </label>
+
+  <button type="submit">Start crawl</button>
+</form>

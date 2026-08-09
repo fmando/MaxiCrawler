@@ -1,0 +1,39 @@
+{#
+  One running crawl, rendered by the server.
+
+  A partial because it is rendered twice: once as part of the page, and once
+  again on every reload. The identifiers are what a browser will later patch in
+  place, but the page is complete without any of that -- reloading is a working
+  substitute for a live stream, not a fallback nobody tried.
+#}
+<div class="progress" id="progress">
+  <div class="bar"><span style="width: {{ crawl.progress_percent }}%"></span></div>
+  <p class="bar-caption">
+    <span id="pages-attempted">{{ crawl.pages_attempted }}</span> of {{ crawl.max_pages }} pages
+    · <span id="progress-percent">{{ crawl.progress_percent }}</span>%
+  </p>
+</div>
+
+<dl class="readout">
+  <div>
+    <dt>Pages read</dt>
+    <dd class="num" id="pages-visited">{{ crawl.pages_visited }}</dd>
+  </div>
+  <div>
+    <dt>Pages failed</dt>
+    <dd class="num" id="pages-failed">{{ crawl.pages_failed }}</dd>
+  </div>
+  <div>
+    <dt>Links found</dt>
+    <dd class="num" id="links-found">{{ crawl.links_found }}</dd>
+  </div>
+  <div>
+    <dt>Elapsed</dt>
+    <dd class="num" id="elapsed">{{ crawl.elapsed }}</dd>
+  </div>
+</dl>
+
+<p class="latest">
+  <span class="muted">Last page read</span>
+  <span class="url" id="latest-url">{{ crawl.latest_url or "—" }}</span>
+</p>
