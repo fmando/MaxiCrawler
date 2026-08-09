@@ -333,3 +333,49 @@ footer {
 .small { font-size: 12px; }
 .grid td .small { margin-top: 2px; }
 .plugin { font-family: var(--mono); }
+
+/* --- the remaining pages ------------------------------------------------ */
+
+.footnote {
+  margin: 0 0 20px;
+  padding: 0 16px 16px;
+  color: var(--muted);
+  font-size: 12px;
+  max-width: 78ch;
+}
+.panel + .footnote { margin-top: -12px; padding-top: 0; }
+.footnote .badge { font-size: 10px; }
+
+.panel > .group {
+  margin: 0;
+  padding: 14px 16px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.value {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+/*
+ * Not `.num`, which is `nowrap` because a column of figures reads badly when
+ * one of them wraps. A configured value is not a column of figures: an
+ * absolute database path holds the whole page open sideways, and every table
+ * on it, if it is forbidden to break.
+ */
+
+.document {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-x: auto;
+}
+
+.body > p + p { margin-top: 10px; }

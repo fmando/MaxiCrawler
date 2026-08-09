@@ -287,6 +287,23 @@ def test_asking_for_an_unknown_crawl_is_not_an_error(tmp_path: Path) -> None:
     )
 
     assert service.discovered_urls("no-such-crawl") == ()
+    assert service.stored_crawl("no-such-crawl") is None
+
+
+def test_a_crawl_outlives_the_process_that_ran_it(tmp_path: Path) -> None:
+    """What lets a later server show a crawl it never started."""
+    settings = Settings(user_agent="MaxiCrawler/test", database_path=tmp_path / "urls.db")
+
+    with serve(make_site()) as base:
+        session = CrawlService(settings).build_session(f"{base}/", depth=1, same_domain=True)
+        CrawlService(settings).run(session, persist=True)
+
+    later = CrawlService(settings).stored_crawl(session.session_id)
+
+    assert later is not None
+    assert later.seed_url == f"{base}/"
+    assert later.pages_visited == 3
+    assert later.finished_at is not None
 
 
 # --- the CLI is a client of this service, not a second implementation --------

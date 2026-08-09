@@ -9,12 +9,14 @@ import pytest
 
 from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.api.views import (
+    ABANDONED_LABEL,
     KIND_LABELS,
     STATE_LABELS,
     STATE_TONES,
     crawl_rows,
     describe_options,
     describe_scope,
+    format_bytes,
     format_duration,
     format_number,
     link_rows,
@@ -24,6 +26,8 @@ from maxicrawler.api.views import (
     plugin_shares,
     progress_view,
     report_view,
+    settings_view,
+    stored_view,
 )
 from maxicrawler.crawler import DiscoverySummary, PluginUsage
 from maxicrawler.database import StoredUrl
@@ -588,7 +592,10 @@ def test_a_row_says_whether_anything_failed() -> None:
 
 
 def test_a_crawl_still_running_is_marked() -> None:
-    (row,) = crawl_rows([make_stored_crawl(finished_at=None, state=CrawlState.RUNNING)])
+    """Unfinished in the database *and* running here. Either alone is not enough."""
+    (row,) = crawl_rows(
+        [make_stored_crawl(finished_at=None, state=CrawlState.RUNNING)], live={"crawl-1"}
+    )
 
     assert row["is_running"] is True
     assert row["state_label"] == "running"
@@ -633,3 +640,111 @@ def test_a_crawl_that_never_started_shows_an_empty_bar() -> None:
     view = progress_view(make_snapshot(error="HTTP 404"))
 
     assert view["progress_percent"] == 0
+
+
+# --- a crawl only the database remembers -------------------------------------
+
+
+def test_a_crawl_nobody_is_running_is_not_running() -> None:
+    """A record left unfinished by a killed process is not a live crawl."""
+    crawl = make_stored_crawl(finished_at=None, state=CrawlState.RUNNING)
+
+    (row,) = crawl_rows([crawl])
+
+    assert row["state_label"] == ABANDONED_LABEL
+    assert row["state_tone"] == "bad"
+    assert row["was_abandoned"] is True
+    assert row["is_running"] is False
+
+
+def test_a_crawl_this_process_is_running_says_so() -> None:
+    crawl = make_stored_crawl(finished_at=None, state=CrawlState.RUNNING)
+
+    (row,) = crawl_rows([crawl], live={"crawl-1"})
+
+    assert row["state_label"] == "running"
+    assert row["is_running"] is True
+    assert row["was_abandoned"] is False
+
+
+def test_a_finished_crawl_is_never_called_abandoned() -> None:
+    (row,) = crawl_rows([make_stored_crawl()])
+
+    assert row["was_abandoned"] is False
+    assert row["state_label"] == "completed"
+    assert row["finished_at"] == "2026-08-09 12:00"
+
+
+def test_a_crawl_with_no_end_shows_none() -> None:
+    (row,) = crawl_rows([make_stored_crawl(finished_at=None)], live={"crawl-1"})
+
+    assert row["finished_at"] == "—"
+
+
+def test_the_recorded_view_carries_what_the_record_keeps() -> None:
+    view = stored_view(make_stored_crawl())
+
+    assert view["pages_visited"] == "28"
+    assert view["pages_skipped"] == "4,760"
+    assert view["links_found"] == "17,910"
+    assert view["max_depth_reached"] == 2
+    assert view["left_in_frontier"] is False
+
+
+def test_the_recorded_view_says_when_work_was_left_over() -> None:
+    view = stored_view(make_stored_crawl(frontier_remaining=7))
+
+    assert view["left_in_frontier"] is True
+    assert view["frontier_remaining"] == "7"
+
+
+# --- the configuration -------------------------------------------------------
+
+
+def flatten(groups: tuple[dict[str, object], ...]) -> dict[str, str]:
+    """Return every configured value by name, whatever group it sits in."""
+    return {row["name"]: row["value"] for group in groups for row in group["rows"]}  # type: ignore[index,union-attr]
+
+
+def test_every_configured_value_is_shown() -> None:
+    """A settings page that quietly omits a field is worse than none."""
+    from maxicrawler.config import Settings
+
+    shown = flatten(settings_view(Settings()))
+    written = {line.split(" = ")[0] for line in Settings().to_toml().splitlines() if " = " in line}
+
+    assert written <= set(shown)
+
+
+def test_values_are_shown_the_way_they_are_written() -> None:
+    from maxicrawler.config import Settings
+
+    shown = flatten(settings_view(Settings(crawl_same_domain=True, crawl_max_pages=2500)))
+
+    assert shown["crawl_same_domain"] == "true"
+    assert shown["crawl_max_pages"] == "2,500"
+    assert shown["max_page_bytes"] == "8 MiB"
+
+
+def test_paths_are_shown_with_forward_slashes() -> None:
+    """The same spelling the configuration file uses, on every platform."""
+    from pathlib import Path
+
+    from maxicrawler.config import Settings
+
+    shown = flatten(settings_view(Settings(database_path=Path("var") / "urls.db")))
+
+    assert shown["database_path"] == "var/urls.db"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (8 * 1024**2, "8 MiB"),
+        (1024, "1 KiB"),
+        (2 * 1024**2 + 1, "2,097,153 bytes"),
+        (900, "900 bytes"),
+    ],
+)
+def test_byte_counts_read_the_way_they_were_configured(value: int, expected: str) -> None:
+    assert format_bytes(value) == expected

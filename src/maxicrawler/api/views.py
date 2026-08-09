@@ -16,18 +16,28 @@ limit" on its own line, while a page shows a short badge. Sharing the *numbers*
 is what matters, and those come from the same report either way.
 """
 
-from collections.abc import Iterable
+from collections.abc import Container, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from maxicrawler.api.jobs import JobSnapshot
+from maxicrawler.config import Settings
 from maxicrawler.crawler import PluginUsage
 from maxicrawler.database import StoredCrawl, StoredUrl
 from maxicrawler.plugins.generic import GENERIC_PLUGIN_NAME
 from maxicrawler.web.models import LinkKind
 from maxicrawler.web.report import CrawlReport, PageOutcome, SkipReason
 from maxicrawler.web.session import CrawlOptions, CrawlState
+
+ABANDONED_LABEL = "abandoned"
+"""What a crawl the database left unfinished and nobody is running is called.
+
+Not a :class:`~maxicrawler.web.session.CrawlState`, because nothing ever
+*enters* this state: it is what an unfinished record means once you know no
+process is behind it. The engine cannot write it, since a process that is being
+killed does not get to update a row on its way out.
+"""
 
 MAX_LISTED_PAGES = 200
 """How many pages a report lists before saying how many it left out."""
@@ -264,17 +274,26 @@ def link_table(
     }
 
 
-def crawl_rows(crawls: Iterable[StoredCrawl]) -> tuple[dict[str, Any], ...]:
+def crawl_rows(
+    crawls: Iterable[StoredCrawl], *, live: Container[str] = ()
+) -> tuple[dict[str, Any], ...]:
     """Return one row per recorded crawl, for the lists that show history.
 
     Reads from the stored summary rather than from the job registry, because
     the registry is a live view that dies with the process and this is the part
     that should survive a restart.
+
+    *live* names the crawls this process is actually running. A row is written
+    as ``running`` when the database says unfinished *and* this process agrees;
+    a row the database left unfinished that nobody is running is not running,
+    it was abandoned when whatever started it stopped. Saying "running" about a
+    crawl from last week would be a page waiting for something that will never
+    arrive.
     """
-    return tuple(_crawl_row(crawl) for crawl in crawls)
+    return tuple(_crawl_row(crawl, is_live=crawl.session_id in live) for crawl in crawls)
 
 
-def _crawl_row(crawl: StoredCrawl) -> dict[str, Any]:
+def _crawl_row(crawl: StoredCrawl, *, is_live: bool) -> dict[str, Any]:
     """Return one recorded crawl as a table row."""
     options = CrawlOptions(
         max_depth=crawl.max_depth,
@@ -282,22 +301,137 @@ def _crawl_row(crawl: StoredCrawl) -> dict[str, Any]:
         same_domain=crawl.same_domain,
         include_subdomains=crawl.include_subdomains,
     )
+    unfinished = crawl.finished_at is None
+    abandoned = unfinished and not is_live
     return {
         "job_id": crawl.session_id,
         "url": f"/crawls/{crawl.session_id}",
         "seed_url": crawl.seed_url,
         "state": str(crawl.state),
-        "state_label": STATE_LABELS[crawl.state],
-        "state_tone": STATE_TONES[crawl.state],
+        "state_label": ABANDONED_LABEL if abandoned else STATE_LABELS[crawl.state],
+        "state_tone": "bad" if abandoned else STATE_TONES[crawl.state],
         "options": describe_options(options),
         "started_at": format_timestamp(crawl.started_at),
-        "is_running": crawl.finished_at is None,
+        "finished_at": "—" if crawl.finished_at is None else format_timestamp(crawl.finished_at),
+        "is_running": unfinished and is_live,
+        "was_abandoned": abandoned,
         "pages_visited": format_number(crawl.pages_visited),
         "pages_failed": format_number(crawl.pages_failed),
         "has_failures": crawl.pages_failed > 0,
         "links_found": format_number(crawl.links_discovered),
         "elapsed": format_duration(crawl.elapsed_seconds),
     }
+
+
+def stored_view(crawl: StoredCrawl, *, is_live: bool = False) -> dict[str, Any]:
+    """Return what the page of a crawl this server did not run shows.
+
+    Less than :func:`report_view`, and the difference is not an oversight: the
+    database keeps a summary and the URLs, never the per-page outcomes or the
+    reasons individual URLs were turned away. The page states that rather than
+    showing empty tables that would read as "none".
+    """
+    row = _crawl_row(crawl, is_live=is_live)
+    return {
+        **row,
+        "pages_attempted": format_number(crawl.pages_attempted),
+        "pages_skipped": format_number(crawl.pages_skipped),
+        "max_depth_reached": crawl.max_depth_reached,
+        "frontier_remaining": format_number(crawl.frontier_remaining),
+        "left_in_frontier": crawl.frontier_remaining > 0,
+    }
+
+
+def settings_view(settings: Settings) -> tuple[dict[str, Any], ...]:
+    """Return the effective configuration, grouped the way it is thought about.
+
+    Every value as a string. A settings page that formatted numbers one way and
+    the TOML beside it another would invite exactly the confusion it exists to
+    remove.
+    """
+    return (
+        {
+            "heading": "Identity",
+            "rows": (_setting("user_agent", settings.user_agent, "Sent with every request."),),
+        },
+        {
+            "heading": "Storage",
+            "rows": (
+                _setting(
+                    "database_path",
+                    settings.database_path.as_posix(),
+                    "Where crawls and discovered URLs are recorded.",
+                ),
+                _setting(
+                    "library_path",
+                    settings.library_path.as_posix(),
+                    "Where downloads would go. Nothing writes here yet.",
+                ),
+                _setting("log_level", settings.log_level, ""),
+                _setting("max_entries", format_number(settings.max_entries), ""),
+            ),
+        },
+        {
+            "heading": "Crawl defaults",
+            "rows": (
+                _setting(
+                    "crawl_depth",
+                    str(settings.crawl_depth),
+                    "How far a crawl follows links unless told otherwise.",
+                ),
+                _setting(
+                    "crawl_max_pages",
+                    format_number(settings.crawl_max_pages),
+                    "The ceiling every crawl is measured against.",
+                ),
+                _setting(
+                    "crawl_same_domain",
+                    _toml_bool(settings.crawl_same_domain),
+                    "Off by default, so a share link to another host still works.",
+                ),
+            ),
+        },
+        {
+            "heading": "Network",
+            "rows": (
+                _setting("network_timeout", f"{settings.network_timeout:g} s", ""),
+                _setting("network_retries", str(settings.network_retries), ""),
+                _setting(
+                    "max_redirects",
+                    str(settings.max_redirects),
+                    "Hops one fetch may follow before the chain is called a loop.",
+                ),
+                _setting(
+                    "max_page_bytes",
+                    format_bytes(settings.max_page_bytes),
+                    "Upper bound on one page, before and after decompression.",
+                ),
+                _setting(
+                    "max_links",
+                    format_number(settings.max_links),
+                    "How many links one page may contribute.",
+                ),
+            ),
+        },
+    )
+
+
+def format_bytes(value: int) -> str:
+    """Return a byte count the way the person who configured it wrote it."""
+    for unit, size in (("MiB", 1024**2), ("KiB", 1024)):
+        if value >= size and value % size == 0:
+            return f"{value // size} {unit}"
+    return f"{format_number(value)} bytes"
+
+
+def _setting(name: str, value: str, explanation: str) -> dict[str, Any]:
+    """Return one configured value as a row."""
+    return {"name": name, "value": value, "explanation": explanation}
+
+
+def _toml_bool(value: bool) -> str:
+    """Return a boolean as the configuration file spells it."""
+    return "true" if value else "false"
 
 
 def page_rows(report: CrawlReport, *, limit: int | None = None) -> tuple[dict[str, Any], ...]:

@@ -4,6 +4,7 @@ import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from html import unescape
 from pathlib import Path
 
 import pytest
@@ -34,7 +35,9 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
         yield test_client
 
 
-def record_crawl(tmp_path: Path, *, seed: str, state: CrawlState, pages: int) -> None:
+def record_crawl(
+    tmp_path: Path, *, seed: str, state: CrawlState, pages: int, session_id: str | None = None
+) -> None:
     """Write one finished crawl into the database the interface reads."""
     from maxicrawler.crawler import DiscoverySummary, PluginUsage
     from maxicrawler.domain import ScanSession, Statistics
@@ -42,7 +45,7 @@ def record_crawl(tmp_path: Path, *, seed: str, state: CrawlState, pages: int) ->
     repository = SQLiteCrawlRepository(SQLiteDatabase(tmp_path / "urls.db"))
     repository.initialize()
     session = CrawlSession(
-        session_id=f"crawl-{seed}",
+        session_id=session_id or f"crawl-{seed}",
         seed_url=seed,
         started_at=STARTED,
         options=CrawlOptions(max_depth=2, max_pages=50, same_domain=True),
@@ -713,3 +716,258 @@ def test_a_crawl_that_never_ran_says_it_will_never_have_one(tmp_path: Path) -> N
 def test_a_document_for_an_unknown_crawl_is_not_found(tmp_path: Path) -> None:
     with client(tmp_path) as test_client:
         assert test_client.get("/crawls/nope.json").status_code == 404
+
+
+# --- the crawls page ---------------------------------------------------------
+
+
+def test_the_crawls_page_lists_the_whole_history(tmp_path: Path) -> None:
+    """The dashboard shows the recent ones; this shows all of them."""
+    for index in range(25):
+        record_crawl(
+            tmp_path, seed=f"https://example.test/{index}", state=CrawlState.COMPLETED, pages=3
+        )
+
+    with client(tmp_path) as test_client:
+        body = test_client.get("/crawls").text
+
+    assert "https://example.test/24" in body
+    assert "https://example.test/0" in body
+
+
+def test_the_crawls_page_says_when_there_is_nothing(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        body = test_client.get("/crawls").text
+
+    assert "Nothing has been crawled yet" in body
+
+
+def test_a_crawl_left_unfinished_by_a_restart_is_not_called_running(tmp_path: Path) -> None:
+    """Nobody is behind it, so a page saying "running" would wait forever."""
+    repository = SQLiteCrawlRepository(SQLiteDatabase(tmp_path / "urls.db"))
+    repository.initialize()
+    repository.start_crawl(
+        CrawlSession(
+            session_id="crawl-abandoned",
+            seed_url="https://example.test/gone",
+            started_at=STARTED,
+            options=CrawlOptions(max_depth=1, max_pages=10),
+        )
+    )
+
+    with client(tmp_path) as test_client:
+        body = test_client.get("/crawls").text
+
+    assert "abandoned" in body
+    assert 'class="badge bad"' in body
+
+
+def test_a_crawl_this_process_runs_is_called_running(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(slow_site(pages=20)) as base:
+        job_id = start(test_client, base)
+        body = wait_for_the_row(test_client, job_id)
+        test_client.post(f"/crawls/{job_id}/stop")
+        wait_until_finished(test_client, job_id)
+
+    assert "abandoned" not in body
+    assert "running" in body
+
+
+def wait_for_the_row(test_client: TestClient, job_id: str, *, timeout: float = 10.0) -> str:
+    """Return the crawls page once *job_id* has reached it.
+
+    The row is written by the worker thread as the crawl starts, so asking the
+    instant after submitting is a race the request can lose. Waiting for the
+    row is not waiting for the crawl: it has twenty slow pages ahead of it.
+    """
+    from time import monotonic, sleep
+
+    deadline = monotonic() + timeout
+    while monotonic() < deadline:
+        body = test_client.get("/crawls").text
+        if job_id in body:
+            return body
+        sleep(0.05)
+    raise AssertionError("the crawl never reached the list")
+
+
+# --- a crawl only the database remembers -------------------------------------
+
+
+def test_a_recorded_crawl_still_has_a_page(tmp_path: Path) -> None:
+    """After a restart this is every crawl, so the list must not lead nowhere."""
+    record_crawl(
+        tmp_path,
+        seed="https://example.test/",
+        state=CrawlState.COMPLETED,
+        pages=28,
+        session_id="old-crawl",
+    )
+
+    with client(tmp_path) as test_client:
+        response = test_client.get("/crawls/old-crawl")
+
+    assert response.status_code == 200
+    assert "https://example.test/" in response.text
+
+
+def test_a_recorded_crawl_says_what_the_record_cannot_hold(tmp_path: Path) -> None:
+    record_crawl(
+        tmp_path,
+        seed="https://example.test/",
+        state=CrawlState.COMPLETED,
+        pages=28,
+        session_id="old-crawl",
+    )
+
+    with client(tmp_path) as test_client:
+        body = test_client.get("/crawls/old-crawl").text
+
+    assert "This server did not run this crawl" in body
+    assert "Pages read" in body
+    assert "<th>Title</th>" not in body  # no per-page record exists
+
+
+def test_a_recorded_crawl_lists_the_urls_it_kept(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+
+    # A second server over the same database knows nothing of that crawl.
+    with client(tmp_path) as fresh:
+        body = fresh.get(f"/crawls/{job_id}").text
+
+    assert MEGA_LINK.split("#")[0] in body
+    assert ">mega</td>" in body
+
+
+def test_a_crawl_nothing_knows_is_still_not_found(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        assert test_client.get("/crawls/nope").status_code == 404
+
+
+def test_a_recorded_crawl_refuses_a_document_rather_than_inventing_one(tmp_path: Path) -> None:
+    record_crawl(
+        tmp_path,
+        seed="https://example.test/",
+        state=CrawlState.COMPLETED,
+        pages=28,
+        session_id="old-crawl",
+    )
+
+    with client(tmp_path) as test_client:
+        response = test_client.get("/crawls/old-crawl.json")
+
+    assert response.status_code == 409
+    assert response.json()["finished"] is True
+    assert "did not run that crawl" in response.json()["detail"]
+
+
+# --- the settings page -------------------------------------------------------
+
+
+def test_the_settings_page_shows_the_effective_configuration(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        body = test_client.get("/settings").text
+
+    assert "user_agent" in body
+    assert "MaxiCrawler/test" in body
+    assert "crawl_max_pages" in body
+
+
+def test_the_settings_page_shows_the_file_form_of_the_same_values(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        body = test_client.get("/settings").text
+
+    # Unescaped, because the page is HTML and the quotes arrive as entities.
+    # What matters is that the document reads back the way the file is written.
+    document = unescape(body)
+
+    assert "[maxicrawler]" in document
+    assert 'user_agent = "MaxiCrawler/test"' in document
+    assert "crawl_same_domain = false" in document
+
+
+def test_a_configured_path_is_allowed_to_wrap(tmp_path: Path) -> None:
+    """An absolute path in a `nowrap` cell held the whole page open sideways.
+
+    Measured in a browser rather than guessed: with the value in `num`, which
+    is `nowrap` so a column of figures stays aligned, the body scrolled 79px
+    wider than the viewport and every table on the page went with it.
+    """
+    with client(tmp_path) as test_client:
+        body = test_client.get("/settings").text
+
+    assert 'class="value"' in body
+    assert f'class="num">{tmp_path.as_posix()}' not in body
+
+
+def test_the_settings_page_offers_no_way_to_change_anything(tmp_path: Path) -> None:
+    """Read-only, and it must not look otherwise."""
+    with client(tmp_path) as test_client:
+        body = test_client.get("/settings").text
+
+    assert "<form" not in body
+    assert "<input" not in body
+
+
+def test_the_settings_page_does_not_name_a_file_it_did_not_read(tmp_path: Path) -> None:
+    """These settings were handed in, so pointing at maxicrawler.toml would mislead."""
+    with client(tmp_path) as test_client:
+        body = test_client.get("/settings").text
+
+    assert "Set by whatever started this server" in body
+
+
+def test_an_application_left_to_itself_reads_the_configuration_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The docstring said so long before the code did."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "maxicrawler.toml").write_text(
+        '[maxicrawler]\nuser_agent = "MaxiCrawler/from-the-file"\ncrawl_max_pages = 7\n',
+        encoding="utf-8",
+    )
+
+    with TestClient(create_app()) as test_client:
+        body = test_client.get("/settings").text
+
+    assert "MaxiCrawler/from-the-file" in body
+    assert "Read from" in body
+    assert "maxicrawler.toml" in body
+
+
+def test_a_missing_configuration_file_is_named_as_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with TestClient(create_app()) as test_client:
+        body = test_client.get("/settings").text
+
+    assert "There is no" in body
+    assert "built-in defaults" in body
+
+
+# --- the library page --------------------------------------------------------
+
+
+def test_the_library_names_where_downloads_would_go(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        body = test_client.get("/library").text
+
+    assert "library" in body
+    assert "does not download anything yet" in body
+
+
+@pytest.mark.parametrize("path", ["/", "/crawls", "/library", "/settings"])
+def test_no_page_loads_anything_from_another_host(tmp_path: Path, path: str) -> None:
+    """A local interface must work with no outbound request at all."""
+    record_crawl(tmp_path, seed="https://example.test/", state=CrawlState.COMPLETED, pages=3)
+
+    with client(tmp_path) as test_client:
+        body = test_client.get(path).text
+
+    for attribute in ("src=", "href="):
+        for match in re.findall(rf'{attribute}"([^"]+)"', body):
+            assert not match.startswith(("http://", "https://", "//")), match

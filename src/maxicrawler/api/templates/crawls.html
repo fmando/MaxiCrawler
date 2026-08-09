@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Crawls · MaxiCrawler{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <h2>
+    All crawls
+    <span class="count">{{ crawls | length }}</span>
+  </h2>
+
+  {% if crawls %}
+    {% include "_crawl_table.html" %}
+  {% else %}
+    <p class="empty">
+      Nothing has been crawled yet. Start one from
+      <a href="{{ url_for('dashboard').path }}">the dashboard</a>.
+    </p>
+  {% endif %}
+</section>
+
+{% if crawls | selectattr("was_abandoned") | first %}
+  <p class="footnote">
+    A crawl marked <span class="badge bad">abandoned</span> was started and never
+    finished: the record says it was running, and no process here is running it.
+    That happens when a server stops mid-crawl. What it had already found is
+    still recorded.
+  </p>
+{% endif %}
+{% endblock %}

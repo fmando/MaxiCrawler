@@ -1,0 +1,52 @@
+{#
+  The configuration this server is running with.
+
+  Read-only, and it says so rather than showing inputs that look editable.
+  Writing configuration from a browser asks questions this page cannot answer --
+  which file, whose permissions, what happens to a crawl already running under
+  the old values -- and none of them get better for being ignored.
+#}
+{% extends "base.html" %}
+{% block title %}Settings · MaxiCrawler{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <h2>Effective configuration</h2>
+  <div class="body">
+    <p class="muted">
+      {% if source and source_exists %}
+        Read from <code>{{ source }}</code> when this server started.
+        Editing it takes effect on the next restart.
+      {% elif source %}
+        There is no <code>{{ source }}</code>, so these are the built-in defaults.
+        Create that file to change them.
+      {% else %}
+        Set by whatever started this server rather than read from a file here.
+      {% endif %}
+    </p>
+  </div>
+
+  {% for group in groups %}
+    <h3 class="group">{{ group.heading }}</h3>
+    <table class="grid">
+      <tbody>
+        {% for row in group.rows %}
+          <tr>
+            <td class="plugin">{{ row.name }}</td>
+            <td class="value">{{ row.value }}</td>
+            <td class="muted">{{ row.explanation }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endfor %}
+</section>
+
+<section class="panel">
+  <h2>As a configuration file</h2>
+  <div class="body">
+    <p class="muted">Every value above, in the form the file takes.</p>
+    <pre class="document">{{ toml }}</pre>
+  </div>
+</section>
+{% endblock %}

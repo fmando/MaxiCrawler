@@ -167,15 +167,27 @@ class CrawlService:
         repository.initialize()
         return repository
 
-    def stored_crawls(self, limit: int = 20) -> tuple[StoredCrawl, ...]:
+    def stored_crawls(self, limit: int | None = 20) -> tuple[StoredCrawl, ...]:
         """Return the crawls this installation has recorded, newest first.
 
         Reading history needs no engine and no crawl, so it belongs here rather
-        than making every client open a database of its own.
+        than making every client open a database of its own. ``None`` returns
+        all of them, which is what a page showing the whole history asks for.
         """
         repository = SQLiteCrawlRepository(SQLiteDatabase(self._settings.database_path))
         repository.initialize()
         return repository.stored_crawls()[:limit]
+
+    def stored_crawl(self, session_id: str) -> StoredCrawl | None:
+        """Return the recorded crawl called *session_id*, if there is one.
+
+        What makes a crawl from an earlier run of this program findable at all.
+        A running process knows only the crawls it started; the database is
+        what outlives it.
+        """
+        repository = SQLiteCrawlRepository(SQLiteDatabase(self._settings.database_path))
+        repository.initialize()
+        return repository.stored_crawl(session_id)
 
     def discovered_urls(self, session_id: str) -> tuple[StoredUrl, ...]:
         """Return the URLs one crawl recorded, in the order it found them.

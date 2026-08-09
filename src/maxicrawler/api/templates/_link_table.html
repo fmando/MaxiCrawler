@@ -39,9 +39,11 @@
       </tbody>
     </table>
     {% if links.has_hidden %}
+      {# No report on a crawl this server only has the record of, and a link to
+         a document that does not exist is worse than no link. #}
       <p class="empty">
         {{ links.hidden }} more URLs are not shown here.
-        They are all in <a href="{{ report.json_url }}">the JSON report</a>.
+        {% if report %}They are all in <a href="{{ report.json_url }}">the JSON report</a>.{% endif %}
       </p>
     {% endif %}
   {% elif links.was_recorded %}

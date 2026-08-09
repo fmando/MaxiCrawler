@@ -21,7 +21,7 @@ from starlette.templating import Jinja2Templates
 
 from maxicrawler import __version__
 from maxicrawler.api import stream, views
-from maxicrawler.api.jobs import CrawlJob, CrawlJobs
+from maxicrawler.api.jobs import DEFAULT_RETAINED_JOBS, CrawlJob, CrawlJobs
 from maxicrawler.app import crawl_document
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -128,8 +128,14 @@ async def crawl_detail(request: Request) -> Response:
 
     Rendered by the server on every request, so a reload is a complete way to
     follow a crawl. What a live stream adds is convenience, not capability.
+
+    A crawl this process never ran is answered from the database instead. Not
+    an edge case: after a restart it is *every* crawl, and a list whose links
+    all lead to "no such crawl" would be a list not worth having.
     """
-    job = _job(request)
+    job = jobs_of(request).get(request.path_params["job_id"])
+    if job is None:
+        return _recorded_crawl(request)
     context: dict[str, Any] = {"crawl": views.progress_view(job.snapshot())}
     report = job.report
     if report is not None:
@@ -149,7 +155,11 @@ async def crawl_json(request: Request) -> Response:
     same function. A page shows two hundred rows of a crawl that found
     thousands; this is where the rest of them are.
     """
-    job = _job(request)
+    jobs = jobs_of(request)
+    job_id = request.path_params["job_id"]
+    job = jobs.get(job_id)
+    if job is None:
+        return _recorded_crawl_json(jobs, job_id)
     report = job.report
     if report is not None:
         return JSONResponse(crawl_document(report))
@@ -203,18 +213,12 @@ async def stop_crawl(request: Request) -> Response:
 
 
 async def crawls(request: Request) -> Response:
-    """List every recorded crawl.
-
-    A stub for now, so the navigation is whole from the first page rather than
-    something every later layout has to be rearranged around.
-    """
+    """List every recorded crawl, newest first."""
+    jobs = jobs_of(request)
     return page(
         request,
-        "_placeholder.html",
-        {
-            "heading": "Crawls",
-            "explanation": "The full list of crawls, with filtering, lands with the crawl pages.",
-        },
+        "crawls.html",
+        {"crawls": views.crawl_rows(jobs.service.stored_crawls(limit=None), live=_live(jobs))},
         section="crawls",
     )
 
@@ -225,33 +229,98 @@ async def library(request: Request) -> Response:
     Genuinely empty, and it will stay that way until downloads exist in this
     interface. When it does something, it will read through a service in
     :mod:`maxicrawler.app` rather than importing the library package — the same
-    rule crawling follows.
+    rule crawling follows. Naming where it will read from is not decoration: it
+    is the one line that keeps the next person from reaching for
+    ``maxicrawler.library`` here because it was quicker.
     """
     return page(
         request,
-        "_placeholder.html",
-        {
-            "heading": "Library",
-            "explanation": (
-                "Downloaded resources will be listed here. This interface does not "
-                "download anything yet; the crawler discovers, and downloading stays a "
-                "separate pipeline."
-            ),
-        },
+        "library.html",
+        {"library_path": jobs_of(request).service.settings.library_path.as_posix()},
         section="library",
     )
 
 
 async def settings(request: Request) -> Response:
-    """Show the configuration this server is running with."""
+    """Show the configuration this server is running with.
+
+    Read-only, and the page says so. Writing configuration from a browser is a
+    different feature with different questions — which file, whose permissions,
+    what happens to a crawl already running under the old values — and pretending
+    otherwise with an editable-looking form would be the wrong promise.
+    """
+    effective = jobs_of(request).service.settings
+    source = request.app.state.config_path
     return page(
         request,
-        "_placeholder.html",
+        "settings.html",
         {
-            "heading": "Settings",
-            "explanation": "The effective configuration lands with the remaining pages.",
+            "groups": views.settings_view(effective),
+            "toml": effective.to_toml(),
+            "source": None if source is None else str(source),
+            "source_exists": source is not None and Path(source).exists(),
         },
         section="settings",
+    )
+
+
+def _live(jobs: CrawlJobs) -> frozenset[str]:
+    """Return the crawls this process is running right now."""
+    return frozenset(
+        job.id for job in jobs.recent(limit=DEFAULT_RETAINED_JOBS) if not job.snapshot().is_finished
+    )
+
+
+def _recorded_crawl(request: Request) -> Response:
+    """Render a crawl from the database, for one this process never ran.
+
+    Raises:
+        HTTPException: nothing knows that crawl, not even the record.
+    """
+    jobs = jobs_of(request)
+    job_id = request.path_params["job_id"]
+    stored = jobs.service.stored_crawl(job_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail="no such crawl")
+    return page(
+        request,
+        "recorded.html",
+        {
+            "crawl": views.stored_view(stored),
+            "links": views.link_table(
+                jobs.service.discovered_urls(job_id), discovered=stored.links_discovered
+            ),
+        },
+        section="crawls",
+    )
+
+
+def _recorded_crawl_json(jobs: CrawlJobs, job_id: str) -> Response:
+    """Refuse a document for a crawl only the database remembers.
+
+    Raises:
+        HTTPException: nothing knows that crawl at all.
+
+    The record holds a summary and the URLs, never the per-page outcomes the
+    document is largely made of. Answering with a document missing half its
+    fields would be worse than saying so.
+    """
+    stored = jobs.service.stored_crawl(job_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail="no such crawl")
+    return JSONResponse(
+        {
+            "session_id": stored.session_id,
+            "seed_url": stored.seed_url,
+            "state": str(stored.state),
+            "finished": stored.finished_at is not None,
+            "error": None,
+            "detail": (
+                "this server did not run that crawl, so only the recorded summary "
+                "exists; the full document is kept in memory by the process that ran it"
+            ),
+        },
+        status_code=409,
     )
 
 
@@ -268,7 +337,7 @@ def _dashboard(
         request,
         "index.html",
         {
-            "crawls": views.crawl_rows(jobs.service.stored_crawls(limit=20)),
+            "crawls": views.crawl_rows(jobs.service.stored_crawls(limit=20), live=_live(jobs)),
             "form": {**(form_values or _default_form(jobs)), "action": "/crawls", "error": error},
         },
         section="dashboard",

@@ -19,10 +19,11 @@ parsing.
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from maxicrawler.api.errors import WebDependencyError
 from maxicrawler.app import CrawlService
-from maxicrawler.config import Settings
+from maxicrawler.config import DEFAULT_CONFIG_PATH, Settings
 
 MISSING_EXTRA = (
     "the web interface needs the optional 'web' extra.\n"
@@ -49,14 +50,24 @@ def create_app(
     service: CrawlService | None = None,
     settings: Settings | None = None,
     jobs: CrawlJobs | None = None,
+    config_path: Path | None = None,
 ) -> Starlette:
     """Return the MaxiCrawler web application.
 
     Every collaborator is injectable so a test can drive the routes without a
     socket, a database or a worker pool of its own. Given none of them, the
     application reads the configuration from its default location, exactly as
-    the CLI does.
+    the CLI does — which it now actually does rather than merely saying so.
+
+    *config_path* is remembered so the settings page can name where the values
+    came from. It is only a label: a caller that has already built its own
+    settings is the authority on those, and passing the path it read them from
+    is how the page can say which file to edit.
     """
+    source: Path | None = config_path
+    if service is None and settings is None:
+        source = config_path if config_path is not None else DEFAULT_CONFIG_PATH
+        settings = Settings.from_toml(source)
     crawl_service = service if service is not None else CrawlService(settings or Settings())
     registry = jobs if jobs is not None else CrawlJobs(crawl_service)
 
@@ -101,6 +112,7 @@ def create_app(
     )
     application.state.crawl_service = crawl_service
     application.state.jobs = registry
+    application.state.config_path = source
     return application
 
 
