@@ -1,0 +1,155 @@
+/*
+ * MaxiCrawler's one stylesheet.
+ *
+ * Density over decoration, after Grafana and Proxmox: those read well because
+ * of alignment and consistent spacing, not because of colour. So there are no
+ * rounded corners, no shadows, no animation beyond a progress bar that has to
+ * move, and exactly one accent colour.
+ *
+ * Figures are tabular and right-aligned wherever they are compared down a
+ * column, which is what makes a table scannable rather than merely present.
+ */
+
+:root {
+  --bg: #14161a;
+  --panel: #1b1e24;
+  --raised: #22262e;
+  --border: #2c313a;
+  --border-strong: #3a4150;
+  --text: #d5d8de;
+  --muted: #8a919e;
+  --accent: #4c8fd6;
+  --good: #4a9d5f;
+  --warn: #c9922f;
+  --bad: #c05353;
+  --busy: #4c8fd6;
+  --idle: #6b7280;
+  --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { font-family: var(--mono); background: var(--raised); padding: 1px 4px; }
+
+/* --- chrome ------------------------------------------------------------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 0 20px;
+  height: 44px;
+  background: var(--raised);
+  border-bottom: 1px solid var(--border-strong);
+}
+
+.brand {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+.brand:hover { text-decoration: none; color: var(--accent); }
+
+.topbar nav { display: flex; gap: 4px; flex: 1; }
+
+.topbar nav a {
+  padding: 4px 12px;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  line-height: 34px;
+}
+.topbar nav a:hover { color: var(--text); text-decoration: none; }
+.topbar nav a.active { color: var(--text); border-bottom-color: var(--accent); }
+
+.version { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+
+main { padding: 20px; max-width: 1280px; }
+
+footer {
+  padding: 16px 20px 32px;
+  color: var(--muted);
+  font-size: 12px;
+  max-width: 1280px;
+}
+
+/* --- panels ------------------------------------------------------------- */
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  margin-bottom: 20px;
+}
+
+.panel > h2 {
+  margin: 0;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: var(--raised);
+  border-bottom: 1px solid var(--border);
+}
+
+.panel > p,
+.panel > .body { padding: 16px; margin: 0; }
+
+.empty { padding: 16px; color: var(--muted); }
+
+/* --- tables ------------------------------------------------------------- */
+
+.grid { width: 100%; border-collapse: collapse; font-size: 13px; }
+
+.grid th {
+  text-align: left;
+  padding: 8px 12px;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border-strong);
+  white-space: nowrap;
+}
+
+.grid td {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.grid tbody tr:hover { background: var(--raised); }
+.grid .right, th.right { text-align: right; }
+.grid .num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.grid .url { word-break: break-all; }
+.muted { color: var(--muted); }
+.bad-text { color: var(--bad); }
+
+/* --- badges ------------------------------------------------------------- */
+
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+
+.badge.good { color: var(--good); }
+.badge.warn { color: var(--warn); }
+.badge.bad { color: var(--bad); }
+.badge.busy { color: var(--busy); }
+.badge.idle { color: var(--idle); }

@@ -29,7 +29,12 @@ from maxicrawler.crawler import (
     DiscoveryRepository,
     NullDiscoveryRepository,
 )
-from maxicrawler.database import SQLiteCrawlRepository, SQLiteDatabase, SQLiteDiscoveryRepository
+from maxicrawler.database import (
+    SQLiteCrawlRepository,
+    SQLiteDatabase,
+    SQLiteDiscoveryRepository,
+    StoredCrawl,
+)
 from maxicrawler.events import EventBus
 from maxicrawler.utils import require_http_scheme
 from maxicrawler.web import HtmlLinkParser, UrllibPageFetcher, WebDiscoveryService
@@ -160,3 +165,13 @@ class CrawlService:
         repository = SQLiteCrawlRepository(SQLiteDatabase(self._settings.database_path))
         repository.initialize()
         return repository
+
+    def stored_crawls(self, limit: int = 20) -> tuple[StoredCrawl, ...]:
+        """Return the crawls this installation has recorded, newest first.
+
+        Reading history needs no engine and no crawl, so it belongs here rather
+        than making every client open a database of its own.
+        """
+        repository = SQLiteCrawlRepository(SQLiteDatabase(self._settings.database_path))
+        repository.initialize()
+        return repository.stored_crawls()[:limit]

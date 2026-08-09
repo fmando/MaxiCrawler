@@ -18,10 +18,12 @@ is what matters, and those come from the same report either way.
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.crawler import PluginUsage
+from maxicrawler.database import StoredCrawl
 from maxicrawler.plugins.generic import GENERIC_PLUGIN_NAME
 from maxicrawler.web.models import LinkKind
 from maxicrawler.web.report import CrawlReport, PageOutcome, SkipReason
@@ -74,6 +76,11 @@ def format_duration(seconds: float) -> str:
         return f"{minutes} min {remaining:02d} s"
     hours, minutes = divmod(minutes, 60)
     return f"{hours} h {minutes:02d} min"
+
+
+def format_timestamp(moment: datetime) -> str:
+    """Return a moment as a person reading a table wants it: short and sortable."""
+    return moment.strftime("%Y-%m-%d %H:%M")
 
 
 def describe_scope(options: CrawlOptions) -> str:
@@ -181,6 +188,41 @@ def report_view(report: CrawlReport) -> dict[str, Any]:
         "skips": _skip_rows(statistics.skips_by_reason),
         "link_kinds": _kind_rows(statistics.links_by_kind),
         "plugins": plugin_shares(summary.plugin_usage),
+    }
+
+
+def crawl_rows(crawls: Iterable[StoredCrawl]) -> tuple[dict[str, Any], ...]:
+    """Return one row per recorded crawl, for the lists that show history.
+
+    Reads from the stored summary rather than from the job registry, because
+    the registry is a live view that dies with the process and this is the part
+    that should survive a restart.
+    """
+    return tuple(_crawl_row(crawl) for crawl in crawls)
+
+
+def _crawl_row(crawl: StoredCrawl) -> dict[str, Any]:
+    """Return one recorded crawl as a table row."""
+    options = CrawlOptions(
+        max_depth=crawl.max_depth,
+        max_pages=max(1, crawl.max_pages),
+        same_domain=crawl.same_domain,
+        include_subdomains=crawl.include_subdomains,
+    )
+    return {
+        "job_id": crawl.session_id,
+        "seed_url": crawl.seed_url,
+        "state": str(crawl.state),
+        "state_label": STATE_LABELS[crawl.state],
+        "state_tone": STATE_TONES[crawl.state],
+        "options": describe_options(options),
+        "started_at": format_timestamp(crawl.started_at),
+        "is_running": crawl.finished_at is None,
+        "pages_visited": format_number(crawl.pages_visited),
+        "pages_failed": format_number(crawl.pages_failed),
+        "has_failures": crawl.pages_failed > 0,
+        "links_found": format_number(crawl.links_discovered),
+        "elapsed": format_duration(crawl.elapsed_seconds),
     }
 
 

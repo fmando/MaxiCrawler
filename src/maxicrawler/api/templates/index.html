@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · MaxiCrawler{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <h2>Recent crawls</h2>
+  {% if crawls %}
+    {% include "_crawl_table.html" %}
+  {% else %}
+    <p class="empty">
+      No crawls recorded yet. Start one from the command line with
+      <code>maxicrawler crawl &lt;url&gt;</code>, or from here once the form lands.
+    </p>
+  {% endif %}
+</section>
+{% endblock %}

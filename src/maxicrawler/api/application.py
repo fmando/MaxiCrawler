@@ -17,6 +17,9 @@ can check by reading, and that ``tests/test_api_boundaries.py`` checks by
 parsing.
 """
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from maxicrawler.api.errors import WebDependencyError
 from maxicrawler.app import CrawlService
 from maxicrawler.config import Settings
@@ -32,23 +35,60 @@ try:
     from starlette.applications import Starlette
     from starlette.requests import Request
     from starlette.responses import JSONResponse
-    from starlette.routing import Route
+    from starlette.routing import Mount, Route
+    from starlette.staticfiles import StaticFiles
 except ImportError as error:  # pragma: no cover - depends on the environment
     raise WebDependencyError(MISSING_EXTRA) from error
 
+from maxicrawler.api import routes  # noqa: E402 - only importable behind the guard
+from maxicrawler.api.jobs import CrawlJobs  # noqa: E402
+
 
 def create_app(
-    *, service: CrawlService | None = None, settings: Settings | None = None
+    *,
+    service: CrawlService | None = None,
+    settings: Settings | None = None,
+    jobs: CrawlJobs | None = None,
 ) -> Starlette:
     """Return the MaxiCrawler web application.
 
-    *service* is injectable so a test can drive the routes without touching a
-    database or a socket. Given neither argument, the application reads the
-    configuration from its default location, exactly as the CLI does.
+    Every collaborator is injectable so a test can drive the routes without a
+    socket, a database or a worker pool of its own. Given none of them, the
+    application reads the configuration from its default location, exactly as
+    the CLI does.
     """
     crawl_service = service if service is not None else CrawlService(settings or Settings())
-    application = Starlette(routes=[Route("/health", health, methods=["GET"])])
+    registry = jobs if jobs is not None else CrawlJobs(crawl_service)
+
+    @asynccontextmanager
+    async def lifespan(app: Starlette) -> AsyncIterator[None]:
+        """Ask every running crawl to stop when the server does.
+
+        Without waiting for them: a crawl asked to stop finishes the page it is
+        on, and a shutdown that blocked on a slow fetch would look like a hang.
+        """
+        try:
+            yield
+        finally:
+            registry.shutdown(wait=False)
+
+    application = Starlette(
+        lifespan=lifespan,
+        routes=[
+            Route("/", routes.dashboard, methods=["GET"], name="dashboard"),
+            Route("/crawls", routes.crawls, methods=["GET"], name="crawls"),
+            Route("/library", routes.library, methods=["GET"], name="library"),
+            Route("/settings", routes.settings, methods=["GET"], name="settings"),
+            Route("/health", health, methods=["GET"], name="health"),
+            Mount(
+                "/static",
+                app=StaticFiles(directory=str(routes.STATIC_DIRECTORY)),
+                name="static",
+            ),
+        ],
+    )
     application.state.crawl_service = crawl_service
+    application.state.jobs = registry
     return application
 
 

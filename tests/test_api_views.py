@@ -12,6 +12,7 @@ from maxicrawler.api.views import (
     KIND_LABELS,
     STATE_LABELS,
     STATE_TONES,
+    crawl_rows,
     describe_options,
     describe_scope,
     format_duration,
@@ -351,3 +352,77 @@ def test_every_link_kind_has_a_label() -> None:
 def test_the_tones_stay_a_small_fixed_set() -> None:
     """CSS decides colour; this only decides which of four classes applies."""
     assert set(STATE_TONES.values()) <= {"idle", "busy", "good", "warn", "bad"}
+
+
+# --- recorded crawls ---------------------------------------------------------
+
+
+def make_stored_crawl(**kwargs: object):  # type: ignore[no-untyped-def]
+    """Return a crawl summary as the database holds it."""
+    from maxicrawler.database import StoredCrawl
+
+    values: dict[str, object] = {
+        "session_id": "crawl-1",
+        "seed_url": "https://example.test/",
+        "started_at": STARTED,
+        "finished_at": STARTED,
+        "state": CrawlState.COMPLETED,
+        "max_depth": 2,
+        "max_pages": 50,
+        "same_domain": True,
+        "include_subdomains": False,
+        "pages_visited": 28,
+        "pages_failed": 2,
+        "pages_attempted": 31,
+        "pages_skipped": 4760,
+        "links_discovered": 17910,
+        "max_depth_reached": 2,
+        "frontier_remaining": 0,
+        "elapsed_seconds": 18.84,
+    }
+    values.update(kwargs)
+    return StoredCrawl(**values)  # type: ignore[arg-type]
+
+
+def test_a_recorded_crawl_becomes_a_readable_row() -> None:
+    (row,) = crawl_rows([make_stored_crawl()])
+
+    assert row["seed_url"] == "https://example.test/"
+    assert row["state_label"] == "completed"
+    assert row["options"] == "depth 2 · same domain · max 50 pages"
+    assert row["elapsed"] == "18.8 s"
+    assert row["started_at"] == "2026-08-09 12:00"
+
+
+def test_large_counts_in_a_row_are_grouped() -> None:
+    """A five-digit number in a column is what makes a table unreadable."""
+    (row,) = crawl_rows([make_stored_crawl()])
+
+    assert row["links_found"] == "17,910"
+    assert row["pages_visited"] == "28"
+
+
+def test_a_row_says_whether_anything_failed() -> None:
+    without = crawl_rows([make_stored_crawl(pages_failed=0)])[0]
+    with_failures = crawl_rows([make_stored_crawl(pages_failed=2)])[0]
+
+    assert without["has_failures"] is False
+    assert with_failures["has_failures"] is True
+
+
+def test_a_crawl_still_running_is_marked() -> None:
+    (row,) = crawl_rows([make_stored_crawl(finished_at=None, state=CrawlState.RUNNING)])
+
+    assert row["is_running"] is True
+    assert row["state_label"] == "running"
+
+
+def test_a_row_survives_options_an_older_release_never_recorded() -> None:
+    """A summary written before a validation rule must stay readable."""
+    (row,) = crawl_rows([make_stored_crawl(max_pages=0)])
+
+    assert "max 1 pages" in row["options"]
+
+
+def test_no_recorded_crawls_yields_no_rows() -> None:
+    assert crawl_rows([]) == ()

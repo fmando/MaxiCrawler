@@ -1,0 +1,36 @@
+{#
+  One recorded crawl per row.
+
+  A partial rather than markup inside a page, and that is the part worth
+  keeping: a fragment that renders on its own can be returned by a route as
+  well as embedded in one. Filtering and sorting later become "return this
+  fragment", not "rebuild the page in JavaScript".
+#}
+<table class="grid">
+  <thead>
+    <tr>
+      <th>State</th>
+      <th>Start URL</th>
+      <th>Scope</th>
+      <th class="right">Pages</th>
+      <th class="right">Failed</th>
+      <th class="right">Links</th>
+      <th class="right">Took</th>
+      <th>Started</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for crawl in crawls %}
+      <tr>
+        <td><span class="badge {{ crawl.state_tone }}">{{ crawl.state_label }}</span></td>
+        <td class="url">{{ crawl.seed_url }}</td>
+        <td class="muted">{{ crawl.options }}</td>
+        <td class="right num">{{ crawl.pages_visited }}</td>
+        <td class="right num{% if crawl.has_failures %} bad-text{% endif %}">{{ crawl.pages_failed }}</td>
+        <td class="right num">{{ crawl.links_found }}</td>
+        <td class="right num">{{ crawl.elapsed }}</td>
+        <td class="muted num">{{ crawl.started_at }}</td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
