@@ -15,3 +15,14 @@ dist/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Runtime files MaxiCrawler creates in the working directory it is run from.
+# The paths mirror the defaults in maxicrawler.config.settings; a database can
+# hold the URLs of everything you have crawled, so it must not be committed by
+# accident. /library/ is anchored on purpose -- unanchored it would also match
+# the tracked package src/maxicrawler/library/.
+/maxicrawler.toml
+/library/
+*.db
+*.db-wal
+*.db-shm
