@@ -9,7 +9,7 @@ import typer
 
 from maxicrawler import __version__
 from maxicrawler.api.errors import MISSING_EXTRA, WebDependencyError
-from maxicrawler.app import CrawlService
+from maxicrawler.app import CrawlService, DownloadService
 from maxicrawler.cli.crawling import (
     EXIT_FETCH_FAILED,
     EXIT_NOT_A_PAGE,
@@ -57,20 +57,17 @@ from maxicrawler.domain import (
     UrlRecord,
 )
 from maxicrawler.downloader import (
-    DownloadManager,
     NullProgressReporter,
     ProgressReporter,
     RichProgressReporter,
     SourceError,
 )
 from maxicrawler.events import EventBus
-from maxicrawler.library import Library
 from maxicrawler.plugins import PluginResolver, create_default_registry
 from maxicrawler.providers import (
     ProviderError,
     ProviderRegistry,
     RetryPolicy,
-    UrllibStreamTransport,
     UrllibTransport,
     create_default_provider_registry,
 )
@@ -291,18 +288,17 @@ def download(
     Downloads land in the configured library, one directory per resource, each
     with a metadata.json describing where it came from. A resource the library
     already holds is skipped without contacting the provider, and nothing is
-    ever overwritten automatically.
+    ever overwritten automatically. The web interface stores into the same
+    library through the same service, so both clients see one set of files.
 
     The exit code is 0 when everything the source asked for is in the library,
     and 4 when something was not: a failed transfer, a revoked share, or a link
     no provider handles. The report says which.
     """
-    settings = Settings.from_toml(config_path)
-    root = output if output is not None else settings.library_path
-    registry = _build_provider_registry(settings, max_entries=max_entries, transfers=True)
-    manager = DownloadManager(
-        registry,
-        Library(root),
+    service = DownloadService(Settings.from_toml(config_path))
+    manager = service.build_manager(
+        output=output,
+        max_entries=max_entries,
         reporter=_build_reporter(progress=progress and not dry_run),
     )
     try:
@@ -310,7 +306,7 @@ def download(
     except SourceError as error:
         raise typer.BadParameter(str(error)) from error
     if dry_run:
-        typer.echo(render_plan(plan, root))
+        typer.echo(render_plan(plan, manager.library.root))
         raise typer.Exit(0 if not plan.unresolved else 4)
     report = manager.run(plan)
     typer.echo(render_report(report))
@@ -405,24 +401,20 @@ def _classify(url: str) -> UrlClassification:
     return resolution.classification
 
 
-def _build_provider_registry(
-    settings: Settings, *, max_entries: int | None, transfers: bool = False
-) -> ProviderRegistry:
-    """Return the providers, wired to the configured network behaviour.
+def _build_provider_registry(settings: Settings, *, max_entries: int | None) -> ProviderRegistry:
+    """Return the providers ``info`` may ask, wired to the configured network.
 
-    A registry built without *transfers* has no way to move content at all,
-    which is what keeps ``info`` unable to download by construction rather
-    than by convention.
+    Composed without a stream transport, so this registry has no way to move
+    content at all. That is what keeps ``info`` unable to download by
+    construction rather than by convention — and the providers say so through
+    their capabilities rather than by failing when asked.
+
+    The registry that *can* transfer is built by
+    :class:`~maxicrawler.app.DownloadService`, which is the only place that
+    should be composing one.
     """
-    transport = UrllibTransport(user_agent=settings.user_agent, timeout=settings.network_timeout)
-    stream = (
-        UrllibStreamTransport(user_agent=settings.user_agent, timeout=settings.network_timeout)
-        if transfers
-        else None
-    )
     return create_default_provider_registry(
-        transport=transport,
-        stream=stream,
+        transport=UrllibTransport(user_agent=settings.user_agent, timeout=settings.network_timeout),
         retry=RetryPolicy(max_attempts=settings.network_retries),
         max_entries=max_entries if max_entries is not None else settings.max_entries,
     )

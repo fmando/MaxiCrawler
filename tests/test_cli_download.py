@@ -5,6 +5,7 @@ root, so the whole path — argument parsing, configuration, library placement,
 reporting, exit codes — is covered without a socket.
 """
 
+import ast
 import json
 from pathlib import Path
 
@@ -43,7 +44,13 @@ DOWNLOADS = frozenset({ProviderCapability.INSPECT, ProviderCapability.DOWNLOAD})
 
 @pytest.fixture
 def stub_provider(monkeypatch: pytest.MonkeyPatch) -> StubProvider:
-    """Replace the built-in provider set with a stub that answers for Mega."""
+    """Replace the built-in provider set with a stub that answers for Mega.
+
+    Patched in `maxicrawler.app.downloading` rather than in the command line,
+    because that is where the download graph is composed since Sprint 11. The
+    command builds no registry of its own, which is exactly what this fixture
+    would fail to influence if it did.
+    """
     provider = StubProvider(
         "mega",
         url_prefix="https://mega.nz/",
@@ -51,7 +58,7 @@ def stub_provider(monkeypatch: pytest.MonkeyPatch) -> StubProvider:
         payload=PAYLOAD,
     )
     monkeypatch.setattr(
-        "maxicrawler.cli.create_default_provider_registry",
+        "maxicrawler.app.downloading.create_default_provider_registry",
         lambda **_: ProviderRegistry([provider]),
     )
     return provider
@@ -181,7 +188,7 @@ def test_a_failed_transfer_is_reported_with_a_non_zero_exit(
         failure=ProviderTransportError("connection reset"),
     )
     monkeypatch.setattr(
-        "maxicrawler.cli.create_default_provider_registry",
+        "maxicrawler.app.downloading.create_default_provider_registry",
         lambda **_: ProviderRegistry([provider]),
     )
 
@@ -213,6 +220,29 @@ def test_a_source_that_is_neither_a_link_nor_a_path_is_rejected(
 
     assert result.exit_code != 0
     assert "neither an HTTP(S) URL nor an existing path" in result.output
+
+
+def test_the_command_builds_no_download_graph_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_provider: StubProvider
+) -> None:
+    """The same rule the web interface is held to, read the same way.
+
+    Every fixture above already depends on this — they patch the registry in
+    `maxicrawler.app.downloading` and would influence nothing if the command
+    composed one itself — but a fixture that quietly stopped mattering is
+    exactly the failure worth naming out loud.
+    """
+    source = (Path("src") / "maxicrawler" / "cli" / "__init__.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    called = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+
+    assert "DownloadManager" not in called
+    assert "Library" not in called
+    assert "DownloadService" in called
 
 
 def test_the_key_never_reaches_the_terminal(
