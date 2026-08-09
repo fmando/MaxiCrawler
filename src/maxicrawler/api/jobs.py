@@ -22,6 +22,7 @@ limit so a long-running server does not accumulate reports forever.
 """
 
 from collections import OrderedDict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
@@ -117,6 +118,7 @@ class CrawlJob:
         self._state = CrawlState.PENDING
         self._error: str | None = None
         self._report: CrawlReport | None = None
+        self._listeners: list[Callable[[JobSnapshot], None]] = []
         self._subscribe()
 
     @property
@@ -150,6 +152,33 @@ class CrawlJob:
                 error=self._error,
             )
 
+    def add_listener(self, listener: Callable[[JobSnapshot], None]) -> None:
+        """Call *listener* with a fresh snapshot after every change.
+
+        Listeners run **on the worker thread**, inside the crawl. They must
+        therefore do as little as possible and must never block: the one in
+        :mod:`maxicrawler.api.stream` hands the snapshot to an event loop and
+        returns immediately.
+        """
+        self._listeners.append(listener)
+
+    def remove_listener(self, listener: Callable[[JobSnapshot], None]) -> None:
+        """Stop calling *listener*; unknown listeners are ignored."""
+        if listener in self._listeners:
+            self._listeners.remove(listener)
+
+    def _announce(self) -> None:
+        """Hand a fresh snapshot to every listener.
+
+        Deliberately outside the lock. Calling into somebody else's code while
+        holding a lock is how a slow listener becomes a stalled crawl.
+        """
+        if not self._listeners:
+            return
+        snapshot = self.snapshot()
+        for listener in tuple(self._listeners):
+            listener(snapshot)
+
     def stop(self) -> None:
         """Ask the crawl to stop after the page it is working on.
 
@@ -169,6 +198,7 @@ class CrawlJob:
             self._state = report.state
             if self._finished is None:
                 self._finished = monotonic()
+        self._announce()
 
     def fail(self, reason: str) -> None:
         """Record that the crawl never produced a report.
@@ -180,6 +210,7 @@ class CrawlJob:
         with self._lock:
             self._error = reason
             self._finished = monotonic()
+        self._announce()
 
     # --- what the crawl reports as it runs -----------------------------------
 
@@ -194,6 +225,7 @@ class CrawlJob:
         """Note that the crawl has begun."""
         with self._lock:
             self._state = CrawlState.RUNNING
+        self._announce()
 
     def _on_page_crawled(self, event: Event) -> None:
         """Count one page that was read.
@@ -208,6 +240,7 @@ class CrawlJob:
             self._pages_visited += 1
             self._links_found += event.link_count
             self._latest_url = event.final_url
+        self._announce()
 
     def _on_page_failed(self, event: Event) -> None:
         """Count one page that could not be read."""
@@ -216,6 +249,7 @@ class CrawlJob:
         with self._lock:
             self._pages_failed += 1
             self._latest_url = event.url
+        self._announce()
 
     def _on_finished(self, event: Event) -> None:
         """Note how the crawl ended."""
@@ -224,6 +258,7 @@ class CrawlJob:
         with self._lock:
             self._state = CrawlState(event.state)
             self._finished = monotonic()
+        self._announce()
 
 
 class CrawlJobs:
