@@ -9,6 +9,13 @@ and reported before a single byte moves.
 The planner is where a container becomes many jobs. A folder share is
 enumerated through the provider's own :meth:`inspect`, and each file it holds
 becomes its own job, so the rest of the layer only ever sees single resources.
+
+A **file** link is planned without asking anybody by default, because a run over
+two hundred links must not become two hundred extra requests to learn what the
+transfer is about to state anyway. ``inspect_files`` turns that trade the other
+way for a caller downloading one deliberate link, which then knows the name and
+the size before the first byte moves — enough to draw a progress bar with a
+denominator and to name the file rather than its handle.
 """
 
 from collections.abc import Callable, Iterable
@@ -55,18 +62,24 @@ class DownloadPlanner:
         )
         self._clock = clock if clock is not None else _utc_now
 
-    def plan(self, items: Iterable[SourceItem]) -> DownloadPlan:
-        """Return what a run over *items* would transfer."""
+    def plan(self, items: Iterable[SourceItem], *, inspect_files: bool = False) -> DownloadPlan:
+        """Return what a run over *items* would transfer.
+
+        *inspect_files* asks the provider to describe a plain file link as well,
+        so the resulting job carries its name and size. It costs one request per
+        link and is off by default; see the module docstring for which caller
+        wants which.
+        """
         jobs: list[DownloadJob] = []
         unresolved: list[UnresolvedSource] = []
         for item in items:
-            planned, skipped = self._plan_one(item)
+            planned, skipped = self._plan_one(item, inspect_files=inspect_files)
             jobs.extend(planned)
             unresolved.extend(skipped)
         return DownloadPlan(jobs=tuple(jobs), unresolved=tuple(unresolved))
 
     def _plan_one(
-        self, item: SourceItem
+        self, item: SourceItem, *, inspect_files: bool
     ) -> tuple[tuple[DownloadJob, ...], tuple[UnresolvedSource, ...]]:
         """Return the jobs and findings one source URL produces."""
         safe_url = strip_fragment(item.url)
@@ -84,21 +97,36 @@ class DownloadPlanner:
             reason = f"the {provider.metadata.label} provider cannot transfer content"
             return (), (UnresolvedSource(safe_url, reason),)
         try:
-            return self._expand(provider, provider.reference(classification), item)
+            return self._expand(
+                provider,
+                provider.reference(classification),
+                item,
+                inspect_files=inspect_files,
+            )
         except ProviderError as error:
             return (), (UnresolvedSource(safe_url, str(error)),)
 
     def _expand(
-        self, provider: ResourceProvider, ref: ResourceRef, item: SourceItem
+        self,
+        provider: ResourceProvider,
+        ref: ResourceRef,
+        item: SourceItem,
+        *,
+        inspect_files: bool,
     ) -> tuple[tuple[DownloadJob, ...], tuple[UnresolvedSource, ...]]:
         """Return the jobs *ref* stands for, enumerating a container first.
 
-        A file link needs no request: everything the job needs is either in the
-        link or will be stated as the transfer opens. Anything else is
-        inspected, because only the provider can say whether it is one resource
-        or many.
+        A file link needs no request unless one was asked for: everything the
+        job needs is either in the link or will be stated as the transfer opens.
+        Anything else is inspected, because only the provider can say whether it
+        is one resource or many.
+
+        Asking about a file link takes the same path a container does, which is
+        why *inspect_files* is one condition rather than a branch of its own: an
+        inspection that finds the resource gone reports it as unresolved before
+        anything is transferred, whatever kind the link claimed to be.
         """
-        if ref.kind is ResourceKind.FILE:
+        if ref.kind is ResourceKind.FILE and not inspect_files:
             return (self._job(ref, item),), ()
         inspection = provider.inspect(ref)
         if not inspection.availability.is_available:
