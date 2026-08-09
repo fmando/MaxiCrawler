@@ -1,0 +1,381 @@
+/*
+ * MaxiCrawler's one stylesheet.
+ *
+ * Density over decoration, after Grafana and Proxmox: those read well because
+ * of alignment and consistent spacing, not because of colour. So there are no
+ * rounded corners, no shadows, no animation beyond a progress bar that has to
+ * move, and exactly one accent colour.
+ *
+ * Figures are tabular and right-aligned wherever they are compared down a
+ * column, which is what makes a table scannable rather than merely present.
+ */
+
+:root {
+  --bg: #14161a;
+  --panel: #1b1e24;
+  --raised: #22262e;
+  --border: #2c313a;
+  --border-strong: #3a4150;
+  --text: #d5d8de;
+  --muted: #8a919e;
+  --accent: #4c8fd6;
+  --good: #4a9d5f;
+  --warn: #c9922f;
+  --bad: #c05353;
+  --busy: #4c8fd6;
+  --idle: #6b7280;
+  --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { font-family: var(--mono); background: var(--raised); padding: 1px 4px; }
+
+/* --- chrome ------------------------------------------------------------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 0 20px;
+  height: 44px;
+  background: var(--raised);
+  border-bottom: 1px solid var(--border-strong);
+}
+
+.brand {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+.brand:hover { text-decoration: none; color: var(--accent); }
+
+.topbar nav { display: flex; gap: 4px; flex: 1; }
+
+.topbar nav a {
+  padding: 4px 12px;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  line-height: 34px;
+}
+.topbar nav a:hover { color: var(--text); text-decoration: none; }
+.topbar nav a.active { color: var(--text); border-bottom-color: var(--accent); }
+
+.version { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+
+main { padding: 20px; max-width: 1280px; }
+
+footer {
+  padding: 16px 20px 32px;
+  color: var(--muted);
+  font-size: 12px;
+  max-width: 1280px;
+}
+
+/* --- panels ------------------------------------------------------------- */
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  margin-bottom: 20px;
+}
+
+.panel > h2 {
+  margin: 0;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: var(--raised);
+  border-bottom: 1px solid var(--border);
+}
+
+.panel > p,
+.panel > .body { padding: 16px; margin: 0; }
+
+.empty { padding: 16px; color: var(--muted); }
+
+/* --- tables ------------------------------------------------------------- */
+
+.grid { width: 100%; border-collapse: collapse; font-size: 13px; }
+
+.grid th {
+  text-align: left;
+  padding: 8px 12px;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border-strong);
+  white-space: nowrap;
+}
+
+.grid td {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.grid tbody tr:hover { background: var(--raised); }
+.grid .right, th.right { text-align: right; }
+.grid .num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.grid .url { word-break: break-all; }
+.muted { color: var(--muted); }
+.bad-text { color: var(--bad); }
+
+/* --- badges ------------------------------------------------------------- */
+
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+
+.badge.good { color: var(--good); }
+.badge.warn { color: var(--warn); }
+.badge.bad { color: var(--bad); }
+.badge.busy { color: var(--busy); }
+.badge.idle { color: var(--idle); }
+
+/* --- the start form ----------------------------------------------------- */
+
+.start {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 16px;
+}
+
+.start label { display: flex; flex-direction: column; gap: 4px; }
+.start label.wide { flex: 1 1 380px; }
+
+.start label > span {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.start input[type="text"],
+.start input[type="number"] {
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  font: inherit;
+  font-family: var(--mono);
+  padding: 6px 8px;
+}
+.start input[type="number"] { width: 96px; }
+.start input:focus { outline: none; border-color: var(--accent); }
+
+.start label.check { flex-direction: row; align-items: center; gap: 6px; height: 32px; }
+.start label.check > span { text-transform: none; letter-spacing: 0; font-size: 13px; }
+
+.start button {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: #0e1218;
+  font: inherit;
+  font-weight: 600;
+  padding: 6px 18px;
+  cursor: pointer;
+  height: 32px;
+}
+.start button:hover { filter: brightness(1.12); }
+
+.error {
+  flex-basis: 100%;
+  margin: 0;
+  padding: 8px 12px;
+  color: var(--bad);
+  border: 1px solid var(--bad);
+  background: rgba(192, 83, 83, 0.08);
+}
+
+/* --- one crawl ---------------------------------------------------------- */
+
+.panel > h2 .url { text-transform: none; letter-spacing: 0; color: var(--text); }
+.panel > h2 .badge { margin-right: 10px; }
+
+.progress { margin: 4px 0 18px; }
+
+.bar {
+  height: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+}
+.bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s linear;
+}
+
+.bar-caption {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.readout { display: flex; flex-wrap: wrap; gap: 32px; margin: 0 0 16px; }
+.readout > div { display: flex; flex-direction: column; gap: 2px; }
+
+.readout dt {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.readout dd { margin: 0; font-size: 20px; font-variant-numeric: tabular-nums; }
+
+.latest { margin: 0; display: flex; gap: 10px; align-items: baseline; font-size: 13px; }
+.latest .url { font-family: var(--mono); word-break: break-all; }
+
+.stop { display: inline; margin-left: auto; }
+.panel > h2 { display: flex; align-items: center; gap: 10px; }
+
+.stop button {
+  background: transparent;
+  border: 1px solid var(--bad);
+  color: var(--bad);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 12px;
+  cursor: pointer;
+}
+.stop button:hover { background: rgba(192, 83, 83, 0.12); }
+
+/* --- a finished crawl --------------------------------------------------- */
+
+.aside {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--border-strong);
+  padding: 2px 12px;
+}
+.aside:hover { text-decoration: none; border-color: var(--accent); }
+
+.panel > h2 .count {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 20px;
+  margin: 0 0 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.facts b { color: var(--text); font-weight: 400; }
+
+.note {
+  margin: 12px 0 0;
+  padding: 8px 12px;
+  color: var(--warn);
+  border-left: 2px solid var(--warn);
+  background: rgba(201, 146, 47, 0.07);
+}
+
+.body > h3 {
+  margin: 22px 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.grid.tight { width: auto; min-width: 320px; }
+.grid.tight td { border-bottom: 1px solid var(--border); padding: 4px 12px 4px 0; }
+.grid.tight td:first-child { min-width: 140px; }
+.grid.tight tbody tr:hover { background: none; }
+
+.share { width: 260px; }
+
+.meter {
+  display: block;
+  height: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+}
+.meter > span { display: block; height: 100%; background: var(--accent); }
+
+.columns { display: flex; flex-wrap: wrap; gap: 0 48px; }
+
+.small { font-size: 12px; }
+.grid td .small { margin-top: 2px; }
+.plugin { font-family: var(--mono); }
+
+/* --- the remaining pages ------------------------------------------------ */
+
+.footnote {
+  margin: 0 0 20px;
+  padding: 0 16px 16px;
+  color: var(--muted);
+  font-size: 12px;
+  max-width: 78ch;
+}
+.panel + .footnote { margin-top: -12px; padding-top: 0; }
+.footnote .badge { font-size: 10px; }
+
+.panel > .group {
+  margin: 0;
+  padding: 14px 16px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.value {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+/*
+ * Not `.num`, which is `nowrap` because a column of figures reads badly when
+ * one of them wraps. A configured value is not a column of figures: an
+ * absolute database path holds the whole page open sideways, and every table
+ * on it, if it is forbidden to break.
+ */
+
+.document {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-x: auto;
+}
+
+.body > p + p { margin-top: 10px; }

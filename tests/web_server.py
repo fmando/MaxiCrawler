@@ -16,6 +16,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from time import sleep
 
 
 @dataclass
@@ -41,6 +42,13 @@ class Route:
     """Overrides the announced length, so a lying header can be tested."""
 
     omit_content_length: bool = False
+
+    delay: float = 0.0
+    """Seconds to wait before answering.
+
+    Enough to make "the crawl is still running" a fact a test can rely on
+    rather than a race it hopes to win.
+    """
 
 
 @dataclass
@@ -73,6 +81,8 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - name fixed by BaseHTTPRequestHandler
         self.site.requests.append(RecordedRequest(path=self.path, headers=dict(self.headers)))
         route = self.site.route_for(self.path)
+        if route.delay:
+            sleep(route.delay)
         self.send_response(route.status)
         if route.location is not None:
             self.send_header("Location", route.location)

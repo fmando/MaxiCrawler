@@ -8,6 +8,8 @@ from uuid import uuid4
 import typer
 
 from maxicrawler import __version__
+from maxicrawler.api.errors import MISSING_EXTRA, WebDependencyError
+from maxicrawler.app import CrawlService
 from maxicrawler.cli.crawling import (
     EXIT_FETCH_FAILED,
     EXIT_NOT_A_PAGE,
@@ -30,6 +32,13 @@ from maxicrawler.cli.inspection import (
     render_inspection,
     render_json,
 )
+from maxicrawler.cli.serving import (
+    EXIT_WEB_UNAVAILABLE,
+    banner,
+    exposure_notice,
+    is_loopback,
+    refusal,
+)
 from maxicrawler.cli.summary import render_summary
 from maxicrawler.config import DEFAULT_CONFIG_PATH, Settings
 from maxicrawler.crawler import (
@@ -38,11 +47,7 @@ from maxicrawler.crawler import (
     LocalDiscoveryService,
     NullDiscoveryRepository,
 )
-from maxicrawler.database import (
-    SQLiteCrawlRepository,
-    SQLiteDatabase,
-    SQLiteDiscoveryRepository,
-)
+from maxicrawler.database import SQLiteDatabase, SQLiteDiscoveryRepository
 from maxicrawler.domain import (
     Availability,
     ResourceInspection,
@@ -69,18 +74,8 @@ from maxicrawler.providers import (
     UrllibTransport,
     create_default_provider_registry,
 )
-from maxicrawler.utils import configure_logging, normalize_url, require_http_scheme, strip_fragment
-from maxicrawler.web import (
-    ContentTypeError,
-    FetchError,
-    HtmlLinkParser,
-    PolicyRefusedError,
-    UrllibPageFetcher,
-    WebDiscoveryService,
-)
-from maxicrawler.web.engine import CrawlEngine
-from maxicrawler.web.repository import CrawlRepository, NullCrawlRepository
-from maxicrawler.web.session import CrawlOptions, CrawlSession, RequestContext
+from maxicrawler.utils import configure_logging, normalize_url, strip_fragment
+from maxicrawler.web import ContentTypeError, FetchError, PolicyRefusedError
 
 app = typer.Typer(help="Configuration and runtime tools for MaxiCrawler.", no_args_is_help=True)
 ConfigPath = Annotated[Path, typer.Option(help="TOML configuration file to use.")]
@@ -188,28 +183,20 @@ def crawl(
     5 when the starting page could not be retrieved, 6 when it was not a page,
     and 7 when the crawl was interrupted.
     """
+    service = CrawlService(Settings.from_toml(config_path))
     try:
-        require_http_scheme(url)
+        session = service.build_session(
+            url,
+            depth=depth,
+            max_pages=max_pages,
+            same_domain=same_domain,
+            include_subdomains=include_subdomains,
+            scan_prose=prose,
+        )
     except ValueError as error:
         raise typer.BadParameter(f"{error}: {url}") from error
-    settings = Settings.from_toml(config_path)
-    options = CrawlOptions(
-        max_depth=settings.crawl_depth if depth is None else depth,
-        max_pages=settings.crawl_max_pages if max_pages is None else max_pages,
-        same_domain=settings.crawl_same_domain if same_domain is None else same_domain,
-        include_subdomains=include_subdomains,
-        scan_prose=prose,
-    )
-    session = CrawlSession(
-        session_id=uuid4().hex,
-        seed_url=url,
-        started_at=datetime.now(UTC),
-        options=options,
-        context=RequestContext(user_agent=settings.user_agent),
-    )
-    engine = _build_engine(settings, session, persist=persist)
     try:
-        report = engine.run(session)
+        report = service.run(session, persist=persist)
     except ContentTypeError as error:
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(EXIT_NOT_A_PAGE) from error
@@ -331,6 +318,66 @@ def download(
 
 
 @app.command()
+def serve(
+    host: Annotated[
+        str,
+        typer.Option(
+            help="Address to listen on. Anything but a loopback address needs --allow-remote."
+        ),
+    ] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="Port to listen on.")] = 8000,
+    config_path: Annotated[
+        Path, typer.Option("--config", help="TOML configuration file to use.")
+    ] = DEFAULT_CONFIG_PATH,
+    allow_remote: Annotated[
+        bool,
+        typer.Option("--allow-remote", help="Permit binding an address others can reach."),
+    ] = False,
+) -> None:
+    """Run the web interface.
+
+    The same crawls the crawl command runs, through the same service, in a
+    browser. Nothing here can do anything the command line cannot; it is a
+    second client, not a second program.
+
+    It listens on 127.0.0.1 by default, where only this machine can reach it.
+    The interface has no authentication and can start crawls, so listening
+    anywhere else needs --allow-remote and says what that means.
+
+    Runs until interrupted. Crawls still running when it stops are asked to
+    stop, and finish the page they are on before they do.
+
+    The exit code is 8 when the optional web extra is not installed.
+    """
+    if not is_loopback(host) and not allow_remote:
+        raise typer.BadParameter(refusal(host), param_hint="--host")
+    try:
+        import uvicorn
+
+        from maxicrawler.api import create_app
+    except (ImportError, WebDependencyError) as error:
+        # uvicorn and starlette arrive together in the web extra, so one
+        # message covers both. It names the command that installs them.
+        typer.echo(MISSING_EXTRA, err=True)
+        raise typer.Exit(EXIT_WEB_UNAVAILABLE) from error
+    application = create_app(settings=Settings.from_toml(config_path), config_path=config_path)
+    if not is_loopback(host):
+        typer.echo(exposure_notice(host, port), err=True)
+    typer.echo(banner(host, port))
+    uvicorn.run(application, host=host, port=port, log_level=_uvicorn_log_level())
+
+
+def _uvicorn_log_level() -> str:
+    """Return how loud uvicorn should be.
+
+    Quiet, because it would otherwise print a line per request and bury the
+    one line that says where the interface is. Anything that matters about a
+    crawl is on the page it belongs to.
+    """
+    return "warning"
+
+
+@app.command()
 def version() -> None:
     """Print the installed MaxiCrawler version."""
     typer.echo(__version__)
@@ -343,40 +390,6 @@ def _build_repository(settings: Settings, *, persist: bool) -> DiscoveryReposito
     repository = SQLiteDiscoveryRepository(SQLiteDatabase(settings.database_path))
     repository.initialize()
     return repository
-
-
-def _build_crawl_repository(settings: Settings, *, persist: bool) -> CrawlRepository:
-    """Return the repository the crawl summary should be written to."""
-    if not persist:
-        return NullCrawlRepository()
-    repository = SQLiteCrawlRepository(SQLiteDatabase(settings.database_path))
-    repository.initialize()
-    return repository
-
-
-def _build_engine(settings: Settings, session: CrawlSession, *, persist: bool) -> CrawlEngine:
-    """Return the crawl engine wired for *session*.
-
-    The composition root, and the only place the crawl layer meets the
-    database, the plugin registry and the event bus.
-    """
-    options = session.options
-    service = WebDiscoveryService(
-        DiscoveryPipeline(EventBus()),
-        fetcher=UrllibPageFetcher(
-            user_agent=session.context.user_agent,
-            timeout=settings.network_timeout,
-            max_response_bytes=settings.max_page_bytes,
-            max_redirects=settings.max_redirects,
-        ),
-        parser=HtmlLinkParser(max_links=settings.max_links),
-        repository=_build_repository(settings, persist=persist),
-        scan_prose=options.scan_prose,
-    )
-    return CrawlEngine(
-        service,
-        repository=_build_crawl_repository(settings, persist=persist),
-    )
 
 
 def _classify(url: str) -> UrlClassification:

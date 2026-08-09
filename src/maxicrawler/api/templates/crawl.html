@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}{{ crawl.seed_url }} · MaxiCrawler{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <h2>
+    <span class="badge {{ crawl.state_tone }}" id="state">{{ crawl.state_label }}</span>
+    <span class="url">{{ crawl.seed_url }}</span>
+
+    {% if not crawl.is_finished %}
+      {#
+        A plain form, so the button works with scripting switched off. Stopping
+        is not instant -- the engine finishes the page it is on -- and saying so
+        beats a button that looks like it ended the crawl on the click.
+      #}
+      <form class="stop" method="post" action="/crawls/{{ crawl.job_id }}/stop">
+        <button type="submit">Stop</button>
+      </form>
+    {% elif report %}
+      <a class="aside" href="{{ report.json_url }}">JSON</a>
+    {% endif %}
+  </h2>
+
+  <div class="body">
+    <p class="muted">{{ crawl.options }}</p>
+
+    {% if crawl.error %}
+      <p class="error">{{ crawl.error }}</p>
+    {% elif report %}
+      {% include "_report.html" %}
+    {% else %}
+      {#
+        Also the last thing a crawl that has ended but whose report is still
+        being assembled shows. The counters are final by then; only the tables
+        below are missing, and a reload brings them.
+      #}
+      {% include "_progress.html" %}
+    {% endif %}
+  </div>
+</section>
+
+{% if report %}
+  {% include "_page_table.html" %}
+  {% include "_link_table.html" %}
+{% endif %}
+
+{% if not crawl.is_finished %}
+  {#
+    Everything above is already complete. This only spares a reader the
+    reloading, which is why it sits at the end and why the page never depends
+    on it.
+  #}
+  <div id="crawl-live" data-stream="/crawls/{{ crawl.job_id }}/events" hidden></div>
+  <script src="/static/crawl.js" defer></script>
+{% endif %}
+{% endblock %}

@@ -5,6 +5,10 @@
 - Python 3.12 or newer
 - [uv](https://docs.astral.sh/uv/)
 
+Three optional extras exist: `mega` (cryptography), `brotli`, and `web` (the
+browser interface). Each is part of the `dev` dependencies, so the setup below
+installs all of them.
+
 ## Setup
 
 ```bash
@@ -57,3 +61,23 @@ bodies, and content-type refusals are exactly where the bugs live, and none of
 them survives being stubbed out. The `brotli` extra is part of the `dev`
 dependencies; without it the handful of Brotli tests skip and the rest still
 pass, which is the same situation a user without the extra is in.
+
+The web interface is driven through Starlette's `TestClient`, which speaks to
+the application object rather than to a port, so no test binds a socket. The one
+place that would is `uvicorn.run`, and `tests/test_cli_serve.py` replaces it and
+inspects what it was asked to do — which is also the only thing worth asserting
+about it.
+
+## Asserting on command-line output
+
+Typer renders help and usage errors through Rich, and Rich's highlighter styles
+an option name in pieces. Colour is off on a developer's machine and forced on
+under GitHub Actions, where `--allow-remote` then leaves as `-`, `-allow` and
+`-remote` with escape sequences between them — so a substring check against the
+raw output passes locally and fails only in CI.
+
+Strip the styling before asserting, as `plain()` in `tests/test_cli_serve.py`
+does. What a person reads is the same either way, and that is what such a test
+is about.
+
+Running the suite with `GITHUB_ACTIONS=true` reproduces it locally.

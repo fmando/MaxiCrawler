@@ -1,0 +1,30 @@
+{#
+  Still empty, and honest about it.
+
+  The paragraph naming where the library will be read from is not decoration.
+  It is the line that keeps the next person from importing
+  `maxicrawler.library` here because it was the quickest way to fill the page.
+#}
+{% extends "base.html" %}
+{% block title %}Library · MaxiCrawler{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <h2>Library</h2>
+  <div class="body">
+    <p>Nothing has been downloaded, because this interface does not download anything yet.</p>
+    <p class="muted">
+      Crawling and downloading are separate pipelines: the crawler discovers
+      links and records them, and downloading them is a step nobody has asked
+      this server to take. When it does, files will land in
+      <code>{{ library_path }}</code> and be listed here.
+    </p>
+    <p class="muted">
+      It will read them through a service in <code>maxicrawler.app</code>, the
+      same way crawling does. This layer does not reach into the library, the
+      providers or the downloader itself, and a test asserts that rather than
+      trusting this sentence.
+    </p>
+  </div>
+</section>
+{% endblock %}

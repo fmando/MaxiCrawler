@@ -296,3 +296,108 @@ The engine derives the scope from the session rather than trusting a caller to
 inject a matching policy. An option that silently does nothing unless wired
 correctly would let a report and a database row claim a crawl stayed on one
 host while it wandered off it.
+
+## ADR-022: The web interface is a second client, not a second implementation
+
+The command line was the only client for nine sprints, and it had grown a
+composition root inside itself: it built the pipeline, the fetcher, the
+repositories and the engine, then rendered what came back. A browser client
+could have been written the same way. It would have worked, and the two would
+have drifted — a flag one of them honours, a default the other has, a bug fixed
+once.
+
+So the graph moved into `maxicrawler.app` first, the command line was changed to
+use it, and only then did `api` exist. `CrawlService` runs a crawl for whoever
+is asking and `crawl_document` turns a report into JSON; both clients call the
+same function rather than agreeing on what it should say.
+
+Three rules keep it that way, and `tests/test_api_boundaries.py` reads the
+import graph rather than trusting the prose:
+
+- `api` never imports `providers`, `downloader` or `library`. The library page
+  lists nothing yet precisely because listing it will go through a service in
+  `maxicrawler.app`, for the same reason crawling does.
+- `api` imports nothing `CrawlService` assembles — no `CrawlEngine`, no
+  `DiscoveryPipeline`, no fetcher, no repository. A second object graph is how
+  two clients quietly become two crawlers.
+- No core package imports `api`. `maxicrawler.cli` is the one exception,
+  because the `serve` command lives there, and on import it reaches for
+  `api.errors` alone.
+
+The command line stays whole. It is the client for automation, scripting and
+tests; the web interface is the one meant for looking at, and is intended to
+become the primary one.
+
+## ADR-023: Server-rendered HTML, and no build system
+
+Starlette and Jinja2 render the pages. There is no React, no bundler, no npm and
+no TypeScript; the browser loads one stylesheet and one script, both written by
+hand and served out of the package.
+
+That follows from what the thing is. This is an operator's console — tables,
+counters, a progress line, a report — closer to Grafana or Proxmox than to an
+application. A page of it is a table of numbers that the server already has, and
+a round trip is enough to deliver them. A build system would add a toolchain, a
+lockfile and a second language to a project whose point is that its parts stay
+separable.
+
+Starlette rather than FastAPI for the same reason: FastAPI earns its weight
+through request-model validation and a generated OpenAPI document, and this
+serves HTML with three form fields. It is also the layer FastAPI is built on, so
+nothing is lost if a JSON API for other tools later makes FastAPI worth it.
+
+**Progressive enhancement is the rule.** Every page is complete without
+JavaScript. The live view is an `EventSource` that replaces numbers already
+rendered, and reloading the page asks the server for the same numbers. With
+scripting off the interface still works; it stops updating by itself, which is
+the only thing the script does.
+
+htmx was considered and its licence (0BSD) checked. It is deliberately not
+vendored yet: the routes already render standalone fragments, which is the
+expensive half of adopting it, and the cheap half can be added the day filters
+and sorting need it.
+
+## ADR-024: A crawl the browser starts is a background job
+
+A crawl takes minutes; a request must not. `CrawlJobs` runs each crawl on a
+worker thread and keeps an in-memory registry of them, so the form that starts
+one redirects to its page immediately, and `/health` keeps answering while the
+crawl runs — which is what that route is for.
+
+Events cross back to the event loop through `loop.call_soon_threadsafe`, and the
+stream coalesces: a subscriber gets the newest snapshot, not every event. A
+crawler that finds four hundred links in a second must not become four hundred
+messages on a socket, and nobody reading the page could tell the difference.
+
+Every job builds its own object graph, because `DiscoveryPipeline` is not
+thread-safe (ADR-022 put that graph in one place; the registry does nothing to
+work around it). Two crawls at once are two graphs, exactly as two command-line
+invocations are two processes.
+
+The registry is memory, and says so. Restart the server and the jobs are gone —
+the crawls are not, because they were stored. The pages then fall back to the
+database, and a stored crawl that is not running in this process is called
+`abandoned` rather than left looking like it is still going. What the database
+does not hold — the page table, the skip reasons — the page reports as not
+recorded, instead of drawing an empty table that reads as a zero.
+
+## ADR-025: The interface has no authentication, so it listens on loopback
+
+Anyone who can reach the port can start a crawl, and a crawl is an outbound
+request made from this machine and charged to its address. On `127.0.0.1` that
+means whoever is already logged in here, which is the situation the command line
+is in anyway. On a network it means something else.
+
+So `maxicrawler serve` binds `127.0.0.1` by default and refuses anything else
+unless `--allow-remote` says so in as many words, with the reason and the flag in
+the refusal. A hostname is treated as remote without consulting a resolver: a
+name can point anywhere, and can start pointing somewhere else tomorrow, so
+asking is the cheap mistake. When the flag is given, the warning is printed on
+every start rather than once, because the flag is typed once and the terminal is
+read afterwards.
+
+This is not security, and is not offered as any. A flag stops nobody determined;
+it is the difference between exposing a service and exposing one by accident,
+which is the failure that actually happens. Real exposure wants a reverse proxy
+that authenticates in front of it, and until the interface has accounts of its
+own, binding anywhere else stays a deliberate act.

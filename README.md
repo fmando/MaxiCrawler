@@ -12,7 +12,8 @@ what the project deliberately will not do.
 
 ## Features
 
-- Clear package boundaries for crawling, extraction, downloads, storage, plugins, GUI, and API layers.
+- Clear package boundaries for crawling, extraction, downloads, storage, plugins, and delivery layers.
+- Two clients over one implementation: a command line and a web interface, both calling the same services.
 - A recursive web crawler with a pluggable frontier, depth and scope limits, and a crawl summary you can stop, resume the design of, and store.
 - Links found on a page feed the same discovery pipeline and the same plugins local documents use.
 - A provider-independent download manager: a new host is a plugin and a provider, nothing else.
@@ -33,11 +34,11 @@ cd MaxiCrawler
 uv sync --all-extras
 ```
 
-`--all-extras` includes two optional extras. `mega` pulls in `cryptography` and
-is needed only to decrypt the names inside a Mega share. `brotli` lets the
+`--all-extras` includes three optional extras. `mega` pulls in `cryptography`
+and is needed only to decrypt the names inside a Mega share. `brotli` lets the
 crawler read a Brotli-compressed page; without it, `Accept-Encoding` simply
-does not advertise `br`, so a server sends gzip instead. Everything else works
-without either.
+does not advertise `br`, so a server sends gzip instead. `web` is the browser
+interface. Everything else works without any of them.
 
 Create the local configuration and SQLite metadata database:
 
@@ -73,6 +74,16 @@ Download it:
 
 ```bash
 uv run maxicrawler download "https://mega.nz/file/<handle>#<key>"
+```
+
+Or do the same things in a browser:
+
+```bash
+uv run maxicrawler serve
+```
+
+```text
+MaxiCrawler is listening on http://127.0.0.1:8000/
 ```
 
 Run the test suite and checks:
@@ -1060,6 +1071,151 @@ print(report.state, report.pages_visited, report.links_discovered)
 same path Ctrl-C takes, and the one a future Stop button will use. `CrawlReport`
 is immutable and takes no terminal, so the CLI, a future API and a future GUI
 all render the same value.
+
+## Sprint 10: the web interface
+
+Sprint 10 adds a browser interface, and adds no crawling behaviour at all. It is
+a second *client*, not a second *implementation*: every crawl it starts is built
+by the same service the command line calls, and every number it shows comes from
+the same report.
+
+```bash
+maxicrawler serve
+```
+
+```text
+MaxiCrawler is listening on http://127.0.0.1:8000/
+```
+
+The command line stays whole. It is the client for automation, scripting and
+tests; the web interface is the one meant for looking at, and is intended to
+become the primary one.
+
+### The four sections, from the first page
+
+| Section | What it does today |
+| --- | --- |
+| **Dashboard** | Start a crawl, and see the recent ones. |
+| **Crawls** | Every crawl this installation has run, live or stored, and one page per crawl. |
+| **Library** | Named, and empty. Listing it will go through a service, the way crawling does. |
+| **Settings** | The configuration as it was read, and which file it came from. Read-only. |
+
+Naming all four from the beginning is deliberate. Two of them do very little
+yet, and saying so is cheaper than rearranging every page around them later.
+
+### A crawl you can watch
+
+Starting a crawl redirects to its page immediately; the crawl itself runs on a
+worker thread, so the server keeps answering while it works — which is what
+`/health` is there to prove.
+
+The page then updates itself over server-sent events: pages visited, pages
+failed, links found, the URL it is on, and how far it has got through its page
+budget. **It works with JavaScript switched off.**
+Every page is complete from the server, the stream only replaces numbers that
+are already there, and reloading asks for the same numbers again.
+
+Stopping is the same request Ctrl-C makes, and the report is the same report:
+
+```bash
+curl http://127.0.0.1:8000/crawls/<job-id>.json
+```
+
+That is the document `crawl --json` prints, from the same function —
+`crawl_document` in `maxicrawler.app`, which neither client has its own version
+of.
+
+### After a restart
+
+Jobs live in memory; crawls live in the database. Restart the server and the
+crawl list still shows everything — including everything the CLI ever ran — with
+each page read back from storage.
+
+A crawl that was running when the process ended is called `abandoned` rather
+than left looking live: a row is only "running" when the database and the
+registry agree. And what storage does not hold, the page says it does not hold.
+The page table and the skip reasons are not persisted yet, so a recorded crawl
+reports them as *not recorded* instead of drawing an empty table that reads as a
+zero.
+
+### Where it listens, and why that is a flag
+
+The interface has **no authentication**, and anyone who can reach it can start a
+crawl — an outbound request made from your machine, charged to your address. On
+`127.0.0.1` that means whoever is already logged in here. Anywhere else it means
+something different, so anywhere else has to be asked for:
+
+```bash
+maxicrawler serve --host 0.0.0.0 --allow-remote
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--host` | `127.0.0.1` | address to bind |
+| `--port` | `8000` | port to bind |
+| `--config` | `maxicrawler.toml` | the configuration the server runs under |
+| `--allow-remote` | off | permit an address other machines can reach |
+
+Without the flag, a non-loopback address is refused with the reason and the
+remedy. A hostname counts as remote without consulting a resolver: a name can
+point anywhere, and can start pointing somewhere else tomorrow.
+
+This is not security and is not offered as any — a flag stops nobody
+determined. It is the difference between exposing a service and exposing one by
+accident, which is the failure that actually happens.
+
+### No build system
+
+Starlette and Jinja2 render the pages. There is no React, no bundler, no npm and
+no TypeScript; the browser loads one stylesheet and one hand-written script,
+both served out of the package. Nothing is fetched from another host, so the
+interface renders on a machine with no route to the internet.
+
+That follows from what it is: an operator's console — tables, counters, a
+progress line — closer to Grafana or Proxmox than to an application. A build
+system would add a toolchain, a lockfile and a second language to a project
+whose point is that its parts stay separable.
+
+### The boundary, and how it is kept
+
+```text
+maxicrawler.cli ─┐
+                 ├─→ maxicrawler.app ─→ web / crawler / database / plugins
+maxicrawler.api ─┘
+```
+
+`maxicrawler.app` is the composition root — the one package allowed to know
+`config`, `database`, `web` and `crawler` at once. It came first: the crawl
+graph moved out of the CLI and the CLI was changed to call it *before* the web
+package existed, so there was never a second version to keep in step.
+
+`tests/test_api_boundaries.py` reads the import graph rather than trusting the
+prose. The web package imports no provider, no downloader and no library; it
+imports nothing the service assembles, so it cannot grow a second crawler by
+accident; and no core package imports it back. The one exception is the command
+line, because `serve` lives there — and on import it reaches for the module that
+names the missing extra, and nothing else.
+
+The interface is an optional extra:
+
+```bash
+pip install "maxicrawler[web]"
+```
+
+Without it every command still runs. `serve` explains what is missing in a
+sentence and exits 8.
+
+### Still not done, on purpose
+
+- **No authentication.** Hence loopback by default. A reverse proxy that
+  authenticates is the answer until the interface has accounts of its own.
+- **No pause or resume.** Stop is a stop; a stopped crawl is finished.
+- **No downloads from the browser.** Downloading goes through a service in
+  `maxicrawler.app` first, or it becomes a second implementation.
+- **No library listing**, for the same reason.
+- **htmx is not vendored.** Its licence (0BSD) is checked and the routes already
+  render standalone fragments, which is the expensive half. It is worth adding
+  the day filtering and sorting need it.
 
 ## Documentation
 

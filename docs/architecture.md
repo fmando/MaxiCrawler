@@ -5,8 +5,9 @@ explains *why*: the "Clean Architecture", "Plugin First", and "Testability"
 principles below are the direct implementation of its core principles.
 
 MaxiCrawler follows a layered, modular design. Core packages must not depend on
-optional delivery layers (`api` and `gui`). The crawler orchestrates work; it
-does not embed parsing or storage details.
+optional delivery layers (`api` and `gui`) — a rule the import graph is read for
+in `tests/test_api_boundaries.py`, not merely stated here. The crawler
+orchestrates work; it does not embed parsing or storage details.
 
 ## Dependency direction
 
@@ -26,9 +27,10 @@ crawler → extractors → documents
        ↘ plugins (protocol, registry, resolver)
        ↘ repository port ← database implements it structurally
 plugins depend on the domain only; concrete plugins extend the protocol
-cli composes web, crawler, documents, extractors, plugins, providers,
-    downloader, library and database
-api and gui adapt the core for users
+app composes settings, database, crawler and web into services a client calls
+cli → app, and composes documents, extractors, plugins, providers, downloader
+    and library beside it
+api → app; never providers, downloader or library, and never the cli
 ```
 
 The processing chain the packages implement runs left to right:
@@ -93,6 +95,12 @@ Sprint 9 adds the crawl engine, described under
 [The crawl engine](#the-crawl-engine). It makes the crawler recursive purely by
 addition: a frontier, a visited set and a loop above the existing service,
 which itself keeps answering one question about one page.
+
+Sprint 10 adds the web interface, described under
+[The web interface](#the-web-interface). It is the first delivery layer beside
+the command line and adds no crawling behaviour at all: the crawl graph moved
+into `maxicrawler.app` first, and both clients have called the same service
+since.
 
 ## Plugin architecture
 
@@ -1211,6 +1219,166 @@ That guard immediately paid for itself: it found that `CrawlOptions.same_domain`
 was honoured only by the CLI, so an engine used directly ignored it while the
 report still claimed the crawl had stayed put.
 
+## The web interface
+
+Sprint 10 adds `maxicrawler.api`: a browser client of the services the command
+line already uses. It is the first delivery layer beside the CLI, and the first
+part of the project that is not only Python.
+
+### One client more, not one crawler more
+
+The command line had been the only client for nine sprints, and it carried the
+composition root inside itself — it built the pipeline, the fetcher, the
+repositories and the engine, then rendered the result. A second client written
+the same way would have worked and then drifted.
+
+So the graph moved first. `maxicrawler.app` is the composition root now: the one
+package allowed to know `config`, `database`, `web` and `crawler` at once.
+`CrawlService.run` builds a crawl; `crawl_document` turns a report into the JSON
+both clients emit. The CLI was changed to call them before `api` existed at all.
+
+```text
+maxicrawler.cli ─┐
+                 ├─→ maxicrawler.app ─→ web / crawler / database / plugins
+maxicrawler.api ─┘
+```
+
+### The package
+
+| Module | Answers |
+| --- | --- |
+| `application` | *"Which URL is which handler?"* Builds the Starlette app and owns the only place collaborators are injected. |
+| `routes` | *"What does this URL reply with?"* Reads the request, asks a service, hands plain data to a template. |
+| `views` | *"How is this shown?"* Every decision that is not one of those three, testable without a request. |
+| `jobs` | *"What is running?"* Crawls on worker threads, and a registry of them. |
+| `stream` | *"What has changed?"* Snapshots from a worker thread to an `EventSource`. |
+| `errors` | *"What is missing?"* Imports nothing, so it can be read by an installation that cannot import the rest. |
+| `templates/`, `static/` | The pages, one stylesheet, one script. |
+
+Starlette rather than FastAPI. FastAPI earns its weight through request-model
+validation and a generated OpenAPI document, and this serves HTML with three
+form fields; it is also the layer FastAPI is built on. There is no React, no
+bundler and no npm — see ADR-023 for why an operator's console is exactly the
+case server-rendered HTML is best at.
+
+### What a request does
+
+A handler does three things: read the request, ask a service, hand plain data to
+a template. `POST /crawls` reads a URL and three options, asks the registry to
+start a crawl, and redirects to `/crawls/{job_id}` — it does not wait for the
+crawl, and it does not render one.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /` | The dashboard: the start form and the recent crawls. |
+| `GET`/`POST /crawls` | The list, and starting one. |
+| `GET /crawls/{id}` | One crawl, live or finished or read back from the database. |
+| `GET /crawls/{id}.json` | The same crawl as `crawl --json` prints it, from the same function. |
+| `GET /crawls/{id}/events` | The progress stream. |
+| `POST /crawls/{id}/stop` | The same request to stop that Ctrl-C makes. |
+| `GET /library`, `GET /settings` | Named from the first page; one lists nothing yet, the other is read-only. |
+| `GET /health` | That the server is answering — the first route written, and the one that proves the event loop is free while a crawl runs. |
+
+### Every number leaves `views` as a string
+
+`format_number`, `format_duration`, `format_timestamp` and `format_bytes` are
+applied before a value reaches a template, so the value on the page and the
+value in a live update are formatted by the same code. The alternative — a
+template filter plus the same rule reimplemented in JavaScript — is two
+formatters that agree until one of them is changed.
+
+### A crawl is a background job
+
+`CrawlJobs` runs each crawl on a worker thread and keeps an in-memory registry
+keyed by job id. Every job builds its own object graph, because
+`DiscoveryPipeline` is not thread-safe; two crawls at once are two graphs,
+exactly as two command-line invocations are two processes.
+
+### Progress crosses exactly one boundary
+
+The crawl publishes synchronously on a worker thread; the response is an async
+generator on the event loop. `loop.call_soon_threadsafe` is the whole bridge,
+and nothing on the worker thread touches asyncio.
+
+**Snapshots coalesce rather than queue.** A listener that cannot keep up gets the
+newest state, not a backlog of stale ones, which removes the bounded-queue
+question entirely: there is never more than one thing waiting. A listener is
+registered *before* the first snapshot is sent, because the other order loses a
+crawl that finishes in the gap.
+
+Server-sent events rather than WebSockets: `EventSource` is a browser standard,
+the traffic is one-directional, and a reconnect is the browser's problem.
+
+### Without JavaScript
+
+Every page is complete from the server. The live view replaces numbers that are
+already rendered, and reloading asks for the same numbers again. With scripting
+off the interface still works; it stops updating by itself, which is all the
+script does.
+
+Nothing on a page is loaded from another host. There is no CDN, no web font and
+no analytics — an interface that needed the internet to draw itself would be a
+strange thing to run on a laptop, and `tests/test_api_packaging.py` checks it.
+
+### After a restart
+
+The registry is memory; the crawls are not. Restart the server and a crawl page
+falls back to the database, which is also what happens for every crawl the CLI
+ran. A stored crawl that is not running in this process is called `abandoned`
+rather than left looking live — a row is only "running" when the database and
+the registry agree.
+
+What the database does not hold, the page says it does not hold. The page table
+and the skip reasons are not stored yet, so a recorded crawl reports them as not
+recorded instead of drawing an empty table that reads as a zero.
+
+### An extra, and a sentence when it is missing
+
+The interface is optional: `pip install "maxicrawler[web]"`. Importing
+`maxicrawler.api` never fails, because `create_app` is imported lazily, so a
+core package or a boundary test can look without installing anything. Importing
+`maxicrawler.api.application` without the extra raises `WebDependencyError`,
+whose message names the install command.
+
+That message lives in `errors.py`, which imports nothing at all. It was
+originally in `application.py`, behind the Starlette import it exists to
+explain — where `serve` could never have printed it.
+
+### Where it listens
+
+```bash
+maxicrawler serve
+```
+
+`127.0.0.1:8000` by default. The interface has no authentication and can start
+crawls, so any other address is refused unless `--allow-remote` asks for it, and
+a hostname counts as remote without consulting a resolver. See ADR-025.
+
+### The boundaries, and how they are checked
+
+`tests/test_api_boundaries.py` reads the import graph:
+
+- `api` imports no `providers`, no `downloader`, no `library`;
+- `api` imports nothing `CrawlService` assembles, so it cannot build a second
+  crawler by accident;
+- no core package imports `api`, with `cli` the one exception — `serve` lives
+  there, and at import time it reaches for `api.errors` alone;
+- Starlette and Jinja stop at this package.
+
+The last one is also asked of Python itself: a fresh interpreter that imports
+`maxicrawler.cli` must not end up with Starlette or uvicorn in `sys.modules`.
+
+### Deliberately not done
+
+- **No authentication**, hence loopback by default.
+- **No pause or resume.** Stop is the same request Ctrl-C makes; a stopped crawl
+  is finished, not suspended.
+- **No stored jobs.** The registry keeps the last twenty in memory.
+- **No library listing, no downloads from the browser.** Both go through a
+  service in `maxicrawler.app` first, or they become a second implementation.
+- **htmx is not vendored.** Its licence (0BSD) is checked and the routes already
+  render standalone fragments; it is worth adding when filters and sorting are.
+
 ## Design rules
 
 1. Keep public interfaces typed and small.
@@ -1278,3 +1446,13 @@ report still claimed the crawl had stayed put.
     it. Assert that where the serializer lives.
 37. Tests never leave this machine. "Elsewhere" is the same server under
     another hostname.
+38. A second interface is never a second implementation. Shared logic is pulled
+    into `maxicrawler.app` and used by both, never copied into one.
+39. A delivery layer holds no object graph. It asks a service; it does not build
+    a crawler.
+40. No core package imports a delivery layer. Assert the import graph rather
+    than the intention.
+41. Every page works without JavaScript. Scripting updates what is on the page;
+    it never draws it.
+42. Nothing on a page is fetched from another host. The interface renders on a
+    machine with no route to the internet.

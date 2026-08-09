@@ -1,0 +1,102 @@
+{#
+  What one finished crawl amounted to.
+
+  The counters first, because they answer "did this work" in one glance. The
+  distribution second, because on a page full of share links it is the answer
+  the crawl was run for -- and the plugins that recognise a host come before
+  the fallback that recognises everything, however the volume compares.
+#}
+<dl class="readout">
+  <div>
+    <dt>Pages read</dt>
+    <dd class="num">{{ report.pages_visited }}</dd>
+  </div>
+  <div>
+    <dt>Pages failed</dt>
+    <dd class="num{% if report.has_failures %} bad-text{% endif %}">{{ report.pages_failed }}</dd>
+  </div>
+  <div>
+    <dt>Links found</dt>
+    <dd class="num">{{ report.links_found }}</dd>
+  </div>
+  <div>
+    <dt>Unique URLs</dt>
+    <dd class="num">{{ report.unique_urls }}</dd>
+  </div>
+  <div>
+    <dt>Took</dt>
+    <dd class="num">{{ report.elapsed }}</dd>
+  </div>
+</dl>
+
+<p class="facts">
+  <span>reached depth <b class="num">{{ report.max_depth_reached }}</b></span>
+  <span><b class="num">{{ report.duplicates_removed }}</b> duplicates removed</span>
+  <span><b class="num">{{ report.pages_skipped }}</b> URLs not followed</span>
+  {% if report.left_in_frontier %}
+    <span><b class="num">{{ report.frontier_remaining }}</b> still queued</span>
+  {% endif %}
+  {% if report.had_answers_that_were_not_pages %}
+    <span><b class="num">{{ report.requests_without_a_page }}</b> answers that were not pages</span>
+  {% endif %}
+  <span class="muted">finished {{ report.finished_at }}</span>
+</p>
+
+{% if report.hit_the_page_limit %}
+  <p class="note">
+    Stopped at the page limit, so this is not everything there is to find.
+    Raise the limit to go further.
+  </p>
+{% endif %}
+
+{% if report.plugins %}
+  <h3>Which plugin claimed each URL</h3>
+  <table class="grid tight">
+    <tbody>
+      {% for share in report.plugins %}
+        <tr>
+          <td class="plugin">
+            {{ share.name }}{% if share.is_fallback %}<span class="muted"> (fallback)</span>{% endif %}
+          </td>
+          <td class="share"><span class="meter"><span style="width: {{ share.width }}"></span></span></td>
+          <td class="right num">{{ share.count_label }}</td>
+          <td class="right num muted">{{ share.percent }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endif %}
+
+<div class="columns">
+  {% if report.skips %}
+    <div>
+      <h3>Why URLs were not followed</h3>
+      <table class="grid tight">
+        <tbody>
+          {% for skip in report.skips %}
+            <tr>
+              <td>{{ skip.reason }}</td>
+              <td class="right num">{{ skip.count }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+
+  {% if report.link_kinds %}
+    <div>
+      <h3>How links were written</h3>
+      <table class="grid tight">
+        <tbody>
+          {% for kind in report.link_kinds %}
+            <tr>
+              <td>{{ kind.kind }}</td>
+              <td class="right num">{{ kind.count }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+</div>

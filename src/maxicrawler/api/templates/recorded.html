@@ -1,0 +1,69 @@
+{#
+  One crawl as the database remembers it.
+
+  Deliberately less than a report. The record keeps a summary and the URLs; it
+  never kept the per-page outcomes or the reasons individual URLs were turned
+  away, and empty tables where those belong would read as "none" rather than
+  "not kept".
+#}
+{% extends "base.html" %}
+{% block title %}{{ crawl.seed_url }} · MaxiCrawler{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <h2>
+    <span class="badge {{ crawl.state_tone }}">{{ crawl.state_label }}</span>
+    <span class="url">{{ crawl.seed_url }}</span>
+  </h2>
+
+  <div class="body">
+    <p class="muted">{{ crawl.options }}</p>
+
+    {% if crawl.was_abandoned %}
+      <p class="note">
+        This crawl was started and never finished. Whatever stopped it did not
+        get to record how it ended, so the counters below are the last ones
+        written rather than a total.
+      </p>
+    {% endif %}
+
+    <dl class="readout">
+      <div>
+        <dt>Pages read</dt>
+        <dd class="num">{{ crawl.pages_visited }}</dd>
+      </div>
+      <div>
+        <dt>Pages failed</dt>
+        <dd class="num{% if crawl.has_failures %} bad-text{% endif %}">{{ crawl.pages_failed }}</dd>
+      </div>
+      <div>
+        <dt>Links found</dt>
+        <dd class="num">{{ crawl.links_found }}</dd>
+      </div>
+      <div>
+        <dt>Took</dt>
+        <dd class="num">{{ crawl.elapsed }}</dd>
+      </div>
+    </dl>
+
+    <p class="facts">
+      <span>reached depth <b class="num">{{ crawl.max_depth_reached }}</b></span>
+      <span><b class="num">{{ crawl.pages_skipped }}</b> URLs not followed</span>
+      {% if crawl.left_in_frontier %}
+        <span><b class="num">{{ crawl.frontier_remaining }}</b> still queued when it stopped</span>
+      {% endif %}
+      <span class="muted">started {{ crawl.started_at }}</span>
+      <span class="muted">finished {{ crawl.finished_at }}</span>
+    </p>
+
+    <p class="footnote">
+      This server did not run this crawl, so what is shown is what the database
+      keeps: the summary above and the URLs below. The pages it visited and the
+      reasons individual URLs were skipped live in the report, which the process
+      that ran it held in memory.
+    </p>
+  </div>
+</section>
+
+{% include "_link_table.html" %}
+{% endblock %}
