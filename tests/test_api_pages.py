@@ -6,33 +6,89 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from html import unescape
 from pathlib import Path
+from time import monotonic, sleep
 
 import pytest
+from doubles import StubProvider
 from starlette.testclient import TestClient
 from web_server import Site, serve
 
 from maxicrawler import __version__
 from maxicrawler.api import create_app
+from maxicrawler.api.downloads import DownloadRuns
 from maxicrawler.api.jobs import CrawlJobs
 from maxicrawler.api.routes import SECTIONS, STATIC_DIRECTORY, TEMPLATES
-from maxicrawler.app import CrawlService, crawl_document
+from maxicrawler.app import CrawlService, DownloadService, crawl_document
 from maxicrawler.config import Settings
 from maxicrawler.database import SQLiteCrawlRepository, SQLiteDatabase
+from maxicrawler.domain import ProviderCapability
+from maxicrawler.library import Library
+from maxicrawler.providers import ProviderRegistry
 from maxicrawler.web.report import CrawlReport, CrawlStatistics
 from maxicrawler.web.session import CrawlOptions, CrawlSession, CrawlState
 
 STARTED = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
+MEGA_KEY = "0123456789abcdefghijkl"
+MEGA_URL = f"https://mega.nz/file/AaBbCcDd#{MEGA_KEY}"
 
 
 @contextmanager
-def client(tmp_path: Path) -> Iterator[TestClient]:
-    """Yield a client over an application with a throwaway database."""
-    service = CrawlService(
-        Settings(user_agent="MaxiCrawler/test", database_path=tmp_path / "urls.db")
+def client(tmp_path: Path, *, provider: StubProvider | None = None) -> Iterator[TestClient]:
+    """Yield a client over an application with a throwaway database and library.
+
+    Both storage locations are below *tmp_path*, so no test can read or write
+    what the machine running it happens to have in the working directory.
+    """
+    settings = Settings(
+        user_agent="MaxiCrawler/test",
+        database_path=tmp_path / "urls.db",
+        library_path=tmp_path / "library",
     )
+    service = CrawlService(settings)
     jobs = CrawlJobs(service, persist=False)
-    with TestClient(create_app(service=service, jobs=jobs)) as test_client:
-        yield test_client
+    downloads = DownloadRuns(
+        DownloadService(
+            settings,
+            providers=None if provider is None else ProviderRegistry([provider]),
+            library=Library(settings.library_path),
+        )
+    )
+    application = create_app(service=service, jobs=jobs, downloads=downloads)
+    try:
+        with TestClient(application) as test_client:
+            yield test_client
+    finally:
+        downloads.shutdown()
+
+
+def finished_download(test_client: TestClient, url: str = MEGA_URL) -> str:
+    """Start a download and return its page once it has stopped moving.
+
+    A transfer runs on a worker thread, so the redirect can arrive before the
+    first byte does. The live block is rendered only while a download is
+    unfinished, which makes its absence the page's own statement that there is
+    nothing left to wait for.
+    """
+    response = test_client.post("/downloads", data={"url": url}, follow_redirects=False)
+    assert response.status_code == 303
+    location = response.headers["location"]
+    deadline = monotonic() + 10
+    while monotonic() < deadline:
+        body = test_client.get(location).text
+        if "download-live" not in body:
+            return body
+        sleep(0.01)
+    raise AssertionError("the download did not finish within 10s")
+
+
+def make_provider() -> StubProvider:
+    """Return a stub provider that answers for Mega links and can transfer."""
+    return StubProvider(
+        "mega",
+        url_prefix="https://mega.nz/",
+        capabilities=frozenset({ProviderCapability.INSPECT, ProviderCapability.DOWNLOAD}),
+        payload=b"stub payload",
+    )
 
 
 def record_crawl(
@@ -180,19 +236,39 @@ def test_a_crawl_that_hit_the_ceiling_is_badged_differently(tmp_path: Path) -> N
 # --- the placeholders --------------------------------------------------------
 
 
-def test_the_library_says_plainly_that_it_holds_nothing_yet(tmp_path: Path) -> None:
+def test_an_empty_library_says_so_and_names_where_files_would_go(tmp_path: Path) -> None:
     with client(tmp_path) as test_client:
         body = test_client.get("/library").text
 
-    assert "does not download anything yet" in body
+    assert "Nothing has been downloaded yet" in body
+    assert (tmp_path / "library").as_posix() in body
 
 
-def test_a_placeholder_still_carries_the_whole_layout(tmp_path: Path) -> None:
+def test_the_library_page_carries_the_whole_layout(tmp_path: Path) -> None:
     with client(tmp_path) as test_client:
         body = test_client.get("/library").text
 
     assert "MaxiCrawler" in body
     assert ">Dashboard</a>" in body
+
+
+def test_the_library_lists_what_was_downloaded(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+        body = test_client.get("/library").text
+
+    assert "stub.bin" in body
+    assert ">mega</td>" in body
+    assert "12 B" in body
+    assert "https://mega.nz/file/AaBbCcDd" in body
+
+
+def test_the_library_never_shows_a_decryption_key(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+        body = test_client.get("/library").text
+
+    assert MEGA_KEY not in body
 
 
 # --- packaging ---------------------------------------------------------------
@@ -588,6 +664,7 @@ def recording_client(tmp_path: Path) -> Iterator[TestClient]:
         Settings(
             user_agent="MaxiCrawler/test",
             database_path=tmp_path / "urls.db",
+            library_path=tmp_path / "library",
             network_timeout=5.0,
         )
     )
@@ -632,6 +709,38 @@ def test_a_finished_crawl_lists_what_it_discovered(tmp_path: Path) -> None:
 
     assert MEGA_LINK.split("#")[0] in body
     assert ">mega</td>" in body
+
+
+def test_a_mega_link_in_the_report_offers_a_download(tmp_path: Path) -> None:
+    """The whole point of the report: from a found link to the file in one click."""
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = wait_until_finished(test_client, start(test_client, base))
+
+    links = body.split("Discovered links", 1)[1]
+    assert links.count("Download</button>") == 1
+    assert '<form class="row-action" method="post" action="/downloads">' in links
+    assert f'name="url" value="{MEGA_LINK}"' in links
+
+
+def test_the_download_button_carries_the_key_in_a_field_not_a_link(tmp_path: Path) -> None:
+    """A fragment is the one part of a URL a browser never sends. A field is."""
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = wait_until_finished(test_client, start(test_client, base))
+
+    assert 'href="/downloads' not in body
+    assert MEGA_LINK.split("#")[1] in body  # in the hidden field, which is sent
+
+
+def test_a_report_of_ordinary_links_offers_no_download(tmp_path: Path) -> None:
+    site = Site()
+    site.add_html("/", '<a href="/a">a</a>')
+    site.add_html("/a", "<p>x</p>")
+
+    with recording_client(tmp_path) as test_client, serve(site) as base:
+        body = wait_until_finished(test_client, start(test_client, base))
+
+    assert "Download</button>" not in body
+    assert "<th>Action</th>" not in body
 
 
 def test_the_link_table_puts_mega_above_the_generic_links(tmp_path: Path) -> None:
@@ -952,12 +1061,98 @@ def test_a_missing_configuration_file_is_named_as_missing(
 # --- the library page --------------------------------------------------------
 
 
-def test_the_library_names_where_downloads_would_go(tmp_path: Path) -> None:
+def test_the_library_names_where_downloads_go(tmp_path: Path) -> None:
     with client(tmp_path) as test_client:
         body = test_client.get("/library").text
 
-    assert "library" in body
-    assert "does not download anything yet" in body
+    assert (tmp_path / "library").as_posix() in body
+
+
+# --- downloading one link ----------------------------------------------------
+
+
+def test_a_download_redirects_to_its_own_page(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        response = test_client.post("/downloads", data={"url": MEGA_URL}, follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/downloads/")
+
+
+def test_a_finished_download_shows_the_file_and_the_way_to_the_library(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        body = finished_download(test_client)
+
+    assert "stub.bin" in body
+    assert "completed" in body
+    assert 'href="/library"' in body
+    assert "Open Library" in body
+
+
+def test_a_download_page_is_rendered_by_the_server(tmp_path: Path) -> None:
+    """Everything a reader needs is in the HTML; the script only saves reloading."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        body = finished_download(test_client)
+
+    assert "12 B" in body
+    assert "Transferred" in body
+    # A finished download has nothing left to stream.
+    assert "download-live" not in body
+
+
+def test_a_download_page_never_shows_the_key(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        body = finished_download(test_client)
+
+    assert MEGA_KEY not in body
+    assert "https://mega.nz/file/AaBbCcDd" in body
+
+
+def test_a_dead_link_says_why_rather_than_failing_the_request(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        page_body = finished_download(test_client, "https://example.test/file.iso")
+
+    assert "failed" in page_body
+    assert "no provider can handle this link" in page_body
+
+
+def test_a_source_that_is_not_a_url_is_refused(tmp_path: Path) -> None:
+    """A path would make the server read its own disk on somebody else's click."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        response = test_client.post(
+            "/downloads", data={"url": str(tmp_path)}, follow_redirects=False
+        )
+
+    assert response.status_code == 400
+    assert "not an absolute HTTP(S) URL" in unescape(response.text)
+
+
+def test_an_unknown_download_is_not_found(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        assert test_client.get("/downloads/nothing").status_code == 404
+        assert test_client.get("/downloads/nothing/events").status_code == 404
+
+
+def test_the_download_script_is_served(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        response = test_client.get("/static/download.js")
+
+    assert response.status_code == 200
+    assert "EventSource" in response.text
+
+
+def test_the_download_stream_reports_progress_and_ends(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        response = test_client.post("/downloads", data={"url": MEGA_URL}, follow_redirects=False)
+        download_id = response.headers["location"].rsplit("/", 1)[-1]
+
+        with test_client.stream("GET", f"/downloads/{download_id}/events") as stream:
+            assert stream.headers["content-type"].startswith("text/event-stream")
+            frames = "".join(stream.iter_text())
+
+    assert "event: progress" in frames
+    assert "event: finished" in frames
+    assert MEGA_KEY not in frames
 
 
 @pytest.mark.parametrize("path", ["/", "/crawls", "/library", "/settings"])

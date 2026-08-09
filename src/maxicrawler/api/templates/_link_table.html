@@ -20,6 +20,7 @@
           <th>Category</th>
           <th>URL</th>
           <th>Found on</th>
+          {% if links.has_downloads %}<th>Action</th>{% endif %}
         </tr>
       </thead>
       <tbody>
@@ -34,6 +35,23 @@
               {% endif %}
             </td>
             <td class="url muted small">{{ link.source_url or "—" }}</td>
+            {% if links.has_downloads %}
+              <td>
+                {% if link.can_download %}
+                  {#
+                    A form rather than a link, because it starts something. The
+                    URL travels in the body for a second reason too: a share
+                    link keeps its decryption key in the fragment, which a
+                    browser never sends as part of a URL but does send as a
+                    field.
+                  #}
+                  <form class="row-action" method="post" action="/downloads">
+                    <input type="hidden" name="url" value="{{ link.url }}">
+                    <button type="submit">Download</button>
+                  </form>
+                {% endif %}
+              </td>
+            {% endif %}
           </tr>
         {% endfor %}
       </tbody>

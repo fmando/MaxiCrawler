@@ -1,0 +1,40 @@
+{#
+  One transfer, rendered by the server.
+
+  A partial because it is rendered twice: once as part of the page and once
+  again on every reload. The identifiers are what the browser patches in place;
+  every value it writes was formatted by the same code that rendered this.
+
+  The bar is indeterminate when nothing stated a total. A bar sitting at zero
+  for two minutes would claim progress nobody can see, so the counter beside it
+  says what has actually arrived instead.
+#}
+<div class="progress" id="download-progress">
+  <div class="bar{% if not download.has_total %} unknown{% endif %}" id="download-bar">
+    <span style="width: {{ download.progress_percent if download.has_total else 100 }}%"></span>
+  </div>
+  <p class="bar-caption">
+    <span id="download-transferred">{{ download.transferred }}</span>
+    {% if download.has_total %}
+      · <span id="download-percent">{{ download.progress_percent }}</span>%
+    {% endif %}
+    {% if download.has_many_files %}
+      · <span id="download-files">{{ download.files_finished }}</span> of {{ download.files_total }} files
+    {% endif %}
+  </p>
+</div>
+
+<dl class="readout">
+  <div>
+    <dt>Transferred</dt>
+    <dd class="num" id="download-bytes">{{ download.bytes_written }}</dd>
+  </div>
+  <div>
+    <dt>Size</dt>
+    <dd class="num">{{ download.total_bytes or "unknown" }}</dd>
+  </div>
+  <div>
+    <dt>Elapsed</dt>
+    <dd class="num" id="download-elapsed">{{ download.elapsed }}</dd>
+  </div>
+</dl>

@@ -207,19 +207,40 @@ class DownloadService:
         can afford; a run over a document full of links deliberately does not.
 
         Raises:
-            ValueError: *url* is not an absolute HTTP(S) URL. Notably a
-                filesystem path is refused rather than read, whatever it points
-                at and whether or not it exists.
+            ValueError: *url* is not an absolute HTTP(S) URL; see
+                :meth:`require_url`.
         """
-        target = url.strip()
-        if not looks_like_url(target):
-            msg = f"not an absolute HTTP(S) URL: {strip_fragment(target) or target}"
-            raise ValueError(msg)
+        target = self.require_url(url)
         reporter = _ListenerReporter(on_progress)
         manager = self.build_manager(reporter=reporter)
         plan = manager.plan(target, inspect_files=True)
         reporter.observe(plan)
         return _summarize(manager.run(plan), url=strip_fragment(target))
+
+    @staticmethod
+    def require_url(url: str) -> str:
+        """Return *url* stripped of surrounding space, if it may be downloaded.
+
+        The one rule a client cannot be trusted to apply for itself, so it is
+        applied here and nowhere else: a source must be an absolute HTTP(S) URL.
+        :class:`~maxicrawler.downloader.sources.SourceResolver` treats anything
+        else as a path and reads a file or a whole directory of documents for
+        the links inside — right for a command line, and a way to make a server
+        read its own disk on somebody else's click.
+
+        Separate from :meth:`download` so a caller that starts transfers on a
+        worker thread can refuse a bad URL before it starts one.
+
+        Raises:
+            ValueError: *url* is not an absolute HTTP(S) URL. The message names
+                the URL without its fragment, because a rejected link is echoed
+                back to whoever sent it.
+        """
+        target = url.strip()
+        if not looks_like_url(target):
+            msg = f"not an absolute HTTP(S) URL: {strip_fragment(target) or target}"
+            raise ValueError(msg)
+        return target
 
     def downloadable(self, urls: Iterable[str]) -> frozenset[str]:
         """Return which of *urls* some provider here could transfer.

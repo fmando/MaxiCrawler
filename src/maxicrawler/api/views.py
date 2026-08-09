@@ -21,11 +21,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from maxicrawler.api.downloads import DownloadSnapshot
 from maxicrawler.api.jobs import JobSnapshot
+from maxicrawler.app import LibraryItem
 from maxicrawler.config import Settings
 from maxicrawler.crawler import PluginUsage
 from maxicrawler.database import StoredCrawl, StoredUrl
+from maxicrawler.domain import DownloadStatus
 from maxicrawler.plugins.generic import GENERIC_PLUGIN_NAME
+from maxicrawler.utils import format_size
 from maxicrawler.web.models import LinkKind
 from maxicrawler.web.report import CrawlReport, PageOutcome, SkipReason
 from maxicrawler.web.session import CrawlOptions, CrawlState
@@ -67,6 +71,26 @@ STATE_TONES: dict[CrawlState, str] = {
     CrawlState.INTERRUPTED: "warn",
 }
 """Which of the four style classes a state gets. Colour is decided in CSS."""
+
+MAX_LISTED_DOWNLOADS = 200
+"""How many stored resources the library page lists before saying the rest."""
+
+STATUS_LABELS: dict[DownloadStatus, str] = {
+    DownloadStatus.PENDING: "starting",
+    DownloadStatus.RUNNING: "downloading",
+    DownloadStatus.COMPLETED: "completed",
+    DownloadStatus.SKIPPED: "already stored",
+    DownloadStatus.FAILED: "failed",
+}
+"""A skipped download is not a lesser success; it is one that needed no bytes."""
+
+STATUS_TONES: dict[DownloadStatus, str] = {
+    DownloadStatus.PENDING: "idle",
+    DownloadStatus.RUNNING: "busy",
+    DownloadStatus.COMPLETED: "good",
+    DownloadStatus.SKIPPED: "good",
+    DownloadStatus.FAILED: "bad",
+}
 
 KIND_LABELS: dict[LinkKind, str] = {
     LinkKind.ANCHOR: "anchor",
@@ -203,6 +227,82 @@ def progress_view(snapshot: JobSnapshot) -> dict[str, Any]:
     }
 
 
+def download_view(snapshot: DownloadSnapshot) -> dict[str, Any]:
+    """Return what a download's page shows.
+
+    Every value leaves here as a string a template prints unchanged, for the
+    same reason :func:`progress_view` does: the live update writes the server's
+    own formatting into the page rather than inventing its own.
+
+    ``progress_percent`` is ``None`` when nothing stated a total. A bar that
+    sits at zero for two minutes claims progress it cannot see, so the page
+    shows an indeterminate one and says how much has arrived instead.
+    """
+    progress = snapshot.progress
+    fraction = progress.fraction
+    return {
+        "download_id": snapshot.download_id,
+        "url": snapshot.url,
+        "label": snapshot.label,
+        "status": str(snapshot.status),
+        "state_label": STATUS_LABELS[snapshot.status],
+        "state_tone": STATUS_TONES[snapshot.status],
+        "bytes_written": format_size(progress.bytes_written),
+        "total_bytes": None if progress.total_bytes is None else format_size(progress.total_bytes),
+        "transferred": _transferred(progress.bytes_written, progress.total_bytes),
+        "progress_percent": None if fraction is None else round(fraction * 100),
+        "has_total": fraction is not None,
+        "files_total": format_number(progress.files_total),
+        "files_finished": format_number(progress.files_finished),
+        "has_many_files": progress.files_total > 1,
+        "elapsed": format_duration(snapshot.elapsed_seconds),
+        "is_finished": snapshot.is_finished,
+        "succeeded": snapshot.summary is not None and snapshot.summary.succeeded,
+        "reason": snapshot.reason,
+        "error": snapshot.error,
+        "path": None if snapshot.path is None else snapshot.path.as_posix(),
+    }
+
+
+def library_table(
+    items: Iterable[LibraryItem], *, limit: int = MAX_LISTED_DOWNLOADS
+) -> dict[str, Any]:
+    """Return the table of everything downloaded, and what it left out."""
+    stored = tuple(items)
+    total = len(stored)
+    return {
+        "rows": tuple(_library_row(item) for item in stored[:limit]),
+        "total": format_number(total),
+        "hidden": format_number(max(0, total - limit)),
+        "has_hidden": total > limit,
+    }
+
+
+def _library_row(item: LibraryItem) -> dict[str, Any]:
+    """Return one stored resource as a table row."""
+    return {
+        "provider": item.provider,
+        "name": item.name,
+        "size": format_size(item.size),
+        "downloaded_at": (
+            "—" if item.downloaded_at is None else format_timestamp(item.downloaded_at)
+        ),
+        "path": item.path.as_posix(),
+        "source_url": item.source_url,
+    }
+
+
+def _transferred(written: int, total: int | None) -> str:
+    """Return the byte counter under the bar, in the one form that reads well.
+
+    "1.3 MB of 2.8 MB" while a total is known, and just what has arrived while
+    it is not — never "1.3 MB of unknown", which is a sentence nobody wants.
+    """
+    if total is None:
+        return format_size(written)
+    return f"{format_size(written)} of {format_size(total)}"
+
+
 def report_view(report: CrawlReport) -> dict[str, Any]:
     """Return what a finished crawl's page shows."""
     statistics = report.statistics
@@ -253,7 +353,11 @@ def page_table(report: CrawlReport, *, limit: int = MAX_LISTED_PAGES) -> dict[st
 
 
 def link_table(
-    urls: Iterable[StoredUrl], *, discovered: int, limit: int = MAX_LISTED_LINKS
+    urls: Iterable[StoredUrl],
+    *,
+    discovered: int,
+    limit: int = MAX_LISTED_LINKS,
+    downloadable: Container[str] = (),
 ) -> dict[str, Any]:
     """Return the link table for the URLs one crawl recorded.
 
@@ -261,16 +365,26 @@ def link_table(
     database holds: a crawl run without persistence records nothing at all. The
     two numbers are kept apart so the page can say "not recorded" rather than
     showing an empty table that reads as "nothing found".
+
+    *downloadable* names the URLs some provider here could fetch, which is what
+    decides whether a row offers a Download button. Deciding it once for the
+    whole table rather than per row is why it arrives as a set: the answer comes
+    from a plugin and a declared capability, and asking it two hundred times
+    would be two hundred identical resolutions.
     """
     recorded = tuple(urls)
     total = len(recorded)
+    rows = link_rows(recorded, limit=limit, downloadable=downloadable)
     return {
-        "rows": link_rows(recorded, limit=limit),
+        "rows": rows,
         "total": format_number(total),
         "hidden": format_number(max(0, total - limit)),
         "has_hidden": total > limit,
         "discovered": format_number(discovered),
         "was_recorded": total > 0 or discovered == 0,
+        # A column of empty cells is worse than no column: the table only grows
+        # an action when at least one row actually has one.
+        "has_downloads": any(row["can_download"] for row in rows),
     }
 
 
@@ -457,7 +571,9 @@ def _page_row(page: PageOutcome) -> dict[str, Any]:
     }
 
 
-def link_rows(urls: Iterable[StoredUrl], *, limit: int | None = None) -> tuple[dict[str, Any], ...]:
+def link_rows(
+    urls: Iterable[StoredUrl], *, limit: int | None = None, downloadable: Container[str] = ()
+) -> tuple[dict[str, Any], ...]:
     """Return one row per recorded URL, the interesting plugins first.
 
     Same ordering as :func:`plugin_shares`, for the same reason. Discovery
@@ -468,10 +584,10 @@ def link_rows(urls: Iterable[StoredUrl], *, limit: int | None = None) -> tuple[d
     """
     ordered = sorted(enumerate(urls), key=lambda entry: (_link_priority(entry[1]), entry[0]))
     chosen = ordered if limit is None else ordered[:limit]
-    return tuple(_link_row(stored) for _, stored in chosen)
+    return tuple(_link_row(stored, downloadable=downloadable) for _, stored in chosen)
 
 
-def _link_row(stored: StoredUrl) -> dict[str, Any]:
+def _link_row(stored: StoredUrl, *, downloadable: Container[str] = ()) -> dict[str, Any]:
     """Return one recorded URL as a table row."""
     record = stored.record
     return {
@@ -484,6 +600,10 @@ def _link_row(stored: StoredUrl) -> dict[str, Any]:
         # True when a host-specific plugin claimed it rather than the fallback,
         # which is what the table gives its one piece of emphasis to.
         "is_notable": _link_priority(stored) == 0,
+        # A link this installation could actually fetch. Not the same question
+        # as "is it notable": a host-specific plugin can classify a link whose
+        # provider cannot transfer anything.
+        "can_download": record.normalized_url in downloadable,
     }
 
 
