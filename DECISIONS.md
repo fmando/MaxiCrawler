@@ -401,3 +401,55 @@ it is the difference between exposing a service and exposing one by accident,
 which is the failure that actually happens. Real exposure wants a reverse proxy
 that authenticates in front of it, and until the interface has accounts of its
 own, binding anywhere else stays a deliberate act.
+
+## ADR-026: One download service, and one download at a time
+
+The download graph — a provider registry with a stream transport, a library at
+the configured root, a manager around both — was assembled inside the `download`
+command, exactly as the crawl graph had been assembled inside `crawl` before
+Sprint 10. ADR-022 records what that produced: two clients quietly becoming two
+implementations. So `DownloadService` was extracted first, the command line was
+changed to use it, and only then did the browser learn to download.
+
+The service composes and reports; it transfers nothing. `DownloadManager` is
+unchanged, and so are the planner, the queue, the worker, the sink and the
+library. What is new above them is a vocabulary a client can use without
+importing the download layer at all — `DownloadProgress` while a transfer runs,
+`DownloadSummary` when it is over, `LibraryItem` for what is stored. That is
+what lets the library page list real files while `api` still imports neither
+`downloader`, nor `providers`, nor `library`, which
+`tests/test_api_boundaries.py` reads rather than believes.
+
+**One at a time, and no queue.** A second request while a transfer is running is
+refused with a message naming the one that is running. A queue needs a policy
+for ordering, cancelling, resuming and surviving a restart, and none of that is
+worth inventing before a single download works end to end. Everything the
+refusal costs is one click later.
+
+**A browser may name a URL, never a path.** `SourceResolver` treats anything
+that is not an HTTP(S) URL as a file or a directory and reads it for the links
+inside, which is right for a command line and would be a way to make the server
+read its own disk on somebody else's click. `DownloadService.require_url` is the
+one place that decides this, and it is checked before a worker thread starts, so
+a bad link is a message rather than a run that exists only to have failed.
+
+**The key stays in the body.** A Mega share carries its decryption key in the
+URL fragment, which a browser never transmits as part of a URL — and does
+transmit as a form field. So the Download button is a form, the link travels in
+the body, and everything downstream of it holds the fragment-free URL: the run,
+every snapshot, every page, every event frame. Nothing is written into a query
+string, a redirect or a log.
+
+**A transfer is described before it starts.** The planner asks nobody about a
+plain file link, because a run over two hundred links must not become two
+hundred extra requests. For one deliberate click the trade is the other way, so
+the service plans with `inspect_files=True`: one request buys the file's name
+and size, which is the difference between "Jump.pdf, 1.3 MB" and a bare handle
+under a progress bar with no denominator. A transfer whose size nobody states
+still gets an indeterminate bar rather than one stuck at zero.
+
+**There is no Stop button yet, and the shutdown says so.** A crawl checks
+between pages; a transfer has no such seam, so a server asked to stop leaves a
+running transfer alone. That is safe rather than merely tolerable: content
+becomes visible only once it is whole (ADR-012), so an abandoned transfer leaves
+no half file in the library.

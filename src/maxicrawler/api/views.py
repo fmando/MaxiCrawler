@@ -479,7 +479,7 @@ def settings_view(settings: Settings) -> tuple[dict[str, Any], ...]:
                 _setting(
                     "library_path",
                     settings.library_path.as_posix(),
-                    "Where downloads would go. Nothing writes here yet.",
+                    "Where downloads are stored, one directory per resource.",
                 ),
                 _setting("log_level", settings.log_level, ""),
                 _setting("max_entries", format_number(settings.max_entries), ""),

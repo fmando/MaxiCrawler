@@ -27,9 +27,9 @@ crawler → extractors → documents
        ↘ plugins (protocol, registry, resolver)
        ↘ repository port ← database implements it structurally
 plugins depend on the domain only; concrete plugins extend the protocol
-app composes settings, database, crawler and web into services a client calls
-cli → app, and composes documents, extractors, plugins, providers, downloader
-    and library beside it
+app composes settings, database, crawler, web, providers, downloader and
+    library into services a client calls: CrawlService and DownloadService
+cli → app, and composes documents, extractors and plugins beside it
 api → app; never providers, downloader or library, and never the cli
 ```
 
@@ -101,6 +101,12 @@ Sprint 10 adds the web interface, described under
 the command line and adds no crawling behaviour at all: the crawl graph moved
 into `maxicrawler.app` first, and both clients have called the same service
 since.
+
+Sprint 11 joins the two halves of the chain, described under
+[The first end-to-end workflow](#the-first-end-to-end-workflow). The download
+graph followed the crawl graph into `maxicrawler.app`, and the browser gained a
+Download button, a progress page and a library listing — none of which changed
+how a download is executed.
 
 ## Plugin architecture
 
@@ -1251,7 +1257,8 @@ maxicrawler.api ─┘
 | `routes` | *"What does this URL reply with?"* Reads the request, asks a service, hands plain data to a template. |
 | `views` | *"How is this shown?"* Every decision that is not one of those three, testable without a request. |
 | `jobs` | *"What is running?"* Crawls on worker threads, and a registry of them. |
-| `stream` | *"What has changed?"* Snapshots from a worker thread to an `EventSource`. |
+| `downloads` | *"What is transferring?"* One download on a worker thread, and a registry holding one at a time. |
+| `stream` | *"What has changed?"* Snapshots from a worker thread to an `EventSource`, for either of the two. |
 | `errors` | *"What is missing?"* Imports nothing, so it can be read by an installation that cannot import the rest. |
 | `templates/`, `static/` | The pages, one stylesheet, one script. |
 
@@ -1276,7 +1283,11 @@ crawl, and it does not render one.
 | `GET /crawls/{id}.json` | The same crawl as `crawl --json` prints it, from the same function. |
 | `GET /crawls/{id}/events` | The progress stream. |
 | `POST /crawls/{id}/stop` | The same request to stop that Ctrl-C makes. |
-| `GET /library`, `GET /settings` | Named from the first page; one lists nothing yet, the other is read-only. |
+| `POST /downloads` | Start one download, from a form field holding the link. |
+| `GET /downloads/{id}` | One transfer, live or finished. |
+| `GET /downloads/{id}/events` | Its progress stream. |
+| `GET /library` | What has been downloaded: provider, name, size, when, where. |
+| `GET /settings` | The configuration as it was read. Read-only. |
 | `GET /health` | That the server is answering — the first route written, and the one that proves the event loop is free while a crawl runs. |
 
 ### Every number leaves `views` as a string
@@ -1374,10 +1385,85 @@ The last one is also asked of Python itself: a fresh interpreter that imports
 - **No pause or resume.** Stop is the same request Ctrl-C makes; a stopped crawl
   is finished, not suspended.
 - **No stored jobs.** The registry keeps the last twenty in memory.
-- **No library listing, no downloads from the browser.** Both go through a
-  service in `maxicrawler.app` first, or they become a second implementation.
 - **htmx is not vendored.** Its licence (0BSD) is checked and the routes already
   render standalone fragments; it is worth adding when filters and sorting are.
+
+## The first end-to-end workflow
+
+Sprint 11 joins the two halves of the chain in the browser: crawl a page, press
+Download beside a link the report found, watch it arrive, find it in the
+library. See ADR-026.
+
+### One service, both clients
+
+The `download` command assembled its own provider registry, library and
+manager — the arrangement Sprint 10 had just finished removing from `crawl`. So
+`DownloadService` was extracted into `maxicrawler.app`, the command line was
+changed to use it, and only then did the browser learn to download.
+
+```text
+maxicrawler.cli ─┐
+                 ├─→ DownloadService ─→ DownloadManager ─→ Provider ─→ Library
+maxicrawler.api ─┘
+```
+
+`DownloadManager` and everything under it are unchanged. The service composes
+and reports; it transfers nothing.
+
+### The vocabulary a client gets
+
+| Type | Answers |
+| --- | --- |
+| `DownloadProgress` | *"What is happening?"* Label, status, bytes, totals, files — during. |
+| `DownloadSummary` | *"What happened?"* The verdict, the counts, the path — after. |
+| `LibraryItem` | *"What is stored?"* One row of the library table. |
+
+Three plain value types, so `api` can show a transfer while importing neither
+`downloader`, nor `providers`, nor `library`. The adapter that keeps it that way
+is one class: a `ProgressReporter` implementation inside the service that turns
+`DownloadJob` and `DownloadOutcome` into a `DownloadProgress` and calls a
+listener with it.
+
+### One download at a time
+
+`DownloadRuns` holds a single-worker pool and a single slot. A second request
+while one is running raises `DownloadBusyError`, which becomes a page naming the
+running transfer. There is no queue, because a queue needs a policy for
+ordering, cancelling, resuming and surviving a restart, and none of it is worth
+inventing before one download works end to end.
+
+### Only a URL, never a path
+
+`SourceResolver` reads a file or a directory of documents for the links inside,
+which is right for a command line and would be a way to make a server read its
+own disk on somebody else's click. `DownloadService.require_url` is the one
+place that refuses anything but an absolute HTTP(S) URL, and it runs before a
+worker thread starts.
+
+### The key travels in a body
+
+A Mega share carries its decryption key in the URL fragment — the one part of a
+URL a browser never transmits, and which it does transmit as a form field. The
+Download button is therefore a form, and everything downstream of it holds the
+fragment-free URL: the run, every snapshot, every page, every event frame.
+
+### A denominator before the first byte
+
+The planner asks nobody about a plain file link, because a run over two hundred
+links must not become two hundred extra requests. A single deliberate download
+can afford it, so the service plans with `inspect_files=True`: one request buys
+the name and the size, which is the difference between "Jump.pdf, 1.3 MB" and a
+bare handle under a bar with nothing to measure against. A transfer whose size
+nobody states gets an indeterminate bar rather than one stuck at zero.
+
+### Deliberately not done
+
+- **No Stop for a download.** A crawl checks between pages; a transfer has no
+  such seam yet. An abandoned one leaves no half file, because content becomes
+  visible only when it is whole.
+- **No queue, no parallel transfers, no scheduler.**
+- **No stored downloads.** A run dies with the process; the library is the
+  record.
 
 ## Design rules
 
