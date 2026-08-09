@@ -8,6 +8,7 @@ from uuid import uuid4
 import typer
 
 from maxicrawler import __version__
+from maxicrawler.api.errors import MISSING_EXTRA, WebDependencyError
 from maxicrawler.app import CrawlService
 from maxicrawler.cli.crawling import (
     EXIT_FETCH_FAILED,
@@ -30,6 +31,13 @@ from maxicrawler.cli.inspection import (
     exit_code_for,
     render_inspection,
     render_json,
+)
+from maxicrawler.cli.serving import (
+    EXIT_WEB_UNAVAILABLE,
+    banner,
+    exposure_notice,
+    is_loopback,
+    refusal,
 )
 from maxicrawler.cli.summary import render_summary
 from maxicrawler.config import DEFAULT_CONFIG_PATH, Settings
@@ -307,6 +315,66 @@ def download(
     report = manager.run(plan)
     typer.echo(render_report(report))
     raise typer.Exit(download_exit_code_for(report))
+
+
+@app.command()
+def serve(
+    host: Annotated[
+        str,
+        typer.Option(
+            help="Address to listen on. Anything but a loopback address needs --allow-remote."
+        ),
+    ] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="Port to listen on.")] = 8000,
+    config_path: Annotated[
+        Path, typer.Option("--config", help="TOML configuration file to use.")
+    ] = DEFAULT_CONFIG_PATH,
+    allow_remote: Annotated[
+        bool,
+        typer.Option("--allow-remote", help="Permit binding an address others can reach."),
+    ] = False,
+) -> None:
+    """Run the web interface.
+
+    The same crawls the crawl command runs, through the same service, in a
+    browser. Nothing here can do anything the command line cannot; it is a
+    second client, not a second program.
+
+    It listens on 127.0.0.1 by default, where only this machine can reach it.
+    The interface has no authentication and can start crawls, so listening
+    anywhere else needs --allow-remote and says what that means.
+
+    Runs until interrupted. Crawls still running when it stops are asked to
+    stop, and finish the page they are on before they do.
+
+    The exit code is 8 when the optional web extra is not installed.
+    """
+    if not is_loopback(host) and not allow_remote:
+        raise typer.BadParameter(refusal(host), param_hint="--host")
+    try:
+        import uvicorn
+
+        from maxicrawler.api import create_app
+    except (ImportError, WebDependencyError) as error:
+        # uvicorn and starlette arrive together in the web extra, so one
+        # message covers both. It names the command that installs them.
+        typer.echo(MISSING_EXTRA, err=True)
+        raise typer.Exit(EXIT_WEB_UNAVAILABLE) from error
+    application = create_app(settings=Settings.from_toml(config_path), config_path=config_path)
+    if not is_loopback(host):
+        typer.echo(exposure_notice(host, port), err=True)
+    typer.echo(banner(host, port))
+    uvicorn.run(application, host=host, port=port, log_level=_uvicorn_log_level())
+
+
+def _uvicorn_log_level() -> str:
+    """Return how loud uvicorn should be.
+
+    Quiet, because it would otherwise print a line per request and bury the
+    one line that says where the interface is. Anything that matters about a
+    crawl is on the page it belongs to.
+    """
+    return "warning"
 
 
 @app.command()

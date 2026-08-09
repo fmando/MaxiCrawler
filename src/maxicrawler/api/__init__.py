@@ -11,8 +11,17 @@ Two rules hold this in place, and both are asserted by
 1. **This package never imports** ``providers``, ``downloader`` or ``library``.
    When the library view becomes real it will go through a service in
    :mod:`maxicrawler.app`, for the same reason crawling does.
-2. **No core package imports this one.** It is an optional delivery layer, and
-   the core has to build and run without it.
+2. **No core package imports this one.** ``config``, ``domain``, ``crawler``,
+   ``web``, ``database``, ``app``, ``plugins``, ``providers``, ``downloader``
+   and ``library`` build and run without it, because it is an optional
+   delivery layer and they are not.
+
+   :mod:`maxicrawler.cli` is the one exception, and not a grudging one: it
+   carries the ``serve`` command, so the program's entry point is precisely the
+   place that has to know this layer exists. It imports
+   :mod:`maxicrawler.api.errors` only — the module that names the missing
+   extra, which by definition must be readable on an installation that has not
+   got it.
 
 Importing this module never fails. The optional ``web`` extra is only required
 once something is actually built, so a caller can ask whether the interface is

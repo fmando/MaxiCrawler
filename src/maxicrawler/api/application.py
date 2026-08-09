@@ -21,16 +21,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from maxicrawler.api.errors import WebDependencyError
+from maxicrawler.api.errors import MISSING_EXTRA, WebDependencyError
 from maxicrawler.app import CrawlService
 from maxicrawler.config import DEFAULT_CONFIG_PATH, Settings
-
-MISSING_EXTRA = (
-    "the web interface needs the optional 'web' extra.\n"
-    "Install it with:  uv sync --extra web\n"
-    "or:               pip install 'maxicrawler[web]'"
-)
-"""What to say when the web dependencies are not installed."""
 
 try:
     from starlette.applications import Starlette

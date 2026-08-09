@@ -7,7 +7,8 @@ import pytest
 from starlette.testclient import TestClient
 
 from maxicrawler.api import WebDependencyError, create_app
-from maxicrawler.api.application import MISSING_EXTRA, health
+from maxicrawler.api.application import health
+from maxicrawler.api.errors import MISSING_EXTRA
 from maxicrawler.app import CrawlService
 from maxicrawler.config import Settings
 
@@ -75,6 +76,28 @@ def test_the_missing_extra_message_names_the_command() -> None:
     assert "web" in MISSING_EXTRA
     assert "uv sync --extra web" in MISSING_EXTRA
     assert "pip install" in MISSING_EXTRA
+
+
+def test_the_missing_extra_message_needs_none_of_what_it_describes() -> None:
+    """It has to be readable by exactly the installation that cannot import it.
+
+    Left in `application.py` it was behind the Starlette import it exists to
+    explain, so `serve` could not have printed it.
+    """
+    source = Path("src/maxicrawler/api/errors.py").read_text(encoding="utf-8")
+    imported = {
+        node.module
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    imported |= {
+        alias.name
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+
+    assert imported == set()
 
 
 def test_the_dependency_error_is_a_web_interface_error() -> None:
