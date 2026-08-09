@@ -8,6 +8,7 @@ from uuid import uuid4
 import typer
 
 from maxicrawler import __version__
+from maxicrawler.app import CrawlService
 from maxicrawler.cli.crawling import (
     EXIT_FETCH_FAILED,
     EXIT_NOT_A_PAGE,
@@ -38,11 +39,7 @@ from maxicrawler.crawler import (
     LocalDiscoveryService,
     NullDiscoveryRepository,
 )
-from maxicrawler.database import (
-    SQLiteCrawlRepository,
-    SQLiteDatabase,
-    SQLiteDiscoveryRepository,
-)
+from maxicrawler.database import SQLiteDatabase, SQLiteDiscoveryRepository
 from maxicrawler.domain import (
     Availability,
     ResourceInspection,
@@ -69,18 +66,8 @@ from maxicrawler.providers import (
     UrllibTransport,
     create_default_provider_registry,
 )
-from maxicrawler.utils import configure_logging, normalize_url, require_http_scheme, strip_fragment
-from maxicrawler.web import (
-    ContentTypeError,
-    FetchError,
-    HtmlLinkParser,
-    PolicyRefusedError,
-    UrllibPageFetcher,
-    WebDiscoveryService,
-)
-from maxicrawler.web.engine import CrawlEngine
-from maxicrawler.web.repository import CrawlRepository, NullCrawlRepository
-from maxicrawler.web.session import CrawlOptions, CrawlSession, RequestContext
+from maxicrawler.utils import configure_logging, normalize_url, strip_fragment
+from maxicrawler.web import ContentTypeError, FetchError, PolicyRefusedError
 
 app = typer.Typer(help="Configuration and runtime tools for MaxiCrawler.", no_args_is_help=True)
 ConfigPath = Annotated[Path, typer.Option(help="TOML configuration file to use.")]
@@ -188,28 +175,20 @@ def crawl(
     5 when the starting page could not be retrieved, 6 when it was not a page,
     and 7 when the crawl was interrupted.
     """
+    service = CrawlService(Settings.from_toml(config_path))
     try:
-        require_http_scheme(url)
+        session = service.build_session(
+            url,
+            depth=depth,
+            max_pages=max_pages,
+            same_domain=same_domain,
+            include_subdomains=include_subdomains,
+            scan_prose=prose,
+        )
     except ValueError as error:
         raise typer.BadParameter(f"{error}: {url}") from error
-    settings = Settings.from_toml(config_path)
-    options = CrawlOptions(
-        max_depth=settings.crawl_depth if depth is None else depth,
-        max_pages=settings.crawl_max_pages if max_pages is None else max_pages,
-        same_domain=settings.crawl_same_domain if same_domain is None else same_domain,
-        include_subdomains=include_subdomains,
-        scan_prose=prose,
-    )
-    session = CrawlSession(
-        session_id=uuid4().hex,
-        seed_url=url,
-        started_at=datetime.now(UTC),
-        options=options,
-        context=RequestContext(user_agent=settings.user_agent),
-    )
-    engine = _build_engine(settings, session, persist=persist)
     try:
-        report = engine.run(session)
+        report = service.run(session, persist=persist)
     except ContentTypeError as error:
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(EXIT_NOT_A_PAGE) from error
@@ -343,40 +322,6 @@ def _build_repository(settings: Settings, *, persist: bool) -> DiscoveryReposito
     repository = SQLiteDiscoveryRepository(SQLiteDatabase(settings.database_path))
     repository.initialize()
     return repository
-
-
-def _build_crawl_repository(settings: Settings, *, persist: bool) -> CrawlRepository:
-    """Return the repository the crawl summary should be written to."""
-    if not persist:
-        return NullCrawlRepository()
-    repository = SQLiteCrawlRepository(SQLiteDatabase(settings.database_path))
-    repository.initialize()
-    return repository
-
-
-def _build_engine(settings: Settings, session: CrawlSession, *, persist: bool) -> CrawlEngine:
-    """Return the crawl engine wired for *session*.
-
-    The composition root, and the only place the crawl layer meets the
-    database, the plugin registry and the event bus.
-    """
-    options = session.options
-    service = WebDiscoveryService(
-        DiscoveryPipeline(EventBus()),
-        fetcher=UrllibPageFetcher(
-            user_agent=session.context.user_agent,
-            timeout=settings.network_timeout,
-            max_response_bytes=settings.max_page_bytes,
-            max_redirects=settings.max_redirects,
-        ),
-        parser=HtmlLinkParser(max_links=settings.max_links),
-        repository=_build_repository(settings, persist=persist),
-        scan_prose=options.scan_prose,
-    )
-    return CrawlEngine(
-        service,
-        repository=_build_crawl_repository(settings, persist=persist),
-    )
 
 
 def _classify(url: str) -> UrlClassification:
