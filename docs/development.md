@@ -5,6 +5,10 @@
 - Python 3.12 or newer
 - [uv](https://docs.astral.sh/uv/)
 
+Three optional extras exist: `mega` (cryptography), `brotli`, and `web` (the
+browser interface). Each is part of the `dev` dependencies, so the setup below
+installs all of them.
+
 ## Setup
 
 ```bash
@@ -50,6 +54,12 @@ local server under its other hostname — `127.0.0.1` and `localhost` are one
 machine but two hosts, which exercises the scope rule without leaving it. And
 `tests/test_no_outbound_connections.py` guards `socket.create_connection`, so
 the mistake fails loudly rather than silently.
+
+The web interface is driven through Starlette's `TestClient`, which speaks to
+the application object rather than to a port, so no test binds a socket. The one
+place that would is `uvicorn.run`, and `tests/test_cli_serve.py` replaces it and
+inspects what it was asked to do — which is also the only thing worth asserting
+about it.
 
 The web crawler is tested against a throwaway server on `127.0.0.1`
 (`tests/web_server.py`) rather than a mocked `urllib`. Redirects, compressed

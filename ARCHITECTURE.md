@@ -13,7 +13,7 @@
 1.  Domain (`src/maxicrawler/domain`)
 2.  Application (Discovery-Pipeline, Download Manager, Services)
 3.  Infrastructure (SQLite, HTTP, Dateisystem, Library)
-4.  Interface (CLI, GUI, API)
+4.  Interface (CLI, Weboberfläche `maxicrawler.api`, GUI)
 
 ## Verarbeitungskette
 
@@ -56,12 +56,34 @@ unverändert an die Discovery-Pipeline. Ein auf einer Webseite gefundener Link
 wird deshalb von genau denselben Plugins klassifiziert wie einer aus einer
 lokalen Datei.
 
+## Clients
+
+MaxiCrawler hat zwei Benutzerschnittstellen und **eine** Anwendungslogik. Beide
+gehen durch `maxicrawler.app` — den Composition Root, die einzige Schicht, die
+`config`, `database`, `web` und `crawler` gleichzeitig kennen darf:
+
+```text
+maxicrawler.cli ─┐
+                 ├─→ maxicrawler.app ─→ web / crawler / database / plugins
+maxicrawler.api ─┘
+```
+
+Die CLI bleibt vollständig erhalten und ist der Client für Automatisierung,
+Skripte und Tests. Die Weboberfläche ist der Client zum Hinschauen und soll
+langfristig die primäre Oberfläche werden. Sie enthält keine Crawl-Logik, keine
+Kopie eines CLI-Renderers und keinen zweiten Objektgraphen; jeder Crawl, den sie
+startet, wird von `CrawlService` gebaut.
+
+Die Weboberfläche ist ein **optionales** Extra (`pip install "maxicrawler[web]"`).
+Ohne sie funktioniert jeder Befehl außer `serve`, und `serve` erklärt in einem
+Satz, was fehlt.
+
 ## Ausblick: Crawl Jobs
 
-Eine `CrawlSession` beschreibt heute genau einen Crawl-Lauf. Sie wird
-voraussichtlich zum Bestandteil eines größeren **Crawl Jobs** werden — das ist
-die Einheit, die eine spätere Weboberfläche verwaltet, startet, anhält und in
-einer Liste zeigt:
+Eine `CrawlSession` beschreibt heute genau einen Crawl-Lauf. Die Weboberfläche
+verwaltet Läufe bereits als Jobs, aber nur im Arbeitsspeicher: nach einem
+Neustart bleibt, was in der Datenbank steht. Ein **Crawl Job** als eigene,
+gespeicherte Einheit steht deshalb weiter aus:
 
 ```text
 Job
@@ -107,6 +129,17 @@ weiß.
 -   Jeder Name, der aus einer fremden Antwort stammt, wird über
     `maxicrawler.library.naming` geführt, bevor er ein Pfadsegment wird.
 -   Ereignisse werden über den EventBus veröffentlicht.
+-   Jeder Client geht durch `maxicrawler.app`. Eine zweite Oberfläche ist nie
+    eine zweite Implementierung; gemeinsame Logik wird herausgezogen, nicht
+    kopiert.
+-   `maxicrawler.api` importiert weder `providers` noch `downloader` noch
+    `library` und baut keinen Crawl-Objektgraphen selbst.
+-   Kein Kernpaket importiert `maxicrawler.api`. Einzige Ausnahme ist
+    `maxicrawler.cli`, weil dort `serve` liegt, und dort auch nur `api.errors`.
+-   Diese Grenzen werden gelesen, nicht geglaubt: `tests/test_api_boundaries.py`
+    prüft den Importgraphen.
+-   Jede Seite der Weboberfläche funktioniert ohne JavaScript. Kein Build-System,
+    kein npm, keine Ressource von einem fremden Host.
 -   Neue Features benötigen Tests.
 
 ## Qualitätsregeln

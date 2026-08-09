@@ -23,11 +23,17 @@ The mission, core principles, and non-goals are described in
     discovery pipeline
 -   0.9 Recursive Crawling ✅ — a frontier, a visited set and a crawl engine
     above the single-page crawler
--   0.10 Politeness & robots.txt
--   0.11 Desktop GUI
+-   0.10 Web interface ✅ — a browser client of the same services the command
+    line uses, served by `maxicrawler serve`
+-   0.11 Politeness & robots.txt
 -   0.12 Scheduler & Automation
 -   0.13 REST API
 -   1.0 Stable Release
+
+The desktop GUI that used to sit at 0.11 is superseded by 0.10. A local server
+and a browser reach every machine this runs on, including the ones it is run on
+over SSH, and one interface that is maintained beats two that are not. The
+`gui` package stays an empty placeholder rather than a promise.
 
 ## The chain
 
@@ -73,8 +79,17 @@ not change.
     the same three-method protocol
 -   Making `DiscoveryPipeline` thread-safe, which parallel crawling needs
     before a frontier can be drained by more than one worker
--   Crawl jobs — the unit a web interface manages, holding a `CrawlSession`
-    beside its discovery results and its downloads
+-   Crawl jobs — the unit the web interface manages, holding a `CrawlSession`
+    beside its discovery results and its downloads. Today's registry is memory
+    only: after a restart the pages fall back to what the database holds, and
+    a crawl that was running is shown as abandoned
+-   A real library page. It names itself in the navigation and lists nothing,
+    because listing will go through a service in `maxicrawler.app` rather than
+    through `maxicrawler.library` from a request handler
+-   Filtering and sorting the crawl list, which is the point at which htmx
+    earns being vendored — the routes already render standalone fragments
+-   Authentication, before the interface is anything but loopback. Until then
+    `serve` refuses a public address unless `--allow-remote` asks for it
 -   Further providers: Pixeldrain, GoFile, MediaFire
 -   Parallel downloads — a thread pool around the drain loop; the queue and the
     worker are already built for it
@@ -88,6 +103,5 @@ not change.
 ## Long-term
 
 -   Distributed crawling
--   Web UI
 -   Plugin marketplace
--   Multi-user support
+-   Multi-user support, which is the same subject as authentication
