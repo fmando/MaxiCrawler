@@ -36,6 +36,7 @@ from maxicrawler.app.discovery import (
     LinkPage,
     LinkQuery,
     LinkSort,
+    Matches,
 )
 from maxicrawler.app.downloading import (
     DownloadControl,
@@ -95,6 +96,7 @@ __all__ = [
     "LinkPage",
     "LinkQuery",
     "LinkSort",
+    "Matches",
     "MediaVerdict",
     "PageCounts",
     "PageQuery",

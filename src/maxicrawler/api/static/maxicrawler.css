@@ -417,6 +417,43 @@ footer {
 }
 .done .path { margin-left: 10px; }
 
+/* --- queueing a set of links --------------------------------------------- */
+
+/* Present for a screen reader, absent for everyone else. The tick column's
+   header has no visible label -- a word over a column of checkboxes is noise --
+   but a column with no header at all is one a screen reader cannot announce. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.batch {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 12px 10px 0;
+}
+.batch button {
+  padding: 4px 12px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+}
+.batch button:hover { background: var(--bg); border-color: var(--accent); }
+
+.grid .tick { width: 1%; padding-right: 0; }
+.grid .tick input { margin: 0; cursor: pointer; }
+
 /* --- the download queue -------------------------------------------------- */
 
 /* A form that has to sit in a table cell beside other forms.

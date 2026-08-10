@@ -117,8 +117,23 @@ def create_app(
                 name="crawl_events",
             ),
             Route("/crawls/{job_id}/stop", routes.stop_crawl, methods=["POST"], name="stop_crawl"),
+            # Under the crawl rather than under /downloads: what it queues is
+            # decided by re-running that crawl's link query on the server, so
+            # the crawl is what it is addressed against.
+            Route(
+                "/crawls/{job_id}/downloads",
+                routes.queue_matches,
+                methods=["POST"],
+                name="queue_matches",
+            ),
             Route("/downloads", routes.downloads, methods=["GET"], name="downloads"),
             Route("/downloads", routes.start_download, methods=["POST"], name="start_download"),
+            Route(
+                "/downloads/selection",
+                routes.queue_selection,
+                methods=["POST"],
+                name="queue_selection",
+            ),
             # Before the page, for the same reason `{job_id}.json` is: a path
             # parameter matches any single segment, and "pause" is one.
             Route(

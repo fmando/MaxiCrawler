@@ -10,6 +10,7 @@ is the one question the rest of the file assumes.
 from collections.abc import Iterable
 from pathlib import Path
 
+import pytest
 from web_server import Site, serve
 
 from maxicrawler.app import (
@@ -524,3 +525,91 @@ def test_a_crawl_that_did_not_persist_recorded_no_urls(tmp_path: Path) -> None:
     assert page.recorded == 0
     assert report.summary.unique_urls > 0
     assert page.was_recorded is False
+
+
+# --- everything a filter matches, for queueing -------------------------------
+
+
+def test_only_what_a_provider_here_could_fetch_comes_back() -> None:
+    """The set behind "queue everything I am looking at"."""
+    rows = [make_url(MEGA_LINK, "mega"), make_url("https://example.test/a")]
+    service = make_service(rows, downloadable=[MEGA_LINK])
+
+    matches = service.fetchable(SESSION, limit=10)
+
+    assert matches.urls == (MEGA_LINK,)
+    assert matches.total == 1
+    assert matches.left_over == 0
+
+
+def test_the_filter_narrows_what_comes_back() -> None:
+    rows = [make_url(MEGA_LINK, "mega"), make_url("https://mega.nz/file/Other#key", "mega")]
+    service = make_service(rows, downloadable=[url.record.normalized_url for url in rows])
+
+    matches = service.fetchable(SESSION, LinkQuery(search="AaBbCcDd"), limit=10)
+
+    assert matches.urls == (MEGA_LINK,)
+
+
+def test_the_key_is_kept_because_the_transfer_will_need_it() -> None:
+    """A share link without its fragment leads nowhere."""
+    service = make_service([make_url(MEGA_LINK, "mega")], downloadable=[MEGA_LINK])
+
+    (url,) = service.fetchable(SESSION, limit=10).urls
+
+    assert url.endswith("#0123456789abcdefghijklmnopqrstuvwxyzABC")
+
+
+def test_they_come_back_in_the_order_the_report_shows_them() -> None:
+    rows = [make_url(f"https://mega.nz/file/{tail}#k", "mega") for tail in ("Cc", "Aa", "Bb")]
+    fetchable = [url.record.normalized_url for url in rows]
+    service = make_service(rows, downloadable=fetchable)
+
+    ordered = service.fetchable(SESSION, LinkQuery(sort=LinkSort.URL), limit=10).urls
+
+    assert ordered == tuple(sorted(fetchable))
+
+
+def test_what_does_not_fit_is_counted_rather_than_dropped_quietly() -> None:
+    """The caller has a queue with a ceiling, and is owed the number."""
+    rows = [make_url(f"https://mega.nz/file/{tail}#k", "mega") for tail in ("Aa", "Bb", "Cc")]
+    service = make_service(rows, downloadable=[url.record.normalized_url for url in rows])
+
+    matches = service.fetchable(SESSION, LinkQuery(sort=LinkSort.URL), limit=2)
+
+    assert len(matches.urls) == 2
+    assert matches.total == 3
+    assert matches.left_over == 1
+
+
+def test_a_queue_with_no_room_resolves_nothing_rather_than_failing() -> None:
+    service = make_service([make_url(MEGA_LINK, "mega")], downloadable=[MEGA_LINK])
+
+    matches = service.fetchable(SESSION, limit=0)
+
+    assert matches.urls == ()
+    assert matches.total == 1
+    assert matches.left_over == 1
+
+
+def test_asking_for_what_cannot_be_fetched_matches_nothing_fetchable() -> None:
+    """The one filter that contradicts the question being asked."""
+    rows = [make_url(MEGA_LINK, "mega"), make_url("https://example.test/a")]
+    service = make_service(rows, downloadable=[MEGA_LINK])
+
+    matches = service.fetchable(SESSION, LinkQuery(downloadable=False), limit=10)
+
+    assert (matches.urls, matches.total) == ((), 0)
+
+
+def test_an_installation_with_no_providers_matches_nothing() -> None:
+    service = make_service([make_url(MEGA_LINK, "mega")])
+
+    assert service.fetchable(SESSION, limit=10).urls == ()
+
+
+def test_a_negative_limit_is_a_mistake_rather_than_an_empty_answer() -> None:
+    service = make_service([make_url(MEGA_LINK, "mega")], downloadable=[MEGA_LINK])
+
+    with pytest.raises(ValueError, match="cannot be negative"):
+        service.fetchable(SESSION, limit=-1)

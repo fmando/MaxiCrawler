@@ -214,6 +214,22 @@ class LinkQuery:
 
 
 @dataclass(frozen=True, slots=True)
+class Matches:
+    """The fetchable URLs a query matched, and how many there were."""
+
+    urls: tuple[str, ...]
+    """As many as the caller had room for, in the order the report shows them."""
+
+    total: int
+    """How many matched, whether or not they fit."""
+
+    @property
+    def left_over(self) -> int:
+        """Return how many matched but did not fit."""
+        return max(0, self.total - len(self.urls))
+
+
+@dataclass(frozen=True, slots=True)
 class LinkPage:
     """One page of a report, and enough about the rest to navigate it."""
 
@@ -366,6 +382,38 @@ class DiscoveryService:
                 else self._resolve(shown)
             ),
         )
+
+    def fetchable(self, session_id: str, query: LinkQuery | None = None, *, limit: int) -> Matches:
+        """Return the URLs *query* matches that some provider here could fetch.
+
+        A different question from :meth:`browse`, and worth its own method
+        rather than a page size nobody would want to render: this one is asked
+        by *"queue everything I am looking at"*, where the answer is a set of
+        URLs and nothing about tables, ordering or facets.
+
+        Ordered the way the report orders them, so what comes back first is
+        what was at the top of the list somebody was reading. Cut at *limit*,
+        with the count of what did not fit — the caller has a queue with a
+        ceiling, and silently dropping the remainder would be the one outcome
+        it must not have.
+
+        The URLs keep their fragments, which is what makes this the safer half
+        of the feature: a share link's decryption key never has to travel to a
+        browser and back to be queued.
+        """
+        if limit < 0:
+            msg = "limit cannot be negative"
+            raise ValueError(msg)
+        asked = query if query is not None else LinkQuery()
+        # A filter asking for what *cannot* be fetched matches nothing that can,
+        # by definition. Answered here rather than by resolving a set only to
+        # discard all of it.
+        if asked.downloadable is False:
+            return Matches(urls=(), total=0)
+        matching = tuple(item for item in self.links(session_id) if _matches(item, asked))
+        fetchable = self._resolve(matching)
+        wanted = tuple(item.url for item in _ordered(matching, asked) if item.url in fetchable)
+        return Matches(urls=wanted[:limit], total=len(wanted))
 
     def _resolve(self, items: Iterable[LinkItem]) -> frozenset[str]:
         """Return which of *items* some provider here could fetch."""

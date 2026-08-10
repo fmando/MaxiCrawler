@@ -28,7 +28,7 @@ from starlette.templating import Jinja2Templates
 
 from maxicrawler import __version__
 from maxicrawler.api import stream, views
-from maxicrawler.api.downloads import DownloadRun, Move, TransferQueue
+from maxicrawler.api.downloads import Accepted, DownloadRun, Move, TransferQueue
 from maxicrawler.api.errors import QueueFullError
 from maxicrawler.api.jobs import DEFAULT_RETAINED_JOBS, CrawlJob, CrawlJobs
 from maxicrawler.app import (
@@ -41,6 +41,7 @@ from maxicrawler.app import (
     LibrarySort,
     LinkQuery,
     LinkSort,
+    Matches,
     PageQuery,
     PageState,
     StoredPayload,
@@ -333,6 +334,75 @@ async def start_download(request: Request) -> Response:
     except QueueFullError as error:
         return _refuse_download(request, str(error), status=409)
     return RedirectResponse(url=f"/downloads/{run.id}", status_code=303)
+
+
+async def queue_selection(request: Request) -> Response:
+    """Queue the links that were ticked, and show the queue.
+
+    The URLs arrive in the body, one field per ticked row, for the reason a
+    single one does: a share link keeps its decryption key in the fragment, and
+    a fragment is the one part of a URL a browser never sends in a link.
+
+    Partial by design. A selection where two links are malformed is not a
+    refusal of the other ninety-eight — the queue takes what it can and the
+    page says what it did.
+    """
+    form = await read_forms(request)
+    accepted = downloads_of(request).submit_all(form.get("url", ()))
+    if accepted.queued == 0 and not accepted.is_whole:
+        return _refuse_download(request, _nothing_queued(accepted), status=409)
+    return RedirectResponse(url=_queued_url(accepted), status_code=303)
+
+
+async def queue_matches(request: Request) -> Response:
+    """Queue every fetchable link the current filter matches, and show the queue.
+
+    The one control this sprint exists for: a filtered report is a set somebody
+    has already decided on, and ticking two hundred boxes to say so again is the
+    work this replaces.
+
+    Nothing but the query travels. The browser sends the filter it is looking
+    at, the server resolves it against what the crawl recorded, and the URLs —
+    decryption keys and all — never leave this process.
+    """
+    session_id = request.path_params["job_id"]
+    downloads = downloads_of(request)
+    matches = discovery_of(request).fetchable(
+        session_id, _link_query(request), limit=downloads.room()
+    )
+    if not matches.urls:
+        return _refuse_download(request, _nothing_matched(matches), status=409)
+    accepted = downloads.submit_all(matches.urls)
+    return RedirectResponse(url=_queued_url(accepted), status_code=303)
+
+
+def _queued_url(accepted: Accepted) -> str:
+    """Return where to land after queueing a batch.
+
+    One link goes to its own page, because that is what somebody who queued one
+    link wants to watch. Several go to the queue, because that is the thing they
+    just changed.
+    """
+    if accepted.queued == 1 and accepted.is_whole:
+        return f"/downloads/{accepted.runs[0].id}"
+    return "/downloads"
+
+
+def _nothing_queued(accepted: Accepted) -> str:
+    """Return why a selection produced no downloads at all."""
+    if accepted.no_room:
+        return f"the queue had no room for any of the {accepted.no_room} links selected"
+    return f"none of the {accepted.rejected} links selected is an absolute HTTP or HTTPS URL"
+
+
+def _nothing_matched(matches: Matches) -> str:
+    """Return why a filter produced no downloads at all."""
+    if matches.total:
+        return (
+            f"{matches.total} links match, and the queue has no room for any of them. "
+            "Let some finish, or cancel what you no longer want."
+        )
+    return "nothing this filter matches can be downloaded by the providers installed here"
 
 
 async def download_detail(request: Request) -> Response:
@@ -901,11 +971,23 @@ async def read_form(request: Request) -> dict[str, str]:
         HTTPException: the body was not an urlencoded form. Saying so beats
             quietly seeing no fields at all.
     """
+    return {name: values[-1] for name, values in (await read_forms(request)).items()}
+
+
+async def read_forms(request: Request) -> dict[str, list[str]]:
+    """Return the fields of a submitted form, keeping repeated names.
+
+    What :func:`read_form` is built on, and what a batch of ticked checkboxes
+    needs: they all submit under one name, and the last one is not the answer.
+
+    Raises:
+        HTTPException: the body was not an urlencoded form. Saying so beats
+            quietly seeing no fields at all.
+    """
     content_type = request.headers.get("content-type", "").split(";")[0].strip()
     if content_type != "application/x-www-form-urlencoded":
         raise HTTPException(status_code=415, detail="expected an urlencoded form")
-    fields = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
-    return {name: values[-1] for name, values in fields.items()}
+    return parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
 
 
 def _submitted(form: dict[str, str]) -> dict[str, Any]:

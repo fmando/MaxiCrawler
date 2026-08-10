@@ -830,3 +830,67 @@ questions and because `api` may not import `downloader` at all. They are not
 the download layer's builders and matches on the class name alone — two classes
 called `DownloadQueue` would have made a real rule unenforceable to save one
 word. The test found this rather than a review; that is what it is for.
+
+## ADR-034: Queueing a set of links, and the two shapes it takes
+
+Ticking a box beside two hundred links is not less work than clicking two
+hundred buttons — it is the same work with an extra step at the end. So this
+sprint's selection feature is two controls, and the second one is the reason
+the first is worth having.
+
+**Queue selected** takes the rows that were ticked. The URLs travel in the
+request body, one field per row, because a share link keeps its decryption key
+in the URL fragment and a fragment is the one part of a URL a browser never
+sends in a link. In a field it survives; in an `href` it would be gone before
+the server saw it.
+
+**Queue every fetchable match** takes the filter instead. The query string of
+the report travels in the form's action, the server re-runs it against what the
+crawl recorded, and the URLs — keys and all — never leave this process. One
+click replaces every checkbox on every page of a filtered report, which is the
+control this sprint exists for: a filtered report is a set somebody has already
+decided on, and ticking it again is asking them to say it twice.
+
+The second is also the safer half, and that is not a coincidence. Sending a set
+by *describing* it beats sending it by *enumerating* it whenever the elements
+carry credentials.
+
+**The checkboxes belong to a form they are not inside.** HTML forms cannot
+nest, and every downloadable row already carries a form for its own Download
+button. The batch form therefore sits beside the table and the checkboxes join
+it by `id`, which is exactly what the HTML `form` attribute is for. No script
+is involved: a browser submits an associated control as if it were nested. The
+alternative was removing the per-row button, which would have made the common
+case — one link, one click — worse to make the rare case possible.
+
+**No "select all" checkbox.** It cannot be done without JavaScript, and the
+control it would approximate already exists and is better: "every match" covers
+every page rather than the two hundred rows currently rendered.
+
+**Reordering by dragging is still out**, for the same reason it was in ADR-033.
+Three buttons on the queue page do it, they work by keyboard, and they need no
+build step.
+
+**A batch is partial, not atomic.** Two hundred links where three are malformed
+and the queue has room for a hundred and fifty is a job mostly done, not an
+error. `submit_all` returns three numbers — queued, rejected, no room — because
+those need three different sentences: a malformed link is something to fix, a
+full queue is something to wait for, and neither is a reason to have refused
+the ones that were fine. Only a batch that queued *nothing* is answered with a
+refusal page.
+
+**Where you land afterwards is decided by what you asked for.** One link goes
+to that download's page, because watching it is why somebody queued one. Several
+go to the queue, because that is the thing they just changed.
+
+**The ceiling is asked about before the work, not after.** `TransferQueue.room`
+exists so that resolving a filter into four hundred URLs and then refusing them
+one at a time is not how somebody learns the queue is full. What does not fit is
+counted and reported, never dropped quietly.
+
+**`DiscoveryService.fetchable` is a query, not a page.** It could have been
+`browse` with a page size nobody would want rendered, and that would have
+conflated two questions: "which rows do I show" carries ordering, facets, paging
+and column choices, while "which URLs do I queue" carries none of them. Same
+service, same filter vocabulary, different answer — which is the shape ADR-028
+set up when it separated reading the library from writing it.

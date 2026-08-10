@@ -98,10 +98,43 @@
   {% endif %}
 
   {% if links.has_rows %}
+    {#
+      The batch form, and why it is out here.
+
+      A form cannot contain another form, and every downloadable row already
+      has one for its own button. So this one sits beside the table and the
+      checkboxes join it by id -- what the HTML `form` attribute is for. No
+      script is involved: a browser submits an associated control exactly as if
+      it were nested.
+
+      Two buttons, because they answer two questions. "Queue selected" takes
+      the rows that were ticked, which travel as fields because a share link's
+      key lives in the fragment and a fragment is what a browser drops from a
+      link. "Queue every match" takes the whole filter instead: the query goes
+      in the action, the server resolves it against what the crawl recorded,
+      and no URL -- and so no key -- makes the round trip at all.
+    #}
+    {% if links.has_downloads %}
+      <form class="batch" id="link-selection" method="post" action="{{ links.selection_action }}">
+        <button type="submit">Queue selected</button>
+      </form>
+      <form class="batch" method="post" action="{{ links.matches_action }}">
+        <button type="submit">Queue every fetchable match</button>
+        {#
+          What the filter matched, not what the button will queue. Those are
+          different numbers whenever some matches are links no provider here
+          can fetch, and the wording has to leave room for that rather than
+          promise the larger one.
+        #}
+        <span class="muted small">of the {{ links.match_count }} links this filter matches</span>
+      </form>
+    {% endif %}
+
     <div class="scroller">
       <table class="grid sticky">
         <thead>
           <tr>
+            {% if links.has_downloads %}<th class="tick"><span class="visually-hidden">Select</span></th>{% endif %}
             {% for header in links.headers %}
               <th{% if header.active %} class="sorted"{% endif %}>
                 {% if header.url %}
@@ -117,6 +150,19 @@
         <tbody>
           {% for link in links.rows %}
             <tr>
+              {% if links.has_downloads %}
+                <td class="tick">
+                  {% if link.can_download %}
+                    {#
+                      Belongs to the form above by name, not by nesting. The
+                      value is the whole link, fragment included, which is the
+                      only way a key survives the round trip.
+                    #}
+                    <input type="checkbox" form="link-selection" name="url" value="{{ link.url }}"
+                           aria-label="Queue {{ link.spoken_url }}">
+                  {% endif %}
+                </td>
+              {% endif %}
               {% if "plugin" in links.shown %}
                 <td{% if not link.is_notable %} class="muted"{% endif %}>{{ link.plugin }}</td>
               {% endif %}

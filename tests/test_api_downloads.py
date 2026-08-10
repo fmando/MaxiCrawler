@@ -727,3 +727,61 @@ def test_a_queue_that_never_downloads_starts_no_thread(tmp_path: Path) -> None:
         assert {thread.name for thread in enumerate_threads()} == before
     finally:
         runs.shutdown()
+
+
+# --- a batch at once -----------------------------------------------------------
+
+
+def test_a_batch_is_queued_in_the_order_it_arrived(tmp_path: Path) -> None:
+    """A selection taken off a sorted report keeps that sorting."""
+    with paused(tmp_path) as runs:
+        accepted = runs.submit_all([THIRD_URL, FILE_URL, OTHER_URL])
+
+        assert accepted.queued == 3
+        assert accepted.is_whole is True
+        assert waiting_urls(runs) == [bare(THIRD_URL), bare(FILE_URL), bare(OTHER_URL)]
+
+
+def test_a_bad_link_does_not_refuse_the_good_ones(tmp_path: Path) -> None:
+    """Two hundred links where two are malformed is a job mostly done."""
+    with paused(tmp_path) as runs:
+        accepted = runs.submit_all([FILE_URL, "not-a-url", OTHER_URL])
+
+        assert accepted.queued == 2
+        assert accepted.rejected == 1
+        assert accepted.no_room == 0
+        assert accepted.is_whole is False
+
+
+def test_a_batch_that_fills_the_queue_says_how_many_did_not_fit(tmp_path: Path) -> None:
+    with paused(tmp_path, limit=2) as runs:
+        accepted = runs.submit_all([FILE_URL, OTHER_URL, THIRD_URL, FILE_URL])
+
+        assert accepted.queued == 2
+        assert accepted.no_room == 2
+        assert accepted.rejected == 0
+
+
+def test_an_empty_batch_is_not_an_error(tmp_path: Path) -> None:
+    with paused(tmp_path) as runs:
+        accepted = runs.submit_all([])
+
+        assert (accepted.queued, accepted.is_whole) == (0, True)
+
+
+def test_the_queue_says_how_much_room_is_left(tmp_path: Path) -> None:
+    """Asked before resolving a selection, not after refusing it one at a time."""
+    with paused(tmp_path, limit=3) as runs:
+        assert runs.room() == 3
+
+        runs.submit(FILE_URL)
+
+        assert runs.room() == 2
+
+
+def test_a_closed_queue_has_no_room_rather_than_some(tmp_path: Path) -> None:
+    runs = TransferQueue(make_service(tmp_path))
+    runs.shutdown()
+
+    assert runs.room() == 0
+    assert runs.submit_all([FILE_URL]).queued == 0

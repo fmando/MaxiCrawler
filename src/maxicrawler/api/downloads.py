@@ -51,7 +51,7 @@ already written to SQLite by discovery and rendered into the report's table.
 """
 
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -333,6 +333,33 @@ class DownloadRun:
 
 
 @dataclass(frozen=True, slots=True)
+class Accepted:
+    """What became of a batch of links somebody asked to queue.
+
+    Three outcomes rather than one, because they need three different sentences.
+    A malformed link is something to fix; a full queue is something to wait for;
+    and neither is a reason to have refused the ones that were fine.
+    """
+
+    runs: tuple[DownloadRun, ...]
+    rejected: int = 0
+    """How many were not absolute HTTP(S) URLs."""
+
+    no_room: int = 0
+    """How many were left unqueued because the queue filled up."""
+
+    @property
+    def queued(self) -> int:
+        """Return how many are now in the queue."""
+        return len(self.runs)
+
+    @property
+    def is_whole(self) -> bool:
+        """Return whether everything asked for was queued."""
+        return self.rejected == 0 and self.no_room == 0
+
+
+@dataclass(frozen=True, slots=True)
 class QueueSnapshot:
     """What the queue holds at the moment it was asked."""
 
@@ -445,6 +472,42 @@ class TransferQueue:
             self._condition.notify_all()
         self._ensure_worker()
         return run
+
+    def room(self) -> int:
+        """Return how many more requests would fit right now.
+
+        Asked before resolving a selection rather than after. Working out which
+        four hundred URLs somebody meant and then refusing them one at a time
+        would be the slowest possible way to say "the queue is full".
+        """
+        with self._condition:
+            return 0 if self._closed else max(0, self._limit - len(self._waiting))
+
+    def submit_all(self, urls: Iterable[str]) -> Accepted:
+        """Put every URL of *urls* in the queue, and report what happened.
+
+        Partial by design. A selection of two hundred links where three are
+        malformed and the queue has room for a hundred and fifty is not an
+        error — it is a job that was mostly done, and the caller is owed the
+        numbers rather than an exception that loses the other hundred and
+        forty-seven.
+
+        The order they arrive in is the order they are queued in, so a
+        selection taken off a sorted report keeps that sorting.
+        """
+        asked = tuple(urls)
+        queued: list[DownloadRun] = []
+        rejected = 0
+        for index, url in enumerate(asked):
+            try:
+                queued.append(self.submit(url))
+            except ValueError:
+                rejected += 1
+            except QueueFullError:
+                # Full is not "this URL was bad": everything after it would fail
+                # the same way, so stop rather than count them all as refusals.
+                return Accepted(runs=tuple(queued), rejected=rejected, no_room=len(asked) - index)
+        return Accepted(runs=tuple(queued), rejected=rejected)
 
     def get(self, download_id: str) -> DownloadRun | None:
         """Return the run called *download_id*, if this process still holds it."""

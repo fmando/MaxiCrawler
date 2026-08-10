@@ -47,7 +47,7 @@ from maxicrawler.crawler import PluginUsage
 from maxicrawler.database import StoredCrawl
 from maxicrawler.domain import DownloadStatus
 from maxicrawler.plugins.generic import GENERIC_PLUGIN_NAME
-from maxicrawler.utils import format_size
+from maxicrawler.utils import format_size, strip_fragment
 from maxicrawler.web.models import LinkKind
 from maxicrawler.web.report import CrawlReport, PageOutcome, SkipReason
 from maxicrawler.web.session import CrawlOptions, CrawlState
@@ -866,6 +866,15 @@ def link_view(
         "has_downloads": any(row["can_download"] for row in rows),
         "is_filtered": query.is_filtered,
         "action": f"{base}#links",
+        # Where a batch of ticked rows goes. One form for the whole table,
+        # which the checkboxes join by id rather than by sitting inside it —
+        # each row already has a form of its own, and forms cannot nest.
+        "selection_action": SELECTION_ACTION,
+        # Where "queue everything this matches" goes. The filter travels in the
+        # query string of the action and the URLs never leave the server, which
+        # is what makes this the half of the feature that cannot leak a key.
+        "matches_action": _matches_action(base, query, hidden, carry),
+        "match_count": format_number(page.total),
         # What the filter form shows as its current state.
         "search": query.search,
         "plugin": query.plugin or "",
@@ -895,6 +904,25 @@ def link_view(
         ),
         "reset_url": _link_url(base, LinkQuery(), hidden, carry),
     }
+
+
+SELECTION_ACTION = "/downloads/selection"
+"""Where the whole-table form posts. Named once so the template cannot drift."""
+
+
+def _matches_action(
+    base: str, query: LinkQuery, hidden: Container[str], carry: Mapping[str, str]
+) -> str:
+    """Return where "queue every match" posts, filter and all.
+
+    Built from :func:`_link_url` so it is the same query string the links use,
+    minus the page — which match is on which page has nothing to do with a set
+    somebody is queueing whole — and minus the fragment, which a form action
+    would only carry as far as the redirect.
+    """
+    listing = _link_url(base, query, hidden, carry, page=1).removesuffix("#links")
+    _, separator, parameters = listing.partition("?")
+    return f"{base}/downloads{separator}{parameters}"
 
 
 def _downloadable_value(downloadable: bool | None) -> str:
@@ -1327,6 +1355,11 @@ def _link_row(item: LinkItem, *, downloadable: Container[str] = ()) -> dict[str,
     """
     return {
         "url": item.url,
+        # The same link with its fragment dropped, for the checkbox's spoken
+        # label. The key is in the cell beside it either way — a share link is
+        # its key — but a screen reader announcing forty random characters
+        # before every row is not how anybody finds the row they wanted.
+        "spoken_url": strip_fragment(item.url),
         "raw_url": item.raw_url,
         "was_normalized": item.was_normalized,
         "source_url": item.source_url,

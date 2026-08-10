@@ -90,7 +90,10 @@ Vokabular der anderen bekommt (ADR-028).
 Dieselbe Trennung gilt seit Sprint 15 für die Discovery: `CrawlService`
 schreibt, was ein Crawl gefunden hat, und `DiscoveryService` liest es zurück —
 gesucht, gefiltert, sortiert und geblättert. Ein Report ist damit keine Ansicht
-mehr, sondern eine Abfrage: `LinkQuery` hinein, `LinkPage` heraus. Ob ein Link
+mehr, sondern eine Abfrage: `LinkQuery` hinein, `LinkPage` heraus. Dieselbe
+Filtersprache beantwortet eine zweite Frage: `fetchable()` gibt `Matches`
+zurück — die URLs, die der Filter trifft und die hier auch geholt werden
+könnten. Zwei Fragen, ein Vokabular; eine Tabelle ist keine Menge. Ob ein Link
 heruntergeladen werden kann, ist die eine Frage, die keine Datenbankspalte
 beantwortet; sie kommt als Funktion herein, damit dieser Service weder Plugins
 noch Provider kennen muss und eine spätere Frage derselben Form — *„liegt das
@@ -239,7 +242,12 @@ weiß.
 -   `DownloadService` ist die einzige Stelle, die einen Download startet. Die
     Warteschlange entscheidet, welcher Auftrag als Nächstes drankommt und ob der
     Worker ihn nehmen darf — mehr nicht. Eine zweite Downloadlogik gibt es
-    nicht, und eine Mehrfachauswahl ist keine.
+    nicht, und eine Mehrfachauswahl ist keine: sie löst eine Auswahl in URLs auf
+    und legt sie in dieselbe Warteschlange (ADR-034).
+-   Eine Menge von Links wird bevorzugt *beschrieben* statt *aufgezählt*. „Alles
+    was dieser Filter trifft" schickt die Abfrage und lässt den Server auflösen;
+    nur angehakte Zeilen schicken URLs. Wo Elemente Zugangsdaten tragen, ist die
+    beschreibende Form immer auch die sicherere.
 -   Der Entschlüsselungsschlüssel eines Shares lebt in genau einem privaten
     Wörterbuch der Warteschlange. Kein Snapshot, keine Seite, kein Event-Frame
     und keine Weiterleitung trägt ihn; `tests/test_api_secret_confinement.py`
