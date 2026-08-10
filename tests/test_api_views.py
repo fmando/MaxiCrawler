@@ -29,7 +29,7 @@ from maxicrawler.api.views import (
     link_rows,
     link_view,
     page_rows,
-    page_table,
+    page_view,
     plugin_shares,
     progress_view,
     report_view,
@@ -48,7 +48,10 @@ from maxicrawler.app import (
     LinkPage,
     LinkQuery,
     LinkSort,
+    PageQuery,
+    PageState,
     TargetKind,
+    browse_pages,
     target_of,
 )
 from maxicrawler.crawler import DiscoverySummary, PluginUsage
@@ -383,7 +386,7 @@ def test_pages_become_rows_in_the_order_they_were_reached() -> None:
         ),
     )
 
-    rows = page_rows(make_report(pages=pages))
+    rows = page_rows(pages)
 
     assert [row["url"] for row in rows] == ["https://example.test/", "https://example.test/a"]
     assert [row["depth"] for row in rows] == [0, 1]
@@ -392,7 +395,7 @@ def test_pages_become_rows_in_the_order_they_were_reached() -> None:
 def test_a_failed_page_says_so_without_a_status() -> None:
     pages = (PageOutcome(url="https://example.test/gone", depth=1, error="HTTP 404"),)
 
-    (row,) = page_rows(make_report(pages=pages))
+    (row,) = page_rows(pages)
 
     assert row["status_label"] == "err"
     assert row["succeeded"] is False
@@ -409,44 +412,114 @@ def test_a_redirected_page_carries_both_urls() -> None:
         ),
     )
 
-    (row,) = page_rows(make_report(pages=pages))
+    (row,) = page_rows(pages)
 
     assert row["was_redirected"] is True
     assert row["final_url"] == "https://example.test/new"
 
 
-def test_the_page_table_can_be_limited() -> None:
-    pages = tuple(
-        PageOutcome(url=f"https://example.test/{index}", depth=1, status=200) for index in range(10)
-    )
-
-    assert len(page_rows(make_report(pages=pages), limit=3)) == 3
-
-
 def test_a_crawl_with_no_pages_yields_no_rows() -> None:
-    assert page_rows(make_report()) == ()
+    assert page_rows(()) == ()
 
 
-def test_the_page_table_says_how_many_it_left_out() -> None:
-    pages = tuple(
-        PageOutcome(url=f"https://example.test/{index}", depth=1, status=200) for index in range(12)
+def make_pages(count: int, *, failed: int = 0) -> tuple[PageOutcome, ...]:
+    """Return *count* page outcomes, the last *failed* of them broken."""
+    return tuple(
+        PageOutcome(
+            url=f"https://example.test/{index}",
+            depth=1,
+            status=None if index >= count - failed else 200,
+            error="HTTP 404" if index >= count - failed else None,
+        )
+        for index in range(count)
     )
 
-    table = page_table(make_report(pages=pages), limit=5)
 
-    assert len(table["rows"]) == 5
-    assert table["total"] == "12"
-    assert table["hidden"] == "7"
-    assert table["has_hidden"] is True
+def make_page_view(
+    pages: tuple[PageOutcome, ...],
+    query: PageQuery | None = None,
+    *,
+    carry: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Return the page table as one crawl's report renders it."""
+    return page_view(browse_pages(pages, query), base=BASE, carry=carry or {})
 
 
-def test_a_page_table_that_shows_everything_says_nothing_about_hiding() -> None:
-    pages = (PageOutcome(url="https://example.test/", depth=0, status=200),)
+def test_the_page_table_counts_the_page_against_the_crawl() -> None:
+    view = make_page_view(make_pages(12), PageQuery(per_page=5))
 
-    table = page_table(make_report(pages=pages), limit=5)
+    assert len(view["rows"]) == 5
+    assert view["total"] == "12"
+    assert view["recorded"] == "12"
+    assert view["shown_range"] == "1–5"
+    assert view["pages"] == "3"
 
-    assert table["has_hidden"] is False
-    assert table["hidden"] == "0"
+
+def test_the_page_table_can_be_narrowed_to_the_failures() -> None:
+    view = make_page_view(make_pages(9, failed=2), PageQuery(state=PageState.FAILED))
+
+    assert len(view["rows"]) == 2
+    assert view["total"] == "2"
+    assert view["recorded"] == "9"
+    assert view["is_filtered"] is True
+
+
+def test_the_page_chips_count_the_whole_crawl() -> None:
+    view = make_page_view(make_pages(9, failed=2))
+    chips = {chip["label"]: chip for chip in view["chips"]}
+
+    assert chips["read"]["count"] == "7"
+    assert chips["failed"]["count"] == "2"
+    assert chips["failed"]["tone"] == "bad"
+
+
+def test_a_state_no_page_is_in_is_not_offered() -> None:
+    view = make_page_view(make_pages(3))
+
+    assert [chip["label"] for chip in view["chips"]] == ["read"]
+
+
+def test_the_page_chip_you_are_standing_on_takes_the_filter_off_again() -> None:
+    view = make_page_view(make_pages(9, failed=2), PageQuery(state=PageState.FAILED))
+    chips = {chip["label"]: chip for chip in view["chips"]}
+
+    assert chips["failed"]["active"] is True
+    assert chips["failed"]["url"] == f"{BASE}#pages"
+
+
+def test_the_page_table_leads_back_to_itself() -> None:
+    view = make_page_view(make_pages(9, failed=2))
+
+    assert view["action"] == f"{BASE}#pages"
+    assert all(chip["url"].endswith("#pages") for chip in view["chips"])
+
+
+def test_the_page_table_writes_its_own_parameters() -> None:
+    """Its own, so the link table's survive beside them."""
+    view = make_page_view(make_pages(12), PageQuery(state=PageState.FAILED, per_page=5))
+    chips = {chip["label"]: chip for chip in view["chips"]}
+
+    assert "pstate=" in chips["read"]["url"]
+    assert "state=" not in chips["read"]["url"].replace("pstate=", "")
+
+
+def test_the_page_table_carries_the_link_filter_through_its_own_links() -> None:
+    """Filtering one table must not throw the other table's filter away."""
+    view = make_page_view(make_pages(9, failed=2), carry={"plugin": "mega", "q": "pdf"})
+    chips = {chip["label"]: chip for chip in view["chips"]}
+
+    assert "plugin=mega" in chips["failed"]["url"]
+    assert "q=pdf" in chips["failed"]["url"]
+    assert view["carried"] == (
+        {"name": "plugin", "value": "mega"},
+        {"name": "q", "value": "pdf"},
+    )
+
+
+def test_clearing_the_page_filter_keeps_the_link_filter() -> None:
+    view = make_page_view(make_pages(9, failed=2), carry={"plugin": "mega"})
+
+    assert view["reset_url"] == f"{BASE}?plugin=mega#pages"
 
 
 # --- the link table ----------------------------------------------------------

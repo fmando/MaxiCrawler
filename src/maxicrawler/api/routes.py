@@ -32,6 +32,7 @@ from maxicrawler.api.errors import DownloadBusyError
 from maxicrawler.api.jobs import DEFAULT_RETAINED_JOBS, CrawlJob, CrawlJobs
 from maxicrawler.app import (
     DEFAULT_LINKS_PER_PAGE,
+    DEFAULT_PAGES_PER_PAGE,
     DEFAULT_PER_PAGE,
     DiscoveryService,
     LibraryQuery,
@@ -39,12 +40,16 @@ from maxicrawler.app import (
     LibrarySort,
     LinkQuery,
     LinkSort,
+    PageQuery,
+    PageState,
     StoredPayload,
     TargetKind,
+    browse_pages,
     crawl_document,
 )
 from maxicrawler.app.viewing import DOWNLOAD_CONTENT_TYPE
 from maxicrawler.domain import DownloadStatus
+from maxicrawler.web.report import CrawlReport
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 """Where the pages live. Beside the code, so an installed wheel carries them."""
@@ -206,7 +211,7 @@ async def crawl_detail(request: Request) -> Response:
     report = job.report
     if report is not None:
         context["report"] = views.report_view(report)
-        context["pages"] = views.page_table(report)
+        context["pages"] = _page_table(request, report)
         context["links"] = _link_table(
             request, report.session.session_id, discovered=report.summary.unique_urls
         )
@@ -608,7 +613,51 @@ def _link_table(request: Request, session_id: str, *, discovered: int) -> dict[s
     default listing is a better answer to a stale one than a refusal.
     """
     page = discovery_of(request).browse(session_id, _link_query(request), discovered=discovered)
-    return views.link_view(page, base=f"/crawls/{session_id}", hidden=_hidden_columns(request))
+    return views.link_view(
+        page,
+        base=f"/crawls/{session_id}",
+        hidden=_hidden_columns(request),
+        carry=_carry(request, views.LINK_PARAMS),
+    )
+
+
+def _page_table(request: Request, report: CrawlReport) -> dict[str, Any]:
+    """Return the table of pages the crawl reached, as the query string asks.
+
+    Read from the report rather than from a database, because per-page outcomes
+    are not written down: what this shows exists only while the process that ran
+    the crawl is alive. Which is also why the page of a crawl only the database
+    remembers has no such table, and says so instead.
+    """
+    return views.page_view(
+        browse_pages(report.pages, _page_query(request)),
+        base=f"/crawls/{report.session.session_id}",
+        carry=_carry(request, views.PAGE_PARAMS),
+    )
+
+
+def _page_query(request: Request) -> PageQuery:
+    """Return the page-table query this request asks for."""
+    values = request.query_params
+    return PageQuery(
+        search=values.get("pq", "").strip(),
+        state=PageState.parse(values.get("pstate")),
+        page=_positive(values.get("ppage"), default=1),
+        per_page=DEFAULT_PAGES_PER_PAGE,
+    )
+
+
+def _carry(request: Request, owned: frozenset[str]) -> dict[str, str]:
+    """Return the query parameters that are not *owned* by the table asking.
+
+    Both tables of a report live on one URL, so each builds its links from its
+    own parameters *plus* whatever the other left there. Without this, filtering
+    the pages would quietly discard the link filter on screen — and a filter
+    that undoes another filter is one nobody keeps using.
+    """
+    return {
+        name: value for name, value in request.query_params.items() if name not in owned and value
+    }
 
 
 def _link_query(request: Request) -> LinkQuery:

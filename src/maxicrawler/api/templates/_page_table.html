@@ -1,52 +1,98 @@
 {#
   Every page the crawl reached, in the order it reached them.
 
-  A partial, like every table here, so a later "failures only" filter is a
-  request for this fragment rather than a second rendering in JavaScript.
+  Never reordered, and that is the one difference from the link table below:
+  the order a crawl walked a site in is information -- it is how a reader sees
+  that the failures all began after the twentieth page -- and no column heading
+  would show it.
+
+  The filter travels in its own query parameters (`pq`, `pstate`, `ppage`), so
+  filtering the pages leaves the link table's own filter exactly as it was. The
+  hidden fields below are what carry it across a submit.
 #}
 <section class="panel" id="pages">
   <h2>
     Pages
-    <span class="count">{{ pages.total }}</span>
+    <span class="count">
+      {% if pages.is_filtered %}{{ pages.total }} of {{ pages.recorded }}{% else %}{{ pages.recorded }}{% endif %}
+    </span>
   </h2>
 
-  {% if pages.rows %}
-    <table class="grid">
-      <thead>
-        <tr>
-          <th class="right">Status</th>
-          <th class="right">Depth</th>
-          <th>URL</th>
-          <th>Title</th>
-          <th class="right">Links</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for page in pages.rows %}
-          <tr>
-            <td class="right num{% if not page.succeeded %} bad-text{% endif %}">{{ page.status_label }}</td>
-            <td class="right num muted">{{ page.depth }}</td>
-            <td class="url">
-              {{ page.url }}
-              {% if page.was_redirected %}
-                <div class="muted small">→ {{ page.final_url }}</div>
-              {% endif %}
-              {% if page.error %}
-                <div class="bad-text small">{{ page.error }}</div>
-              {% endif %}
-            </td>
-            <td>{{ page.title or "" }}</td>
-            <td class="right num">{{ page.link_count }}</td>
-          </tr>
+  {% if pages.has_any %}
+    <form class="filters" method="get" action="{{ pages.action }}">
+      <label class="wide">
+        <span>Search</span>
+        <input type="search" name="pq" value="{{ pages.search }}" placeholder="URL or title"
+               autocomplete="off" spellcheck="false">
+      </label>
+
+      <input type="hidden" name="pstate" value="{{ pages.state }}">
+      {% for field in pages.carried %}
+        <input type="hidden" name="{{ field.name }}" value="{{ field.value }}">
+      {% endfor %}
+
+      <button type="submit">Filter</button>
+      {% if pages.is_filtered %}<a class="aside" href="{{ pages.reset_url }}">Clear</a>{% endif %}
+    </form>
+
+    {% if pages.chips %}
+      <div class="chips">
+        <span class="chips-heading">Show</span>
+        {% for chip in pages.chips %}
+          <a class="chip{% if chip.active %} active{% endif %}{% if chip.tone %} {{ chip.tone }}{% endif %}"
+             href="{{ chip.url }}">
+            {{ chip.label }} <span class="num">{{ chip.count }}</span>
+          </a>
         {% endfor %}
-      </tbody>
-    </table>
-    {% if pages.has_hidden %}
-      <p class="empty">
-        {{ pages.hidden }} more pages are not shown here.
-        They are all in <a href="{{ report.json_url }}">the JSON report</a>.
-      </p>
+      </div>
     {% endif %}
+  {% endif %}
+
+  {% if pages.has_rows %}
+    <div class="scroller">
+      <table class="grid sticky">
+        <thead>
+          <tr>
+            <th class="right">Status</th>
+            <th class="right">Depth</th>
+            <th>URL</th>
+            <th>Title</th>
+            <th class="right">Links</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for page in pages.rows %}
+            <tr>
+              <td class="right num{% if not page.succeeded %} bad-text{% endif %}">{{ page.status_label }}</td>
+              <td class="right num muted">{{ page.depth }}</td>
+              <td class="url">
+                {{ page.url }}
+                {% if page.was_redirected %}
+                  <div class="muted small">→ {{ page.final_url }}</div>
+                {% endif %}
+                {% if page.error %}
+                  <div class="bad-text small">{{ page.error }}</div>
+                {% endif %}
+              </td>
+              <td>{{ page.title or "" }}</td>
+              <td class="right num">{{ page.link_count }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <p class="paging">
+      <span class="muted">{{ pages.shown_range }} of {{ pages.total }}</span>
+      {% if pages.previous_url %}<a href="{{ pages.previous_url }}">← previous</a>{% endif %}
+      <span class="muted">page {{ pages.page }} of {{ pages.pages }}</span>
+      {% if pages.next_url %}<a href="{{ pages.next_url }}">next →</a>{% endif %}
+    </p>
+  {% elif pages.is_filtered %}
+    <p class="empty">
+      Nothing matches that. <a href="{{ pages.reset_url }}">Show everything</a> —
+      this crawl reached {{ pages.recorded }} pages.
+    </p>
   {% else %}
     <p class="empty">No pages were read.</p>
   {% endif %}

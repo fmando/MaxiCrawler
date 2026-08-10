@@ -62,6 +62,12 @@
       <input type="hidden" name="dir" value="{{ links.direction }}">
       <input type="hidden" name="hide" value="{{ links.hide_value }}">
 
+      {# What the page table above left in the query string, carried across the
+         submit so filtering the links does not undo the filter on that one. #}
+      {% for field in links.carried %}
+        <input type="hidden" name="{{ field.name }}" value="{{ field.value }}">
+      {% endfor %}
+
       <button type="submit">Filter</button>
       {% if links.is_filtered %}<a class="aside" href="{{ links.reset_url }}">Clear</a>{% endif %}
     </form>

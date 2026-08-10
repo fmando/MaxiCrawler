@@ -978,6 +978,62 @@ def test_the_url_column_survives_being_asked_to_go(tmp_path: Path) -> None:
     assert MEGA_LINK.split("#")[0] in body.split("Discovered links", 1)[1]
 
 
+def test_the_page_table_can_be_narrowed_to_the_failures(tmp_path: Path) -> None:
+    site = Site()
+    site.add_html("/", '<a href="/a">a</a><a href="/gone">gone</a>')
+    site.add_html("/a", "<title>Second</title><p>x</p>")
+
+    with recording_client(tmp_path) as test_client, serve(site) as base:
+        body = finished_report(test_client, base, pstate="failed")
+
+    pages = body.split("Discovered links", 1)[0]
+
+    assert "/gone" in pages
+    assert f"{base}/a" not in pages
+
+
+def test_the_page_table_can_be_searched(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = finished_report(test_client, base, pq="Second")
+
+    pages = body.split("Discovered links", 1)[0]
+
+    assert f"{base}/a" in pages
+    assert ">1–1 of 1<" in pages.replace("\n", "").replace("  ", "")
+
+
+def test_filtering_the_pages_leaves_the_link_filter_alone(tmp_path: Path) -> None:
+    """Two tables on one URL, and neither may throw the other's question away."""
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = finished_report(test_client, base, plugin="mega", pstate="succeeded")
+
+    links = body.split("Discovered links", 1)[1]
+    pages = body.split("Discovered links", 1)[0]
+
+    assert ">generic</td>" not in links  # the link filter still applies
+    assert "200" in pages  # and the page filter applies too
+    assert 'name="plugin" value="mega"' in links
+
+
+def test_the_page_filter_carries_the_link_filter_in_its_own_links(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = finished_report(test_client, base, plugin="mega")
+
+    pages = body.split("Discovered links", 1)[0]
+
+    assert "plugin=mega" in pages
+
+
+def test_an_unrecognised_page_filter_shows_everything(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        response = test_client.get(f"/crawls/{job_id}", params={"pstate": "sideways"})
+
+    assert response.status_code == 200
+    assert f"{base}/a" in response.text
+
+
 def test_a_finished_crawl_offers_no_stop_button(tmp_path: Path) -> None:
     with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
         body = wait_until_finished(test_client, start(test_client, base))

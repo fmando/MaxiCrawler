@@ -587,6 +587,8 @@ footer {
 .chip .num { font-family: var(--mono); color: var(--muted); margin-left: 4px; }
 .chip.active { color: var(--text); border-color: var(--accent); }
 .chip.active .num { color: var(--text); }
+/* The one chip whose count is bad news rather than merely a number. */
+.chip.bad .num { color: var(--bad); }
 /* The column that cannot be turned off. Present, so its absence is not a bug. */
 .chip.fixed { opacity: 0.5; }
 

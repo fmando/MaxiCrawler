@@ -54,6 +54,16 @@ from maxicrawler.app.library import (
     LibrarySort,
     StoredPayload,
 )
+from maxicrawler.app.reports import (
+    DEFAULT_PAGES_PER_PAGE,
+    MAX_PAGES_PER_PAGE,
+    PageCounts,
+    PageQuery,
+    PageSlice,
+    PageState,
+    browse_pages,
+    count_pages,
+)
 from maxicrawler.app.serialization import crawl_document, page_document
 from maxicrawler.app.targets import TARGETS, TargetKind, target_of
 from maxicrawler.app.viewing import DEFAULT_MAX_VIEW_BYTES, Display, MediaVerdict, verdict_for
@@ -61,8 +71,10 @@ from maxicrawler.app.viewing import DEFAULT_MAX_VIEW_BYTES, Display, MediaVerdic
 __all__ = [
     "DEFAULT_LINKS_PER_PAGE",
     "DEFAULT_MAX_VIEW_BYTES",
+    "DEFAULT_PAGES_PER_PAGE",
     "DEFAULT_PER_PAGE",
     "MAX_LINKS_PER_PAGE",
+    "MAX_PAGES_PER_PAGE",
     "MAX_PER_PAGE",
     "TARGETS",
     "UNRESOLVED",
@@ -84,9 +96,15 @@ __all__ = [
     "LinkQuery",
     "LinkSort",
     "MediaVerdict",
+    "PageCounts",
+    "PageQuery",
+    "PageSlice",
+    "PageState",
     "ProgressListener",
     "StoredPayload",
     "TargetKind",
+    "browse_pages",
+    "count_pages",
     "crawl_document",
     "page_document",
     "target_of",

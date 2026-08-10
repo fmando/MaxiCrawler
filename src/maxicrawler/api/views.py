@@ -16,9 +16,10 @@ limit" on its own line, while a page shows a short badge. Sharing the *numbers*
 is what matters, and those come from the same report either way.
 """
 
-from collections.abc import Container, Iterable
+from collections.abc import Container, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlencode
 
@@ -35,6 +36,9 @@ from maxicrawler.app import (
     LinkPage,
     LinkQuery,
     LinkSort,
+    PageQuery,
+    PageSlice,
+    PageState,
     StoredPayload,
     TargetKind,
 )
@@ -56,9 +60,6 @@ Not a :class:`~maxicrawler.web.session.CrawlState`, because nothing ever
 process is behind it. The engine cannot write it, since a process that is being
 killed does not get to update a row on its way out.
 """
-
-MAX_LISTED_PAGES = 200
-"""How many pages a report lists before saying how many it left out."""
 
 STATE_LABELS: dict[CrawlState, str] = {
     CrawlState.PENDING: "queued",
@@ -556,15 +557,93 @@ def report_view(report: CrawlReport) -> dict[str, Any]:
     }
 
 
-def page_table(report: CrawlReport, *, limit: int = MAX_LISTED_PAGES) -> dict[str, Any]:
-    """Return the page table, and an honest count of what it left out."""
-    total = len(report.pages)
+PAGE_STATE_LABELS: dict[PageState, str] = {
+    PageState.SUCCEEDED: "read",
+    PageState.FAILED: "failed",
+    PageState.REDIRECTED: "redirected",
+}
+"""What each state of a crawled page is called on a page.
+
+"read" rather than "succeeded", because the counter above the table has said
+"Pages read" since the first version of this report and two words for one
+number is how a reader starts wondering whether they are two numbers.
+"""
+
+PAGE_PARAMS = frozenset({"pq", "pstate", "ppage"})
+"""Which query parameters the page table owns.
+
+Both tables live on one URL, so each has to know which parameters are not its
+own — and carry them through untouched. Without that, filtering the pages would
+silently throw away the link filter you were looking at, which is the kind of
+thing that teaches somebody to stop using the filters.
+"""
+
+
+def page_view(
+    slice: PageSlice, *, base: str, carry: Mapping[str, str] = MappingProxyType({})
+) -> dict[str, Any]:
+    """Return the page table, its filter, its chips and its paging.
+
+    The same shape as :func:`link_view` and for the same reasons; what differs
+    is that these records were never written down, so there is no order to
+    choose and no column to hide. The order a crawl reached its pages in is the
+    only one that means anything.
+    """
+    query = slice.query
     return {
-        "rows": page_rows(report, limit=limit),
-        "total": format_number(total),
-        "hidden": format_number(max(0, total - limit)),
-        "has_hidden": total > limit,
+        "rows": page_rows(slice.items),
+        "total": format_number(slice.total),
+        "recorded": format_number(slice.recorded),
+        "has_rows": bool(slice.items),
+        "has_any": slice.recorded > 0,
+        "is_filtered": query.is_filtered,
+        "action": f"{base}#pages",
+        "search": query.search,
+        "state": "" if query.state is None else str(query.state),
+        "chips": tuple(
+            {
+                "label": PAGE_STATE_LABELS[state],
+                "count": format_number(slice.counts.of(state)),
+                "active": query.state is state,
+                "tone": "bad" if state is PageState.FAILED else "",
+                "url": _page_url(
+                    base,
+                    query,
+                    carry,
+                    state=None if query.state is state else state,
+                    page=1,
+                ),
+            }
+            for state in PageState
+            if slice.counts.of(state)
+        ),
+        "carried": tuple({"name": name, "value": value} for name, value in sorted(carry.items())),
+        "page": format_number(slice.page),
+        "pages": format_number(slice.pages),
+        "shown_range": f"{format_number(slice.first)}–{format_number(slice.last)}",
+        "previous_url": (
+            _page_url(base, query, carry, page=slice.page - 1) if slice.has_previous else None
+        ),
+        "next_url": _page_url(base, query, carry, page=slice.page + 1) if slice.has_next else None,
+        "reset_url": _page_url(base, PageQuery(), carry),
     }
+
+
+def _page_url(base: str, query: PageQuery, carry: Mapping[str, str], **changes: Any) -> str:
+    """Return the report URL for the page table's *query* with *changes* applied.
+
+    *carry* is every parameter this table does not own, written back unchanged.
+    """
+    state = changes.get("state", query.state)
+    values = {
+        "pq": changes.get("search", query.search),
+        "pstate": "" if state is None else str(state),
+        "ppage": str(changes.get("page", query.page)),
+    }
+    if values["ppage"] == "1":
+        del values["ppage"]
+    written = {**carry, **{name: value for name, value in values.items() if value}}
+    return f"{base}?{urlencode(written)}#pages" if written else f"{base}#pages"
 
 
 @dataclass(frozen=True, slots=True)
@@ -633,7 +712,19 @@ DOWNLOADABLE_CHOICES: tuple[tuple[str, str], ...] = (
 )
 
 
-def link_view(page: LinkPage, *, base: str, hidden: Container[str] = ()) -> dict[str, Any]:
+LINK_PARAMS = frozenset(
+    {"q", "plugin", "category", "target", "dl", "norm", "sort", "dir", "page", "hide"}
+)
+"""Which query parameters the link table owns; see :data:`PAGE_PARAMS`."""
+
+
+def link_view(
+    page: LinkPage,
+    *,
+    base: str,
+    hidden: Container[str] = (),
+    carry: Mapping[str, str] = MappingProxyType({}),
+) -> dict[str, Any]:
     """Return the link table, its filters, its facets and its paging.
 
     Everything that decides *which* URLs these are was decided by
@@ -655,12 +746,13 @@ def link_view(page: LinkPage, *, base: str, hidden: Container[str] = ()) -> dict
         "rows": rows,
         "shown": shown,
         "headers": tuple(
-            _link_header(column, query, base=base, hidden=hidden)
+            _link_header(column, query, base=base, hidden=hidden, carry=carry)
             for column in LINK_COLUMNS
             if column.name in shown
         ),
         "toggles": tuple(
-            _link_toggle(column, query, base=base, hidden=hidden) for column in LINK_COLUMNS
+            _link_toggle(column, query, base=base, hidden=hidden, carry=carry)
+            for column in LINK_COLUMNS
         ),
         "total": format_number(page.total),
         "recorded": format_number(page.recorded),
@@ -693,15 +785,18 @@ def link_view(page: LinkPage, *, base: str, hidden: Container[str] = ()) -> dict
         # the order and the columns you had chosen instead of resetting them.
         "direction": "desc" if query.descending else "asc",
         "hide_value": _hide_value(hidden),
-        "facets": _link_facets(page, base=base, hidden=hidden),
+        "facets": _link_facets(page, base=base, hidden=hidden, carry=carry),
+        "carried": tuple({"name": name, "value": value} for name, value in sorted(carry.items())),
         "page": format_number(page.page),
         "pages": format_number(page.pages),
         "shown_range": f"{format_number(page.first)}–{format_number(page.last)}",
         "previous_url": (
-            _link_url(base, query, hidden, page=page.page - 1) if page.has_previous else None
+            _link_url(base, query, hidden, carry, page=page.page - 1) if page.has_previous else None
         ),
-        "next_url": _link_url(base, query, hidden, page=page.page + 1) if page.has_next else None,
-        "reset_url": _link_url(base, LinkQuery(), hidden),
+        "next_url": (
+            _link_url(base, query, hidden, carry, page=page.page + 1) if page.has_next else None
+        ),
+        "reset_url": _link_url(base, LinkQuery(), hidden, carry),
     }
 
 
@@ -713,7 +808,12 @@ def _downloadable_value(downloadable: bool | None) -> str:
 
 
 def _link_header(
-    column: LinkColumn, query: LinkQuery, *, base: str, hidden: Container[str]
+    column: LinkColumn,
+    query: LinkQuery,
+    *,
+    base: str,
+    hidden: Container[str],
+    carry: Mapping[str, str],
 ) -> dict[str, Any]:
     """Return one column heading, and the link that reorders by it.
 
@@ -735,14 +835,19 @@ def _link_header(
     return {
         "label": column.label,
         "name": column.name,
-        "url": _link_url(base, query, hidden, sort=sort, descending=descending, page=1),
+        "url": _link_url(base, query, hidden, carry, sort=sort, descending=descending, page=1),
         "active": active,
         "mark": SORT_MARKS[query.descending] if active else "",
     }
 
 
 def _link_toggle(
-    column: LinkColumn, query: LinkQuery, *, base: str, hidden: Container[str]
+    column: LinkColumn,
+    query: LinkQuery,
+    *,
+    base: str,
+    hidden: Container[str],
+    carry: Mapping[str, str],
 ) -> dict[str, Any]:
     """Return the link that shows or hides one column.
 
@@ -764,7 +869,7 @@ def _link_toggle(
         "name": column.name,
         "shown": is_shown,
         "required": required,
-        "url": None if required else _link_url(base, query, frozenset(now_hidden)),
+        "url": None if required else _link_url(base, query, frozenset(now_hidden), carry),
     }
 
 
@@ -774,7 +879,7 @@ def _column_names() -> tuple[str, ...]:
 
 
 def _link_facets(
-    page: LinkPage, *, base: str, hidden: Container[str]
+    page: LinkPage, *, base: str, hidden: Container[str], carry: Mapping[str, str]
 ) -> tuple[dict[str, Any], ...]:
     """Return the chip rows that filter by one value in one click.
 
@@ -811,6 +916,7 @@ def _link_facets(
                             base,
                             query,
                             hidden,
+                            carry,
                             page=1,
                             **{name: None if facet.value == active else facet.value},
                         ),
@@ -827,7 +933,13 @@ def _hide_value(hidden: Container[str]) -> str:
     return ",".join(name for name in _column_names() if name in hidden)
 
 
-def _link_url(base: str, query: LinkQuery, hidden: Container[str], **changes: Any) -> str:
+def _link_url(
+    base: str,
+    query: LinkQuery,
+    hidden: Container[str],
+    carry: Mapping[str, str] = MappingProxyType({}),
+    **changes: Any,
+) -> str:
     """Return the report URL for *query* with *changes* applied.
 
     Only what differs from the default is written, so an untouched report is
@@ -856,7 +968,7 @@ def _link_url(base: str, query: LinkQuery, hidden: Container[str], **changes: An
         del values["dir"]
     if values.get("page") == "1":
         del values["page"]
-    written = {name: value for name, value in values.items() if value}
+    written = {**carry, **{name: value for name, value in values.items() if value}}
     return f"{base}?{urlencode(written)}#links" if written else f"{base}#links"
 
 
@@ -1081,9 +1193,8 @@ def _toml_bool(value: bool) -> str:
     return "true" if value else "false"
 
 
-def page_rows(report: CrawlReport, *, limit: int | None = None) -> tuple[dict[str, Any], ...]:
+def page_rows(pages: Iterable[PageOutcome]) -> tuple[dict[str, Any], ...]:
     """Return one row per page the crawl reached, in the order it reached them."""
-    pages = report.pages if limit is None else report.pages[:limit]
     return tuple(_page_row(page) for page in pages)
 
 
