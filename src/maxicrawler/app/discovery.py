@@ -41,6 +41,7 @@ from enum import StrEnum
 from math import ceil
 from typing import Any
 
+from maxicrawler.app.targets import TargetKind, target_of
 from maxicrawler.config import Settings
 from maxicrawler.database import SQLiteDatabase, SQLiteDiscoveryRepository, StoredUrl
 from maxicrawler.plugins.generic import GENERIC_PLUGIN_NAME
@@ -122,6 +123,13 @@ class LinkItem:
     source_url: str | None
     plugin: str | None
     category: str | None
+    target: TargetKind
+    """What the URL says it points at; see :mod:`maxicrawler.app.targets`.
+
+    Computed once when the row is read rather than on demand, because filtering
+    and counting both ask every item for it and the answer cannot change.
+    """
+
     position: int
     """Where in the crawl's discovery order this URL arrived, counting from zero.
 
@@ -172,6 +180,9 @@ class LinkQuery:
     """A plugin name, or :data:`UNRESOLVED` for the URLs nothing claimed."""
 
     category: str | None = None
+    target: TargetKind | None = None
+    """What the URL points at — the documents, the images, the archives."""
+
     downloadable: bool | None = None
     """``True`` for only what can be fetched, ``False`` for only what cannot."""
 
@@ -196,6 +207,7 @@ class LinkQuery:
         return bool(self.search) or (
             self.plugin is not None
             or self.category is not None
+            or self.target is not None
             or self.downloadable is not None
             or self.normalized_only
         )
@@ -225,6 +237,7 @@ class LinkPage:
     pages: int
     plugins: tuple[LinkFacet, ...] = ()
     categories: tuple[LinkFacet, ...] = ()
+    targets: tuple[LinkFacet, ...] = ()
     """What is present in the whole crawl, whatever the query asked for.
 
     Counted over every recorded URL rather than over the matches, the same way
@@ -344,6 +357,7 @@ class DiscoveryService:
             pages=pages,
             plugins=_plugin_facets(recorded),
             categories=_category_facets(recorded),
+            targets=_target_facets(recorded),
             # Already known when the filter forced the whole candidate set to be
             # resolved; asked only about this page when it did not.
             downloadable=(
@@ -384,6 +398,7 @@ def _item(stored: StoredUrl, position: int) -> LinkItem:
         source_url=record.source_url,
         plugin=stored.plugin_name,
         category=stored.category,
+        target=target_of(record.normalized_url),
         position=position,
     )
 
@@ -397,6 +412,8 @@ def _matches(item: LinkItem, query: LinkQuery) -> bool:
     if query.plugin is not None and item.facet != query.plugin:
         return False
     if query.category is not None and (item.category or "") != query.category:
+        return False
+    if query.target is not None and item.target is not query.target:
         return False
     if query.normalized_only and not item.was_normalized:
         return False
@@ -471,3 +488,22 @@ def _category_facets(items: Iterable[LinkItem]) -> tuple[LinkFacet, ...]:
             counts[item.category] = counts.get(item.category, 0) + 1
     ordered = sorted(counts.items(), key=lambda entry: (-entry[1], entry[0]))
     return tuple(LinkFacet(value=value, count=count) for value, count in ordered)
+
+
+def _target_facets(items: Iterable[LinkItem]) -> tuple[LinkFacet, ...]:
+    """Return what these URLs point at, in the order the kinds are declared.
+
+    Enum order rather than by count, the way a crawl report already lists its
+    link kinds. Frequency would put "unknown" first on every crawl of every
+    site, because most URLs name no suffix — and a list whose first entry is
+    always the same word is not a list anybody reads.
+
+    Kinds that are not present are left out. A filter for "no images here" can
+    only disappoint.
+    """
+    counts: dict[TargetKind, int] = {}
+    for item in items:
+        counts[item.target] = counts.get(item.target, 0) + 1
+    return tuple(
+        LinkFacet(value=str(kind), count=counts[kind]) for kind in TargetKind if counts.get(kind)
+    )

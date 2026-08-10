@@ -55,6 +55,7 @@ from maxicrawler.app.library import (
     StoredPayload,
 )
 from maxicrawler.app.serialization import crawl_document, page_document
+from maxicrawler.app.targets import TARGETS, TargetKind, target_of
 from maxicrawler.app.viewing import DEFAULT_MAX_VIEW_BYTES, Display, MediaVerdict, verdict_for
 
 __all__ = [
@@ -63,6 +64,7 @@ __all__ = [
     "DEFAULT_PER_PAGE",
     "MAX_LINKS_PER_PAGE",
     "MAX_PER_PAGE",
+    "TARGETS",
     "UNRESOLVED",
     "CrawlService",
     "DiscoveryService",
@@ -84,7 +86,9 @@ __all__ = [
     "MediaVerdict",
     "ProgressListener",
     "StoredPayload",
+    "TargetKind",
     "crawl_document",
     "page_document",
+    "target_of",
     "verdict_for",
 ]

@@ -44,6 +44,8 @@ from maxicrawler.app import (
     LinkItem,
     LinkPage,
     LinkQuery,
+    TargetKind,
+    target_of,
 )
 from maxicrawler.crawler import DiscoverySummary, PluginUsage
 from maxicrawler.domain import DownloadStatus, ScanSession, Statistics
@@ -456,6 +458,7 @@ def make_link(
         source_url="https://example.test/",
         plugin=plugin,
         category=category,
+        target=target_of(url),
         position=position,
     )
 
@@ -519,6 +522,7 @@ def test_a_normalized_link_keeps_what_was_written() -> None:
         source_url=None,
         plugin="generic",
         category=None,
+        target=TargetKind.UNKNOWN,
         position=0,
     )
 

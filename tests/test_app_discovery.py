@@ -18,6 +18,7 @@ from maxicrawler.app import (
     DiscoveryService,
     LinkQuery,
     LinkSort,
+    TargetKind,
 )
 from maxicrawler.config import Settings
 from maxicrawler.database import StoredUrl
@@ -234,6 +235,38 @@ def test_only_the_urls_a_provider_could_fetch() -> None:
     ]
 
 
+def test_filtering_by_what_a_url_points_at() -> None:
+    rows = [
+        make_url("https://example.test/report.pdf"),
+        make_url("https://example.test/photo.jpg"),
+        make_url("https://example.test/articles/holiday"),
+    ]
+    service = make_service(rows)
+
+    assert urls_of(service.browse(SESSION, LinkQuery(target=TargetKind.DOCUMENT))) == [
+        "https://example.test/report.pdf"
+    ]
+    assert urls_of(service.browse(SESSION, LinkQuery(target=TargetKind.IMAGE))) == [
+        "https://example.test/photo.jpg"
+    ]
+    assert urls_of(service.browse(SESSION, LinkQuery(target=TargetKind.UNKNOWN))) == [
+        "https://example.test/articles/holiday"
+    ]
+
+
+def test_an_item_carries_what_it_points_at() -> None:
+    (item,) = make_service([make_url("https://example.test/a.zip")]).links(SESSION)
+
+    assert item.target is TargetKind.ARCHIVE
+
+
+def test_a_share_link_is_classified_by_its_path_and_not_by_its_key() -> None:
+    """The fragment is a credential; it must never decide anything visible."""
+    (item,) = make_service([make_url(MEGA_LINK)]).links(SESSION)
+
+    assert item.target is TargetKind.UNKNOWN
+
+
 def test_the_nearest_thing_to_a_duplicate_filter_is_what_normalization_changed() -> None:
     rows = [
         make_url("https://example.test/a", raw_url="https://EXAMPLE.test/a"),
@@ -262,6 +295,7 @@ def test_an_unfiltered_query_says_so() -> None:
     assert LinkQuery(search="a").is_filtered is True
     assert LinkQuery(downloadable=False).is_filtered is True
     assert LinkQuery(normalized_only=True).is_filtered is True
+    assert LinkQuery(target=TargetKind.IMAGE).is_filtered is True
 
 
 # --- paging ------------------------------------------------------------------
@@ -371,6 +405,30 @@ def test_categories_are_counted_most_frequent_first() -> None:
     page = make_service(rows).browse(SESSION)
 
     assert [(facet.value, facet.count) for facet in page.categories] == [("page", 2), ("share", 1)]
+
+
+def test_targets_are_counted_in_the_order_the_kinds_are_declared() -> None:
+    """Frequency would put "unknown" first on every crawl of every site."""
+    rows = [
+        make_url("https://example.test/one"),
+        make_url("https://example.test/two"),
+        make_url("https://example.test/a.jpg"),
+        make_url("https://example.test/b.pdf"),
+    ]
+
+    page = make_service(rows).browse(SESSION)
+
+    assert [(facet.value, facet.count) for facet in page.targets] == [
+        ("document", 1),
+        ("image", 1),
+        ("unknown", 2),
+    ]
+
+
+def test_a_kind_nothing_points_at_is_not_offered() -> None:
+    page = make_service([make_url("https://example.test/a.jpg")]).browse(SESSION)
+
+    assert [facet.value for facet in page.targets] == ["image"]
 
 
 def test_a_page_names_which_of_its_own_rows_can_be_fetched() -> None:
