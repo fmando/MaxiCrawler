@@ -494,3 +494,43 @@ footer {
   border-top: 1px solid var(--border);
   font-size: 12px;
 }
+
+/* Where you are, on a page that is one of many. */
+.crumbs {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.crumbs span { color: var(--text); }
+
+/*
+ * The path of a stored file. A field rather than a line of text, because
+ * selecting it is what somebody does with it, and a field selects cleanly.
+ */
+.pathbox { display: flex; align-items: flex-end; gap: 10px; margin-top: 14px; }
+.pathbox label { display: flex; flex-direction: column; gap: 4px; flex: 1 1 auto; }
+.pathbox span {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.pathbox input.path {
+  width: 100%;
+  padding: 6px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+}
+.pathbox button {
+  padding: 7px 14px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+}
+.pathbox button:hover { background: var(--bg); }

@@ -24,7 +24,14 @@ from urllib.parse import urlencode
 
 from maxicrawler.api.downloads import DownloadSnapshot
 from maxicrawler.api.jobs import JobSnapshot
-from maxicrawler.app import LibraryItem, LibraryPage, LibraryQuery, LibrarySort
+from maxicrawler.app import (
+    DownloadSummary,
+    LibraryItem,
+    LibraryPage,
+    LibraryQuery,
+    LibrarySort,
+    StoredPayload,
+)
 from maxicrawler.config import Settings
 from maxicrawler.crawler import PluginUsage
 from maxicrawler.database import StoredCrawl, StoredUrl
@@ -262,7 +269,18 @@ def download_view(snapshot: DownloadSnapshot) -> dict[str, Any]:
         "reason": snapshot.reason,
         "error": snapshot.error,
         "path": None if snapshot.path is None else snapshot.path.as_posix(),
+        # Straight to the file rather than to a list to search through. Absent
+        # when the request turned out to hold several files, which is when the
+        # library itself is the right place to land.
+        "item_url": _item_url(snapshot.summary),
     }
+
+
+def _item_url(summary: DownloadSummary | None) -> str | None:
+    """Return the library page of the one file a download fetched, if it was one."""
+    if summary is None or summary.directory is None or summary.key is None:
+        return None
+    return f"/library/{summary.directory}/{summary.key}"
 
 
 def library_view(page: LibraryPage) -> dict[str, Any]:
@@ -297,6 +315,46 @@ def library_view(page: LibraryPage) -> dict[str, Any]:
         "previous_url": _library_url(query, page=page.page - 1) if page.has_previous else None,
         "next_url": _library_url(query, page=page.page + 1) if page.has_next else None,
         "reset_url": _library_url(LibraryQuery()),
+    }
+
+
+def item_view(item: LibraryItem, payload: StoredPayload | None) -> dict[str, Any]:
+    """Return what one stored file's page shows.
+
+    *payload* is what the service found on disk, and is ``None`` for two very
+    different situations that the page has to tell apart: a download that failed
+    and never wrote a file, and a record claiming a file that has since been
+    deleted or moved. The first is a reason; the second is a repair.
+    """
+    base = f"/library/{item.directory}/{item.key}"
+    return {
+        "name": item.name,
+        "provider": item.provider,
+        "directory": item.directory,
+        "key": item.key,
+        "status": str(item.status),
+        "state_label": STATUS_LABELS[item.status],
+        "state_tone": STATUS_TONES[item.status],
+        "size": format_size(item.size),
+        "filename": item.filename,
+        "downloaded_at": (
+            None if item.downloaded_at is None else format_timestamp(item.downloaded_at)
+        ),
+        "discovered_at": (
+            None if item.discovered_at is None else format_timestamp(item.discovered_at)
+        ),
+        "source_url": item.source_url,
+        "path": None if item.path is None else str(item.path),
+        "checksum": item.checksum,
+        "attempts": format_number(item.attempts),
+        "error": item.error,
+        "library_url": "/library",
+        "file_url": f"{base}/file" if payload is not None else None,
+        "is_stored": payload is not None,
+        # The record says there is a file and there is not: worth its own
+        # sentence, because the answer is to download it again rather than to
+        # wonder what the page means.
+        "payload_missing": payload is None and item.is_stored,
     }
 
 

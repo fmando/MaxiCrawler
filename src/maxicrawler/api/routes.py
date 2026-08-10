@@ -16,7 +16,13 @@ from urllib.parse import parse_qs
 
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
-from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
+from starlette.responses import (
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from starlette.templating import Jinja2Templates
 
 from maxicrawler import __version__
@@ -29,8 +35,10 @@ from maxicrawler.app import (
     LibraryQuery,
     LibraryService,
     LibrarySort,
+    StoredPayload,
     crawl_document,
 )
+from maxicrawler.app.viewing import DOWNLOAD_CONTENT_TYPE
 from maxicrawler.domain import DownloadStatus
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -346,6 +354,64 @@ async def library(request: Request) -> Response:
         },
         section="library",
     )
+
+
+async def library_item(request: Request) -> Response:
+    """Show everything one stored file is known to be.
+
+    Raises:
+        HTTPException: nothing here is addressed by those two names — which
+            covers a key that could not be a directory name, a directory that is
+            not there, and metadata that cannot be read. One answer for all
+            three, because telling them apart would only tell whoever asked
+            which of them they had guessed.
+    """
+    service = library_of(request)
+    item = service.item(request.path_params["provider"], request.path_params["key"])
+    if item is None:
+        raise HTTPException(status_code=404, detail="no such file")
+    payload = service.payload(item.directory, item.key)
+    return page(
+        request,
+        "library_item.html",
+        {"item": views.item_view(item, payload)},
+        section="library",
+    )
+
+
+async def library_file(request: Request) -> Response:
+    """Answer with the stored bytes, as a download.
+
+    Always an attachment and always ``application/octet-stream``: this route
+    states no type, so no browser gets to decide to render what it receives.
+    Showing a file is a different route, with a different answer to that
+    question.
+    """
+    payload = _payload(request)
+    return FileResponse(
+        payload.path,
+        filename=payload.filename,
+        media_type=DOWNLOAD_CONTENT_TYPE,
+        content_disposition_type="attachment",
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
+
+
+def _payload(request: Request) -> StoredPayload:
+    """Return the file this request addresses.
+
+    Raises:
+        HTTPException: there is no such entry, or the record claims a file that
+            is not on disk. The second is the reason this asks the service
+            rather than joining a path: a library is repairable, and a response
+            promising bytes that are gone would not be.
+    """
+    payload = library_of(request).payload(
+        request.path_params["provider"], request.path_params["key"]
+    )
+    if payload is None:
+        raise HTTPException(status_code=404, detail="no such file")
+    return payload
 
 
 def _query(request: Request) -> LibraryQuery:

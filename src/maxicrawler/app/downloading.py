@@ -49,7 +49,7 @@ from maxicrawler.downloader import (
     ResourceIdentity,
     looks_like_url,
 )
-from maxicrawler.library import Library
+from maxicrawler.library import Library, provider_directory, resource_key
 from maxicrawler.plugins import PluginResolver, create_default_registry
 from maxicrawler.providers import (
     ProviderRegistry,
@@ -125,6 +125,15 @@ class DownloadSummary:
     files_failed: int = 0
     path: Path | None = None
     """Where the payload landed, when exactly one resource was transferred."""
+
+    directory: str | None = None
+    key: str | None = None
+    """How the library addresses the one resource this fetched, if it was one.
+
+    Derived from the reference by the same two pure functions that decided the
+    directory names in the first place, so a finished download can link straight
+    to its own page in the library rather than to a list to search through.
+    """
 
     reason: str | None = None
     library_root: Path | None = None
@@ -407,6 +416,8 @@ def _summarize(report: DownloadReport, *, url: str) -> DownloadSummary:
         files_skipped=len(skipped),
         files_failed=len(failed),
         path=None if single is None else single.path,
+        directory=None if single is None else provider_directory(single.job.ref.provider),
+        key=None if single is None else resource_key(single.job.ref),
         reason=_reason(report),
         library_root=report.library_root,
     )

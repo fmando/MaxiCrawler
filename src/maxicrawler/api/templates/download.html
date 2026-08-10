@@ -35,7 +35,12 @@
           ✓ {{ download.state_label }}
           {% if download.path %}<span class="muted small path">{{ download.path }}</span>{% endif %}
         </p>
-        <p><a class="action" href="/library">Open Library</a></p>
+        <p>
+          {% if download.item_url %}
+            <a class="action" href="{{ download.item_url }}">Show the file</a>
+          {% endif %}
+          <a class="action" href="/library">Open Library</a>
+        </p>
       {% elif not download.error %}
         <p class="error">{{ download.reason or "the download did not finish" }}</p>
       {% endif %}

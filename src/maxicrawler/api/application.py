@@ -121,6 +121,18 @@ def create_app(
                 name="download_events",
             ),
             Route("/library", routes.library, methods=["GET"], name="library"),
+            Route(
+                "/library/{provider}/{key}/file",
+                routes.library_file,
+                methods=["GET"],
+                name="library_file",
+            ),
+            Route(
+                "/library/{provider}/{key}",
+                routes.library_item,
+                methods=["GET"],
+                name="library_item",
+            ),
             Route("/settings", routes.settings, methods=["GET"], name="settings"),
             Route("/health", health, methods=["GET"], name="health"),
             Mount(

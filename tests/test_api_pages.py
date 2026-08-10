@@ -1225,3 +1225,127 @@ def test_no_page_loads_anything_from_another_host(tmp_path: Path, path: str) -> 
     for attribute in ("src=", "href="):
         for match in re.findall(rf'{attribute}"([^"]+)"', body):
             assert not match.startswith(("http://", "https://", "//")), match
+
+
+# --- one stored file ---------------------------------------------------------
+
+
+def stored_item(test_client: TestClient) -> str:
+    """Download something and return the path of its library page."""
+    body = finished_download(test_client)
+    match = re.search(r'href="(/library/[a-z0-9-]+/[a-z0-9-]+)"', body)
+    assert match, "a finished download should link to its own page"
+    return match.group(1)
+
+
+def test_a_finished_download_links_straight_to_its_file(tmp_path: Path) -> None:
+    """Landing in a list to search through would be the lesser answer."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        body = finished_download(test_client)
+
+    assert "Show the file" in body
+    assert re.search(r'href="/library/mega/[a-z0-9-]+"', body)
+
+
+def test_the_detail_page_states_what_is_known_about_the_file(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        body = test_client.get(stored_item(test_client)).text
+
+    assert "stub.bin" in body
+    assert ">mega</td>" in body
+    assert "12 B" in body
+    assert "https://mega.nz/file/AaBbCcDd" in body
+    assert "SHA-256" in body
+    assert "completed" in body
+
+
+def test_the_detail_page_shows_the_path_in_a_field_it_can_be_copied_from(
+    tmp_path: Path,
+) -> None:
+    """A `file://` link would be blocked; the server launching Explorer is worse."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        body = test_client.get(stored_item(test_client)).text
+
+    assert 'class="path"' in body
+    assert "readonly" in body
+    assert 'data-copy=".path"' in body
+    assert "file://" not in body
+
+
+def test_the_detail_page_never_shows_a_key(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        body = test_client.get(stored_item(test_client)).text
+
+    assert MEGA_KEY not in body
+
+
+def test_the_detail_page_offers_the_bytes(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        where = stored_item(test_client)
+        body = test_client.get(where).text
+
+        assert f'href="{where}/file"' in body
+        response = test_client.get(f"{where}/file")
+
+    assert response.status_code == 200
+    assert response.content == b"stub payload"
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert "attachment" in response.headers["content-disposition"]
+    assert "stub.bin" in response.headers["content-disposition"]
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_a_download_route_never_invites_a_browser_to_render(tmp_path: Path) -> None:
+    """Whatever the file is, this route says nothing that could be rendered."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        response = test_client.get(f"{stored_item(test_client)}/file")
+
+    assert "html" not in response.headers["content-type"]
+    assert "inline" not in response.headers["content-disposition"]
+
+
+def test_a_file_whose_payload_vanished_is_not_offered(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        where = stored_item(test_client)
+        for payload in (tmp_path / "library").rglob("stub.bin"):
+            payload.unlink()
+
+        body = test_client.get(where).text
+        response = test_client.get(f"{where}/file")
+
+    assert response.status_code == 404
+    assert "moved or" in body
+    assert "Download</a>" not in body
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        "/library/mega/nothing",
+        "/library/nobody/aabbccdd-0000000000",
+        "/library/../../secret",
+        "/library/mega/..%2f..%2fsecret",
+        "/library/MEGA/AABBCCDD",
+    ],
+)
+def test_a_file_that_cannot_be_addressed_is_not_found(tmp_path: Path, where: str) -> None:
+    """One answer for a malformed name and an absent one, deliberately."""
+    with client(tmp_path) as test_client:
+        assert test_client.get(where).status_code == 404
+        assert test_client.get(f"{where}/file").status_code == 404
+
+
+def test_the_detail_page_carries_a_way_back(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        body = test_client.get(stored_item(test_client)).text
+
+    assert 'class="crumbs"' in body
+    assert 'href="/library"' in body
+
+
+def test_the_copy_script_is_served(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        response = test_client.get("/static/copy.js")
+
+    assert response.status_code == 200
+    assert "clipboard" in response.text
