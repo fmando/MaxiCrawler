@@ -101,7 +101,10 @@ def page(url: str, depth: int = 0, **kwargs: object) -> PageOutcome:
 def test_the_report_heads_with_the_seed_and_what_was_asked_for() -> None:
     text = render_crawl(make_report())
 
-    assert "Crawl:     https://example.test/  (depth 2, any domain, max 50 pages)" in text
+    assert (
+        "Crawl:     https://example.test/  "
+        "(depth 2, any domain, max 50 pages, robots.txt obeyed)" in text
+    )
     assert "Finished:  completed in 6.2s" in text
 
 
@@ -691,6 +694,9 @@ def test_robots_can_be_ignored_for_one_run() -> None:
     assert "robots.txt" in refused.stderr
     assert allowed.exit_code == EXIT_CRAWLED
     assert "Documents processed: 1" in allowed.stdout
+    # And the report says which of the two it was, so a scrollback read later
+    # is not a guess about what the configuration held at the time.
+    assert "robots.txt ignored" in allowed.stdout
 
 
 def test_this_machine_is_refused_without_the_flag() -> None:

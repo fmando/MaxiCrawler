@@ -146,7 +146,18 @@ def test_the_scope_is_described_in_one_phrase(options: CrawlOptions, expected: s
 def test_the_options_line_says_what_a_crawl_was_told() -> None:
     options = CrawlOptions(max_depth=2, max_pages=1000, same_domain=True)
 
-    assert describe_options(options) == "depth 2 · same domain · max 1,000 pages"
+    assert describe_options(options) == (
+        "depth 2 · same domain · max 1,000 pages · robots.txt obeyed"
+    )
+
+
+def test_the_options_line_says_when_robots_was_ignored() -> None:
+    """Either way, never by silence: the default is what the reader lacks."""
+    options = CrawlOptions(max_depth=2, max_pages=1000, same_domain=True, respect_robots=False)
+
+    assert describe_options(options) == (
+        "depth 2 · same domain · max 1,000 pages · robots.txt ignored"
+    )
 
 
 # --- the plugin distribution -------------------------------------------------
@@ -603,9 +614,20 @@ def test_a_recorded_crawl_becomes_a_readable_row() -> None:
 
     assert row["seed_url"] == "https://example.test/"
     assert row["state_label"] == "completed"
-    assert row["options"] == "depth 2 · same domain · max 50 pages"
+    assert row["options"] == "depth 2 · same domain · max 50 pages · robots.txt obeyed"
     assert row["elapsed"] == "18.8 s"
     assert row["started_at"] == "2026-08-09 12:00"
+
+
+def test_a_recorded_crawl_reports_the_robots_setting_it_ran_under() -> None:
+    """The stored column, not today's configuration.
+
+    The setting can have changed since; the run cannot. A page reading the
+    current value would answer a question about last month with this morning.
+    """
+    (row,) = crawl_rows([make_stored_crawl(respect_robots=False)])
+
+    assert row["options"].endswith("robots.txt ignored")
 
 
 def test_large_counts_in_a_row_are_grouped() -> None:
