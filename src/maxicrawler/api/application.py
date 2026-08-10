@@ -11,10 +11,10 @@ Importing this module without the optional ``web`` extra raises
 install command. :mod:`maxicrawler.api` itself stays importable either way, so
 nothing has to guess before asking.
 
-The application holds a :class:`~maxicrawler.app.CrawlService` and nothing
-else. It never reaches for a provider, a downloader or the library — a rule you
-can check by reading, and that ``tests/test_api_boundaries.py`` checks by
-parsing.
+The application holds a :class:`~maxicrawler.app.CrawlService` and a
+:class:`~maxicrawler.app.DownloadService` and nothing else. It never reaches for
+a provider, a downloader or the library itself — a rule you can check by
+reading, and that ``tests/test_api_boundaries.py`` checks by parsing.
 """
 
 from collections.abc import AsyncIterator
@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from maxicrawler.api.errors import MISSING_EXTRA, WebDependencyError
-from maxicrawler.app import CrawlService
+from maxicrawler.app import CrawlService, DownloadService
 from maxicrawler.config import DEFAULT_CONFIG_PATH, Settings
 
 try:
@@ -35,6 +35,7 @@ except ImportError as error:  # pragma: no cover - depends on the environment
     raise WebDependencyError(MISSING_EXTRA) from error
 
 from maxicrawler.api import routes  # noqa: E402 - only importable behind the guard
+from maxicrawler.api.downloads import DownloadRuns  # noqa: E402
 from maxicrawler.api.jobs import CrawlJobs  # noqa: E402
 
 
@@ -43,6 +44,7 @@ def create_app(
     service: CrawlService | None = None,
     settings: Settings | None = None,
     jobs: CrawlJobs | None = None,
+    downloads: DownloadRuns | None = None,
     config_path: Path | None = None,
 ) -> Starlette:
     """Return the MaxiCrawler web application.
@@ -61,20 +63,30 @@ def create_app(
     if service is None and settings is None:
         source = config_path if config_path is not None else DEFAULT_CONFIG_PATH
         settings = Settings.from_toml(source)
-    crawl_service = service if service is not None else CrawlService(settings or Settings())
+    effective = settings if settings is not None else Settings()
+    crawl_service = service if service is not None else CrawlService(effective)
     registry = jobs if jobs is not None else CrawlJobs(crawl_service)
+    transfers = (
+        downloads
+        if downloads is not None
+        else DownloadRuns(DownloadService(crawl_service.settings))
+    )
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
-        """Ask every running crawl to stop when the server does.
+        """Ask everything running in the background to stop when the server does.
 
-        Without waiting for them: a crawl asked to stop finishes the page it is
-        on, and a shutdown that blocked on a slow fetch would look like a hang.
+        Without waiting: a crawl asked to stop finishes the page it is on, and a
+        shutdown that blocked on a slow fetch would look like a hang. A transfer
+        already moving is not interrupted at all — there is no cooperative stop
+        yet — but an abandoned one leaves no half file in the library, because
+        content becomes visible only once it is whole.
         """
         try:
             yield
         finally:
             registry.shutdown(wait=False)
+            transfers.shutdown(wait=False)
 
     application = Starlette(
         lifespan=lifespan,
@@ -93,6 +105,19 @@ def create_app(
                 name="crawl_events",
             ),
             Route("/crawls/{job_id}/stop", routes.stop_crawl, methods=["POST"], name="stop_crawl"),
+            Route("/downloads", routes.start_download, methods=["POST"], name="start_download"),
+            Route(
+                "/downloads/{download_id}",
+                routes.download_detail,
+                methods=["GET"],
+                name="download_detail",
+            ),
+            Route(
+                "/downloads/{download_id}/events",
+                routes.download_events,
+                methods=["GET"],
+                name="download_events",
+            ),
             Route("/library", routes.library, methods=["GET"], name="library"),
             Route("/settings", routes.settings, methods=["GET"], name="settings"),
             Route("/health", health, methods=["GET"], name="health"),
@@ -105,6 +130,7 @@ def create_app(
     )
     application.state.crawl_service = crawl_service
     application.state.jobs = registry
+    application.state.downloads = transfers
     application.state.config_path = source
     return application
 

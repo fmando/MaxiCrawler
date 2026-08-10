@@ -17,9 +17,13 @@ from maxicrawler.domain import (
     ResourceInspection,
     ResourceKind,
 )
+from maxicrawler.utils import format_size
 
-SIZE_UNITS = ("B", "KB", "MB", "GB", "TB", "PB")
-"""Decimal units, so a size matches what the provider advertises."""
+# `format_size` is imported rather than defined here, and re-exported so both
+# renderers of this package keep their one import path. It moved to
+# `maxicrawler.utils.formatting` because the web interface needs the same
+# arithmetic and may not import the command line to get it.
+__all__ = ["format_size"]
 
 _AVAILABILITY_TEXT: Mapping[Availability, str] = {
     Availability.AVAILABLE: "Yes",
@@ -53,20 +57,6 @@ def exit_code_for(availability: Availability) -> int:
     if availability.is_available:
         return EXIT_AVAILABLE
     return EXIT_UNAVAILABLE if availability.is_determined else EXIT_UNDETERMINED
-
-
-def format_size(size: int | None) -> str:
-    """Return *size* in bytes as a short human-readable string."""
-    if size is None:
-        return "unknown"
-    if size < 1000:
-        return f"{size} B"
-    value = float(size)
-    for unit in SIZE_UNITS[1:]:
-        value /= 1000
-        if value < 1000:
-            return f"{value:.1f} {unit}"
-    return f"{value:.1f} {SIZE_UNITS[-1]}"
 
 
 def format_availability(availability: Availability) -> str:

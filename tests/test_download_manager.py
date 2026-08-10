@@ -315,6 +315,69 @@ def test_planning_transfers_nothing(tmp_path: Path) -> None:
     assert not library.root.exists()
 
 
+def test_a_file_link_is_planned_without_asking_the_provider(tmp_path: Path) -> None:
+    """The default, and what keeps a run over two hundred links to one request each."""
+    provider = make_provider()
+    manager, _ = make_manager(tmp_path, provider)
+
+    plan = manager.plan(FILE_URL)
+
+    assert provider.inspected == []
+    assert plan.jobs[0].name is None
+    assert plan.jobs[0].size is None
+    assert plan.jobs[0].label == "AaBbCcDd"
+
+
+def test_a_file_link_can_be_described_before_it_is_transferred(tmp_path: Path) -> None:
+    """What a single deliberate download asks for: a name and a denominator."""
+    provider = make_provider()
+    manager, _ = make_manager(tmp_path, provider)
+
+    plan = manager.plan(FILE_URL, inspect_files=True)
+
+    assert provider.inspected != []
+    assert plan.jobs[0].name == "stub.bin"
+    assert plan.jobs[0].size == 1024
+    assert plan.total_size == 1024
+
+
+def test_an_inspected_file_link_that_is_gone_is_reported_before_any_transfer(
+    tmp_path: Path,
+) -> None:
+    """The other half of asking: a verdict arrives instead of a doomed transfer."""
+    provider = make_provider(
+        inspection=ResourceInspection(
+            ref=ResourceRef(
+                provider="mega", resource_id="AaBbCcDd", kind=ResourceKind.FILE, url=FILE_URL
+            ),
+            availability=Availability.NOT_FOUND,
+        )
+    )
+    manager, _ = make_manager(tmp_path, provider)
+
+    plan = manager.plan(FILE_URL, inspect_files=True)
+
+    assert plan.jobs == ()
+    assert len(plan.unresolved) == 1
+    assert "not found" in plan.unresolved[0].reason
+    assert provider.downloaded == []
+
+
+def test_describing_a_file_link_first_changes_nothing_about_the_transfer(
+    tmp_path: Path,
+) -> None:
+    """Same payload, same entry: the option buys information, not behaviour."""
+    manager, library = make_manager(tmp_path)
+
+    report = manager.download(FILE_URL, inspect_files=True)
+
+    assert len(report.completed) == 1
+    outcome = report.completed[0]
+    assert outcome.path is not None
+    assert outcome.path.read_bytes() == PAYLOAD
+    assert library.descriptor_path.is_file()
+
+
 def test_the_library_is_created_by_a_run(tmp_path: Path) -> None:
     manager, library = make_manager(tmp_path)
 

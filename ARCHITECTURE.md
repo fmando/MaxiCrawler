@@ -60,23 +60,44 @@ lokalen Datei.
 
 MaxiCrawler hat zwei Benutzerschnittstellen und **eine** Anwendungslogik. Beide
 gehen durch `maxicrawler.app` — den Composition Root, die einzige Schicht, die
-`config`, `database`, `web` und `crawler` gleichzeitig kennen darf:
+`config`, `database`, `web`, `crawler`, `providers`, `downloader` und `library`
+gleichzeitig kennen darf:
 
 ```text
-maxicrawler.cli ─┐
-                 ├─→ maxicrawler.app ─→ web / crawler / database / plugins
-maxicrawler.api ─┘
+maxicrawler.cli ─┐                      ┌─ CrawlService    → web / crawler / database
+                 ├─→ maxicrawler.app ─→ ┤
+maxicrawler.api ─┘                      └─ DownloadService → providers / downloader / library
 ```
 
 Die CLI bleibt vollständig erhalten und ist der Client für Automatisierung,
 Skripte und Tests. Die Weboberfläche ist der Client zum Hinschauen und soll
 langfristig die primäre Oberfläche werden. Sie enthält keine Crawl-Logik, keine
-Kopie eines CLI-Renderers und keinen zweiten Objektgraphen; jeder Crawl, den sie
-startet, wird von `CrawlService` gebaut.
+Download-Logik, keine Kopie eines CLI-Renderers und keinen zweiten
+Objektgraphen; jeder Crawl, den sie startet, wird von `CrawlService` gebaut, und
+jeder Download von `DownloadService`.
+
+Ein Service gibt nach oben nur einfache Werte heraus — `DownloadProgress`,
+`DownloadSummary`, `LibraryItem`. Deshalb kann die Weboberfläche einen Transfer
+anzeigen und die Library auflisten, ohne `downloader`, `providers` oder
+`library` zu importieren.
 
 Die Weboberfläche ist ein **optionales** Extra (`pip install "maxicrawler[web]"`).
 Ohne sie funktioniert jeder Befehl außer `serve`, und `serve` erklärt in einem
 Satz, was fehlt.
+
+## Der erste vollständige Ablauf
+
+Seit Sprint 11 führt die Weboberfläche die ganze Kette einmal durch:
+
+```text
+Crawl → Report → Download → Library
+```
+
+Bewusst genau ein Download zur Zeit, ohne Warteschlange, ohne Stapel und ohne
+Scheduler. Was dafür nötig war, ist ein Service über dem Download Manager —
+nicht ein zweiter Manager. Was fehlt, fehlt absichtlich: eine Queue braucht eine
+Politik für Reihenfolge, Abbruch, Fortsetzung und Neustart, und keine davon ist
+zu erfinden, bevor ein einzelner Download funktioniert.
 
 ## Ausblick: Crawl Jobs
 
@@ -133,7 +154,12 @@ weiß.
     eine zweite Implementierung; gemeinsame Logik wird herausgezogen, nicht
     kopiert.
 -   `maxicrawler.api` importiert weder `providers` noch `downloader` noch
-    `library` und baut keinen Crawl-Objektgraphen selbst.
+    `library` und baut weder einen Crawl- noch einen Download-Objektgraphen
+    selbst.
+-   Ein Download aus dem Browser ist ausschließlich eine absolute HTTP(S)-URL.
+    Ein Pfad wäre eine Aufforderung an den Server, auf fremden Klick die eigene
+    Platte zu lesen; `DownloadService.require_url` ist die einzige Stelle, die
+    das entscheidet.
 -   Kein Kernpaket importiert `maxicrawler.api`. Einzige Ausnahme ist
     `maxicrawler.cli`, weil dort `serve` liegt, und dort auch nur `api.errors`.
 -   Diese Grenzen werden gelesen, nicht geglaubt: `tests/test_api_boundaries.py`

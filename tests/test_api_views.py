@@ -4,9 +4,11 @@ Pure functions, so none of this needs HTTP, a database or a crawl.
 """
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
+from maxicrawler.api.downloads import DownloadSnapshot
 from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.api.views import (
     ABANDONED_LABEL,
@@ -16,9 +18,11 @@ from maxicrawler.api.views import (
     crawl_rows,
     describe_options,
     describe_scope,
+    download_view,
     format_bytes,
     format_duration,
     format_number,
+    library_table,
     link_rows,
     link_table,
     page_rows,
@@ -29,9 +33,10 @@ from maxicrawler.api.views import (
     settings_view,
     stored_view,
 )
+from maxicrawler.app import DownloadProgress, DownloadSummary, LibraryItem
 from maxicrawler.crawler import DiscoverySummary, PluginUsage
 from maxicrawler.database import StoredUrl
-from maxicrawler.domain import ScanSession, Statistics, UrlRecord
+from maxicrawler.domain import DownloadStatus, ScanSession, Statistics, UrlRecord
 from maxicrawler.web.models import LinkKind
 from maxicrawler.web.report import CrawlReport, CrawlStatistics, PageOutcome, SkipReason
 from maxicrawler.web.session import CrawlOptions, CrawlSession, CrawlState
@@ -516,6 +521,26 @@ def test_a_crawl_that_genuinely_found_nothing_says_that_instead() -> None:
     assert table["was_recorded"] is True
 
 
+def test_only_a_link_a_provider_could_fetch_offers_a_download() -> None:
+    mega = "https://mega.nz/file/AaBbCcDd"
+    urls = [make_stored_url(mega, "mega"), make_stored_url("https://example.test/a", "generic")]
+
+    table = link_table(urls, discovered=2, downloadable=frozenset({mega}))
+
+    assert [row["can_download"] for row in table["rows"]] == [True, False]
+    assert table["has_downloads"] is True
+
+
+def test_a_table_with_nothing_to_fetch_grows_no_column() -> None:
+    """A column of empty cells is worse than no column."""
+    urls = [make_stored_url("https://example.test/a", "generic")]
+
+    table = link_table(urls, discovered=1)
+
+    assert table["has_downloads"] is False
+    assert table["rows"][0]["can_download"] is False
+
+
 # --- the label tables --------------------------------------------------------
 
 
@@ -748,3 +773,181 @@ def test_paths_are_shown_with_forward_slashes() -> None:
 )
 def test_byte_counts_read_the_way_they_were_configured(value: int, expected: str) -> None:
     assert format_bytes(value) == expected
+
+
+# --- one download -------------------------------------------------------------
+
+
+def make_download_snapshot(
+    *,
+    status: DownloadStatus = DownloadStatus.RUNNING,
+    written: int = 500_000,
+    total: int | None = 1_300_000,
+    files_total: int = 1,
+    files_finished: int = 0,
+    summary: DownloadSummary | None = None,
+    error: str | None = None,
+) -> DownloadSnapshot:
+    """Return a snapshot of a download that is not really happening."""
+    return DownloadSnapshot(
+        download_id="d1",
+        url="https://mega.nz/file/AaBbCcDd",
+        progress=DownloadProgress(
+            label="Jump.pdf",
+            status=status,
+            bytes_written=written,
+            total_bytes=total,
+            files_total=files_total,
+            files_finished=files_finished,
+        ),
+        started_at=datetime(2026, 8, 9, 12, 0, tzinfo=UTC),
+        elapsed_seconds=12.5,
+        summary=summary,
+        error=error,
+    )
+
+
+def make_summary(**overrides: object) -> DownloadSummary:
+    """Return a finished download's account."""
+    values: dict[str, object] = {
+        "url": "https://mega.nz/file/AaBbCcDd",
+        "status": DownloadStatus.COMPLETED,
+        "label": "Jump.pdf",
+        "bytes_written": 1_300_000,
+        "total_bytes": 1_300_000,
+        "files_total": 1,
+        "files_completed": 1,
+        "path": Path("library") / "mega" / "abc" / "content" / "Jump.pdf",
+    }
+    values.update(overrides)
+    return DownloadSummary(**values)  # type: ignore[arg-type]
+
+
+def test_a_running_download_shows_both_counts_and_a_percentage() -> None:
+    shown = download_view(make_download_snapshot())
+
+    assert shown["transferred"] == "500.0 KB of 1.3 MB"
+    assert shown["progress_percent"] == 38
+    assert shown["has_total"] is True
+    assert shown["state_label"] == "downloading"
+    assert shown["state_tone"] == "busy"
+    assert shown["elapsed"] == "12.5 s"
+
+
+def test_a_download_whose_size_nobody_stated_has_no_percentage() -> None:
+    """A bar at zero for two minutes would claim progress nobody can see."""
+    shown = download_view(make_download_snapshot(total=None, written=1_300_000))
+
+    assert shown["transferred"] == "1.3 MB"
+    assert shown["progress_percent"] is None
+    assert shown["has_total"] is False
+
+
+def test_a_finished_download_reads_from_its_summary() -> None:
+    shown = download_view(
+        make_download_snapshot(
+            status=DownloadStatus.RUNNING, summary=make_summary(), files_finished=1
+        )
+    )
+
+    assert shown["is_finished"] is True
+    assert shown["succeeded"] is True
+    assert shown["state_label"] == "completed"
+    assert shown["state_tone"] == "good"
+    assert shown["path"] == "library/mega/abc/content/Jump.pdf"
+
+
+def test_a_download_the_library_already_held_is_a_success() -> None:
+    summary = make_summary(
+        status=DownloadStatus.SKIPPED, bytes_written=0, reason="the library already holds it"
+    )
+
+    shown = download_view(make_download_snapshot(summary=summary))
+
+    assert shown["state_label"] == "already stored"
+    assert shown["state_tone"] == "good"
+    assert shown["succeeded"] is True
+    assert shown["reason"] == "the library already holds it"
+
+
+def test_a_failed_download_carries_its_reason() -> None:
+    summary = make_summary(status=DownloadStatus.FAILED, reason="the provider reports it as gone")
+
+    shown = download_view(make_download_snapshot(summary=summary))
+
+    assert shown["state_tone"] == "bad"
+    assert shown["succeeded"] is False
+    assert shown["reason"] == "the provider reports it as gone"
+
+
+def test_a_download_that_broke_below_us_says_so_separately() -> None:
+    """A failed transfer is a reason; a fault on our side is an error."""
+    shown = download_view(make_download_snapshot(error="OSError: disk full"))
+
+    assert shown["error"] == "OSError: disk full"
+    assert shown["is_finished"] is True
+    assert shown["state_label"] == "failed"
+
+
+def test_a_link_holding_several_files_counts_them() -> None:
+    shown = download_view(make_download_snapshot(files_total=5, files_finished=2))
+
+    assert shown["has_many_files"] is True
+    assert shown["files_total"] == "5"
+    assert shown["files_finished"] == "2"
+
+
+def test_one_file_is_not_worth_a_counter() -> None:
+    assert download_view(make_download_snapshot())["has_many_files"] is False
+
+
+# --- the library --------------------------------------------------------------
+
+
+def make_item(name: str = "Jump.pdf", **overrides: object) -> LibraryItem:
+    """Return one stored resource."""
+    values: dict[str, object] = {
+        "provider": "mega",
+        "name": name,
+        "key": "abc",
+        "size": 1_300_000,
+        "downloaded_at": datetime(2026, 8, 9, 14, 30, tzinfo=UTC),
+        "path": Path("library") / "mega" / "abc" / "content" / name,
+        "source_url": "https://mega.nz/file/AaBbCcDd",
+    }
+    values.update(overrides)
+    return LibraryItem(**values)  # type: ignore[arg-type]
+
+
+def test_the_library_table_has_the_five_columns_it_promises() -> None:
+    table = library_table([make_item()])
+
+    row = table["rows"][0]
+    assert row["provider"] == "mega"
+    assert row["name"] == "Jump.pdf"
+    assert row["size"] == "1.3 MB"
+    assert row["downloaded_at"] == "2026-08-09 14:30"
+    assert row["path"] == "library/mega/abc/content/Jump.pdf"
+
+
+def test_an_empty_library_is_an_empty_table() -> None:
+    table = library_table([])
+
+    assert table["rows"] == ()
+    assert table["total"] == "0"
+    assert table["has_hidden"] is False
+
+
+def test_a_long_library_says_what_it_left_out() -> None:
+    table = library_table([make_item(f"file-{index}.bin") for index in range(5)], limit=2)
+
+    assert len(table["rows"]) == 2
+    assert table["total"] == "5"
+    assert table["hidden"] == "3"
+    assert table["has_hidden"] is True
+
+
+def test_an_entry_with_no_recorded_time_says_so_rather_than_guessing() -> None:
+    table = library_table([make_item(downloaded_at=None)])
+
+    assert table["rows"][0]["downloaded_at"] == "—"

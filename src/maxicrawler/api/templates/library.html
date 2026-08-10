@@ -1,30 +1,56 @@
 {#
-  Still empty, and honest about it.
+  What has been downloaded.
 
-  The paragraph naming where the library will be read from is not decoration.
-  It is the line that keeps the next person from importing
-  `maxicrawler.library` here because it was the quickest way to fill the page.
+  Five columns and nothing else: no search, no filter, no preview. The rows are
+  read through a service in `maxicrawler.app`, the same way crawling is, which
+  is what keeps this layer from reaching into `maxicrawler.library` because it
+  was the quickest way to fill a table.
 #}
 {% extends "base.html" %}
 {% block title %}Library · MaxiCrawler{% endblock %}
 
 {% block content %}
 <section class="panel">
-  <h2>Library</h2>
-  <div class="body">
-    <p>Nothing has been downloaded, because this interface does not download anything yet.</p>
-    <p class="muted">
-      Crawling and downloading are separate pipelines: the crawler discovers
-      links and records them, and downloading them is a step nobody has asked
-      this server to take. When it does, files will land in
-      <code>{{ library_path }}</code> and be listed here.
+  <h2>
+    Library
+    <span class="count">{{ library.total }} stored</span>
+  </h2>
+
+  {% if library.rows %}
+    <table class="grid">
+      <thead>
+        <tr>
+          <th>Provider</th>
+          <th>Name</th>
+          <th class="right">Size</th>
+          <th>Downloaded</th>
+          <th>Path</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in library.rows %}
+          <tr>
+            <td>{{ item.provider }}</td>
+            <td>
+              {{ item.name }}
+              <div class="muted small url">{{ item.source_url }}</div>
+            </td>
+            <td class="num right">{{ item.size }}</td>
+            <td class="num">{{ item.downloaded_at }}</td>
+            <td class="url muted small">{{ item.path }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if library.has_hidden %}
+      <p class="empty">{{ library.hidden }} more are stored but not shown here.</p>
+    {% endif %}
+  {% else %}
+    <p class="empty">
+      Nothing has been downloaded yet. Crawl a page, then use the Download
+      button beside a link the report found. Files land in
+      <code>{{ library_path }}</code>.
     </p>
-    <p class="muted">
-      It will read them through a service in <code>maxicrawler.app</code>, the
-      same way crawling does. This layer does not reach into the library, the
-      providers or the downloader itself, and a test asserts that rather than
-      trusting this sentence.
-    </p>
-  </div>
+  {% endif %}
 </section>
 {% endblock %}

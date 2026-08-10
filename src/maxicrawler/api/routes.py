@@ -21,6 +21,8 @@ from starlette.templating import Jinja2Templates
 
 from maxicrawler import __version__
 from maxicrawler.api import stream, views
+from maxicrawler.api.downloads import DownloadRun, DownloadRuns
+from maxicrawler.api.errors import DownloadBusyError
 from maxicrawler.api.jobs import DEFAULT_RETAINED_JOBS, CrawlJob, CrawlJobs
 from maxicrawler.app import crawl_document
 
@@ -53,6 +55,26 @@ def jobs_of(request: Request) -> CrawlJobs:
     """Return the job registry this application is running crawls through."""
     registry: CrawlJobs = request.app.state.jobs
     return registry
+
+
+def downloads_of(request: Request) -> DownloadRuns:
+    """Return the registry this application is running downloads through."""
+    registry: DownloadRuns = request.app.state.downloads
+    return registry
+
+
+def _download(request: Request) -> DownloadRun:
+    """Return the download this request addresses.
+
+    Raises:
+        HTTPException: this process does not hold that download. Which includes
+            one it ran and has since evicted — the registry is a live view, and
+            a finished download's record is the library.
+    """
+    run = downloads_of(request).get(request.path_params["download_id"])
+    if run is None:
+        raise HTTPException(status_code=404, detail="no such download")
+    return run
 
 
 def _job(request: Request) -> CrawlJob:
@@ -141,9 +163,8 @@ async def crawl_detail(request: Request) -> Response:
     if report is not None:
         context["report"] = views.report_view(report)
         context["pages"] = views.page_table(report)
-        context["links"] = views.link_table(
-            jobs_of(request).service.discovered_urls(report.session.session_id),
-            discovered=report.summary.unique_urls,
+        context["links"] = _link_table(
+            request, report.session.session_id, discovered=report.summary.unique_urls
         )
     return page(request, "crawl.html", context, section="crawls")
 
@@ -189,7 +210,7 @@ async def crawl_events(request: Request) -> Response:
     """
     job = _job(request)
     return StreamingResponse(
-        stream.event_stream(job),
+        stream.crawl_stream(job),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -212,6 +233,73 @@ async def stop_crawl(request: Request) -> Response:
     return RedirectResponse(url=f"/crawls/{job.id}", status_code=303)
 
 
+async def start_download(request: Request) -> Response:
+    """Download one link, and send the browser to watch it.
+
+    The link arrives in a form body rather than in a query string, which is not
+    only about it being an action: a share link keeps its decryption key in the
+    URL fragment, and a fragment is the one part of a URL a browser never sends.
+    In a field it survives the round trip; in a link it would be lost, and in a
+    query string it would be written into a log.
+
+    Answers with a redirect, so reloading the download afterwards does not offer
+    to start it a second time.
+    """
+    form = await read_form(request)
+    downloads = downloads_of(request)
+    try:
+        run = downloads.submit(form.get("url", ""))
+    except ValueError as error:
+        return _refuse_download(request, str(error), status=400)
+    except DownloadBusyError as error:
+        return _refuse_download(request, str(error), status=409)
+    return RedirectResponse(url=f"/downloads/{run.id}", status_code=303)
+
+
+async def download_detail(request: Request) -> Response:
+    """Show one download as it stands, or what became of it.
+
+    Rendered by the server on every request, so a reload is a complete way to
+    follow a transfer. What the live stream adds is convenience, not capability.
+    """
+    run = _download(request)
+    return page(
+        request,
+        "download.html",
+        {"download": views.download_view(run.snapshot())},
+        section="library",
+    )
+
+
+async def download_events(request: Request) -> Response:
+    """Stream one download's progress until it ends."""
+    run = _download(request)
+    return StreamingResponse(
+        stream.download_stream(run),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _refuse_download(request: Request, message: str, *, status: int) -> Response:
+    """Say why a download was not started, on a page of its own.
+
+    A short page rather than the report the button was on. Re-rendering that
+    report would mean running the crawl's query again to say one sentence, and
+    the browser's own Back button is a better way back to it than a rebuilt
+    copy.
+    """
+    active = downloads_of(request).active()
+    response = page(
+        request,
+        "download_refused.html",
+        {"message": message, "active_id": None if active is None else active.id},
+        section="library",
+    )
+    response.status_code = status
+    return response
+
+
 async def crawls(request: Request) -> Response:
     """List every recorded crawl, newest first."""
     jobs = jobs_of(request)
@@ -226,17 +314,19 @@ async def crawls(request: Request) -> Response:
 async def library(request: Request) -> Response:
     """Show what has been downloaded.
 
-    Genuinely empty, and it will stay that way until downloads exist in this
-    interface. When it does something, it will read through a service in
-    :mod:`maxicrawler.app` rather than importing the library package — the same
-    rule crawling follows. Naming where it will read from is not decoration: it
-    is the one line that keeps the next person from reaching for
-    ``maxicrawler.library`` here because it was quicker.
+    Read through :class:`~maxicrawler.app.DownloadService`, not by opening the
+    library here. That is the same rule crawling follows, and the reason this
+    page can list files while ``api`` imports neither ``library`` nor
+    ``downloader`` nor ``providers``.
     """
+    downloads = downloads_of(request)
     return page(
         request,
         "library.html",
-        {"library_path": jobs_of(request).service.settings.library_path.as_posix()},
+        {
+            "library": views.library_table(downloads.service.stored_downloads()),
+            "library_path": downloads.service.library_root.as_posix(),
+        },
         section="library",
     )
 
@@ -287,11 +377,27 @@ def _recorded_crawl(request: Request) -> Response:
         "recorded.html",
         {
             "crawl": views.stored_view(stored),
-            "links": views.link_table(
-                jobs.service.discovered_urls(job_id), discovered=stored.links_discovered
-            ),
+            "links": _link_table(request, job_id, discovered=stored.links_discovered),
         },
         section="crawls",
+    )
+
+
+def _link_table(request: Request, session_id: str, *, discovered: int) -> dict[str, Any]:
+    """Return the discovered-link table, with a Download beside what can be.
+
+    Which links those are is asked once for the whole table and answered from
+    the URL alone — a plugin classifies it, a provider claims it, and the
+    provider says whether it was composed with everything a transfer needs. No
+    request is made, so a report of two hundred links costs nothing to render.
+    """
+    stored = jobs_of(request).service.discovered_urls(session_id)
+    return views.link_table(
+        stored,
+        discovered=discovered,
+        downloadable=downloads_of(request).service.downloadable(
+            item.record.normalized_url for item in stored
+        ),
     )
 
 

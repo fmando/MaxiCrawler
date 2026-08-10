@@ -1097,7 +1097,7 @@ become the primary one.
 | --- | --- |
 | **Dashboard** | Start a crawl, and see the recent ones. |
 | **Crawls** | Every crawl this installation has run, live or stored, and one page per crawl. |
-| **Library** | Named, and empty. Listing it will go through a service, the way crawling does. |
+| **Library** | Named, and empty. Listing it will go through a service, the way crawling does. (Sprint 11 filled it in.) |
 | **Settings** | The configuration as it was read, and which file it came from. Read-only. |
 
 Naming all four from the beginning is deliberate. Two of them do very little
@@ -1211,11 +1211,125 @@ sentence and exits 8.
   authenticates is the answer until the interface has accounts of its own.
 - **No pause or resume.** Stop is a stop; a stopped crawl is finished.
 - **No downloads from the browser.** Downloading goes through a service in
-  `maxicrawler.app` first, or it becomes a second implementation.
+  `maxicrawler.app` first, or it becomes a second implementation. *(Sprint 11
+  built that service, and then the button.)*
 - **No library listing**, for the same reason.
 - **htmx is not vendored.** Its licence (0BSD) is checked and the routes already
   render standalone fragments, which is the expensive half. It is worth adding
   the day filtering and sorting need it.
+
+## Sprint 11: crawl, report, download, library
+
+Sprint 11 joins the two halves of the chain. In a browser you can now crawl a
+page, look at what it found, press Download beside a Mega link, watch the bytes
+arrive, and find the file in the library afterwards. That is the whole sprint:
+one link, one click, one file.
+
+```text
+Crawl → Report → Download → Library
+```
+
+Nothing about *how* downloads work changed. `DownloadManager`, the planner, the
+queue, the worker, the sink and the library are the same code the command line
+has used since Sprint 7.
+
+### One service, both clients
+
+What was missing was the composition point. The `download` command assembled its
+own provider registry, library and manager — the same arrangement `crawl` had
+before Sprint 10, and the same way two clients quietly become two
+implementations. So `DownloadService` was extracted into `maxicrawler.app`, the
+command line was changed to use it, and only then did the browser learn to
+download:
+
+```text
+Browser  ─┐
+          ├─→ DownloadService ─→ DownloadManager ─→ Provider ─→ Library
+CLI      ─┘
+```
+
+The service reports in plain values — `DownloadProgress` while a transfer runs,
+`DownloadSummary` when it is over, `LibraryItem` for what is stored — so the web
+layer shows a download without importing `downloader`, `providers` or `library`
+at all. `tests/test_api_boundaries.py` reads the import graph and fails the
+build if that stops being true.
+
+### One download at a time, on purpose
+
+There is no queue, no batch and no scheduler. Ask for a second download while
+one is running and the interface says so and names the one that is running:
+
+```text
+Download not started
+a download is already running; this interface runs one at a time
+```
+
+A queue needs a policy for ordering, cancelling, resuming and surviving a
+restart. None of that is worth inventing before a single download works end to
+end, and everything the refusal costs is one click later.
+
+### What the button does, and does not, put in a URL
+
+A Mega share carries its decryption key in the URL fragment, which a browser
+never transmits as part of a URL — and does transmit as a form field. So the
+Download button is a small form, the link travels in the request body, and
+everything downstream holds the fragment-free URL: the run, every snapshot,
+every rendered page and every event frame. The key reaches the provider and
+nothing else.
+
+The button appears only beside links this installation could actually fetch,
+which is asked of the URL string alone: a plugin classifies it, a provider
+claims the classification, and the provider says whether it was composed with
+everything a transfer needs. No request is made while a report renders.
+
+### A download you can watch
+
+The same machinery a crawl uses, written once and used twice: the transfer runs
+on a worker thread, the page arrives complete from the server, and an
+`EventSource` replaces the numbers already in it. With scripting off the page
+still works and stops updating by itself.
+
+```text
+Downloading…
+████████████████░░░░░░
+1.3 MB of 2.8 MB · 46%
+```
+
+A transfer whose size nobody stated gets an indeterminate bar and an honest
+counter rather than one stuck at zero. For a plain file link the size is known
+before the first byte, because a single deliberate download can afford to ask:
+the plan is made with `inspect_files=True`, one request that buys the file's
+name and size. A run over a document full of links still does not — two hundred
+links must not become two hundred extra requests.
+
+### Only URLs, never paths
+
+The resolver underneath a download reads a file, or a whole directory of
+documents, for the links inside. That is right for a command line and would be a
+way to make a server read its own disk on somebody else's click, so
+`DownloadService.require_url` refuses anything that is not an absolute HTTP(S)
+URL — before a worker thread is started, so a bad link is a message rather than
+a run that exists only to have failed.
+
+### The library, in the browser
+
+Five columns, read through the service: provider, name, size, when it was
+downloaded, and where it is. No search, no filters, no preview. Each row comes
+from that entry's own `metadata.json`, because the file system is the library's
+source of truth (ADR-010); a damaged entry is skipped rather than allowed to
+empty the page.
+
+### Still not done, on purpose
+
+- **No Stop for a download.** A crawl checks between pages; a transfer has no
+  such seam yet, so `serve` leaves a running one alone when it shuts down. That
+  is safe rather than merely tolerated: content becomes visible only once it is
+  whole, so an abandoned transfer leaves no half file behind.
+- **No queue, no parallel downloads, no scheduler.**
+- **A download's own page dies with the process.** The library is what survives,
+  which is where a finished download actually lives.
+- **Still only Mega.** A second provider needs a plugin and a provider, and not
+  one line of what this sprint added.
 
 ## Documentation
 

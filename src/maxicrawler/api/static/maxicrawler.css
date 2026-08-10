@@ -379,3 +379,61 @@ footer {
 }
 
 .body > p + p { margin-top: 10px; }
+
+/*
+ * A transfer whose size nobody stated. The stripes move so the bar reads as
+ * "something is happening" rather than "this is how far along it is", which is
+ * the one thing a full-width solid bar would be claiming falsely.
+ */
+.bar.unknown > span {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    var(--accent) 0 10px,
+    transparent 10px 20px
+  );
+  background-color: transparent;
+  animation: drift 1s linear infinite;
+}
+
+@keyframes drift {
+  from { background-position: 0 0; }
+  to { background-position: 28px 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar.unknown > span { animation: none; }
+}
+
+.done {
+  margin: 0 0 10px;
+  color: var(--good);
+  font-size: 13px;
+}
+.done .path { margin-left: 10px; }
+
+/* A link that reads as something you do, beside links that read as places. */
+.action {
+  display: inline-block;
+  padding: 5px 12px;
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  font-size: 12px;
+  text-decoration: none;
+}
+.action:hover { background: var(--raised); }
+
+/*
+ * The one action a table row can carry. Small, quiet, and a form rather than a
+ * link, because it starts something rather than going somewhere.
+ */
+.grid form.row-action { margin: 0; }
+.grid form.row-action button {
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+}
+.grid form.row-action button:hover { background: var(--bg); }

@@ -48,12 +48,23 @@ BUILDERS = frozenset(
         "SQLiteDiscoveryRepository",
         "UrllibPageFetcher",
         "WebDiscoveryService",
+        "DownloadManager",
+        "DownloadPlanner",
+        "DownloadQueue",
+        "DownloadWorker",
+        "Library",
+        "LibrarySink",
+        "SourceResolver",
+        "UrllibStreamTransport",
+        "UrllibTransport",
+        "create_default_provider_registry",
     }
 )
-"""The parts :class:`~maxicrawler.app.CrawlService` assembles into a crawl.
+"""The parts the services in :mod:`maxicrawler.app` assemble.
 
 A client that imported one of these would be building a second object graph,
-which is the way two clients quietly become two crawlers.
+which is the way two clients quietly become two crawlers — or two downloaders
+disagreeing about where the library is.
 """
 
 
@@ -159,7 +170,14 @@ def test_the_reader_finds_an_import_that_is_really_there() -> None:
 def test_the_reader_covers_every_module_of_the_interface() -> None:
     names = {path.name for path in modules_of("api")}
 
-    assert {"__init__.py", "application.py", "errors.py", "jobs.py", "routes.py"} <= names
+    assert {
+        "__init__.py",
+        "application.py",
+        "downloads.py",
+        "errors.py",
+        "jobs.py",
+        "routes.py",
+    } <= names
 
 
 # --- what the interface may not reach for -------------------------------------
@@ -168,8 +186,11 @@ def test_the_reader_covers_every_module_of_the_interface() -> None:
 def test_the_interface_never_imports_a_provider_a_downloader_or_the_library() -> None:
     """It has no business with any of the three, and the library page proves it.
 
-    That page lists nothing yet precisely because listing it will go through a
-    service in :mod:`maxicrawler.app`, the way crawling does.
+    That page lists real files, and it still holds: the rows arrive from
+    :class:`~maxicrawler.app.DownloadService` as plain values, the way a crawl's
+    rows do. This is the assertion Sprint 11 was most likely to break, because
+    reaching for ``maxicrawler.library`` here would have been the quickest way
+    to fill a table.
     """
     found = offenders(
         "api",
@@ -177,6 +198,15 @@ def test_the_interface_never_imports_a_provider_a_downloader_or_the_library() ->
     )
 
     assert found == {}
+
+
+def test_the_interface_reaches_downloads_through_the_service() -> None:
+    """Stated positively, so the test above cannot pass by downloading nothing."""
+    imported = imports_of(PACKAGE / "api" / "downloads.py")
+
+    assert "maxicrawler.app.DownloadService" in imported
+    assert "maxicrawler.app.DownloadProgress" in imported
+    assert "maxicrawler.app.DownloadSummary" in imported
 
 
 def test_the_interface_holds_no_copy_of_the_command_line() -> None:

@@ -17,7 +17,7 @@ from maxicrawler.api.stream import (
     ServerEvent,
     SnapshotListener,
     crawl_events,
-    event_stream,
+    crawl_stream,
     snapshot_payload,
 )
 from maxicrawler.events import CrawlFinished, CrawlStarted, PageCrawled, PageFailed
@@ -339,7 +339,7 @@ def test_the_rendered_stream_is_text() -> None:
     job.fail("gone")
 
     async def collect() -> list[str]:
-        return [frame async for frame in event_stream(job, heartbeat=0.05)]
+        return [frame async for frame in crawl_stream(job, heartbeat=0.05)]
 
     frames = run(collect)
 

@@ -1,0 +1,28 @@
+{#
+  Why a download did not start.
+
+  A page of its own rather than the report the button was on: re-rendering that
+  report would mean running its query again to say one sentence, and the
+  browser's own Back button is a better way back to it than a rebuilt copy.
+#}
+{% extends "base.html" %}
+{% block title %}Download not started · MaxiCrawler{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <h2>Download not started</h2>
+  <div class="body">
+    <p class="error">{{ message }}</p>
+    {% if active_id %}
+      <p>
+        <a class="action" href="/downloads/{{ active_id }}">Watch the one that is running</a>
+      </p>
+    {% endif %}
+    <p class="muted">
+      This interface transfers one thing at a time and keeps no queue. Nothing
+      was started, so going back and trying again once the current download has
+      finished is the whole of the retry.
+    </p>
+  </div>
+</section>
+{% endblock %}

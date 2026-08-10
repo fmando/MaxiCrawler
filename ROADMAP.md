@@ -25,9 +25,11 @@ The mission, core principles, and non-goals are described in
     above the single-page crawler
 -   0.10 Web interface ✅ — a browser client of the same services the command
     line uses, served by `maxicrawler serve`
--   0.11 Politeness & robots.txt
--   0.12 Scheduler & Automation
--   0.13 REST API
+-   0.11 The first end-to-end workflow ✅ — crawl, report, download, library,
+    in a browser, through a `DownloadService` both clients share
+-   0.12 Politeness & robots.txt
+-   0.13 Scheduler & Automation
+-   0.14 REST API
 -   1.0 Stable Release
 
 The desktop GUI that used to sit at 0.11 is superseded by 0.10. A local server
@@ -57,6 +59,9 @@ Each station answers exactly one question:
 -   **Library** — *"How are resources stored and managed?"* Knows no provider
     beyond its name.
 
+Both clients walk the chain through `maxicrawler.app`: `CrawlService` for the
+first half, `DownloadService` for the second.
+
 Adding a host means adding a plugin and a provider. The last two stations do
 not change.
 
@@ -82,10 +87,15 @@ not change.
 -   Crawl jobs — the unit the web interface manages, holding a `CrawlSession`
     beside its discovery results and its downloads. Today's registry is memory
     only: after a restart the pages fall back to what the database holds, and
-    a crawl that was running is shown as abandoned
--   A real library page. It names itself in the navigation and lists nothing,
-    because listing will go through a service in `maxicrawler.app` rather than
-    through `maxicrawler.library` from a request handler
+    a crawl that was running is shown as abandoned. Downloads have the same
+    shape and the same gap: a finished one is found again in the library, but
+    its own page dies with the process
+-   Stopping a download. A crawl checks between pages; a transfer has no such
+    seam yet, so `serve` leaves a running one alone when it shuts down. The
+    progress callback the sink already calls on every chunk is where a
+    cooperative abort belongs
+-   More than one download at a time, which is the same subject as a queue: an
+    order, a cancel, a resume, and something that survives a restart
 -   Filtering and sorting the crawl list, which is the point at which htmx
     earns being vendored — the routes already render standalone fragments
 -   Authentication, before the interface is anything but loopback. Until then

@@ -1,0 +1,50 @@
+{#
+  One download, from the click to the file.
+
+  Complete without JavaScript: everything below is rendered by the server on
+  every request, so reloading is a working way to follow a transfer. The live
+  view at the bottom only spares a reader the reloading.
+#}
+{% extends "base.html" %}
+{% block title %}{{ download.label }} · MaxiCrawler{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <h2>
+    <span class="badge {{ download.state_tone }}" id="download-state">{{ download.state_label }}</span>
+    <span class="url">{{ download.label }}</span>
+  </h2>
+
+  <div class="body">
+    <p class="muted url">{{ download.url }}</p>
+
+    {% if download.error %}
+      {#
+        Not a failed transfer -- that is a reason below -- but something that
+        broke badly enough to raise. Saying which is the difference between a
+        dead share and a bug on our side.
+      #}
+      <p class="error">{{ download.error }}</p>
+    {% endif %}
+
+    {% include "_download_progress.html" %}
+
+    {% if download.is_finished %}
+      {% if download.succeeded %}
+        <p class="done">
+          ✓ {{ download.state_label }}
+          {% if download.path %}<span class="muted small path">{{ download.path }}</span>{% endif %}
+        </p>
+        <p><a class="action" href="/library">Open Library</a></p>
+      {% elif not download.error %}
+        <p class="error">{{ download.reason or "the download did not finish" }}</p>
+      {% endif %}
+    {% endif %}
+  </div>
+</section>
+
+{% if not download.is_finished %}
+  <div id="download-live" data-stream="/downloads/{{ download.download_id }}/events" hidden></div>
+  <script src="/static/download.js" defer></script>
+{% endif %}
+{% endblock %}

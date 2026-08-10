@@ -243,13 +243,17 @@ class DownloadManager:
         """Return the library this manager stores into."""
         return self._library
 
-    def plan(self, source: str) -> DownloadPlan:
+    def plan(self, source: str, *, inspect_files: bool = False) -> DownloadPlan:
         """Return what downloading *source* would transfer, without doing it.
+
+        *inspect_files* is handed to the planner unchanged: it asks the provider
+        to describe plain file links too, so the plan states their names and
+        sizes at the cost of one request each.
 
         Raises:
             SourceError: *source* is neither an HTTP(S) URL nor a readable path.
         """
-        return self._planner.plan(self._sources.resolve(source))
+        return self._planner.plan(self._sources.resolve(source), inspect_files=inspect_files)
 
     def run(self, plan: DownloadPlan) -> DownloadReport:
         """Execute *plan* and return its account.
@@ -269,9 +273,9 @@ class DownloadManager:
             self._reporter.end()
         return DownloadReport(plan=plan, outcomes=tuple(outcomes), library_root=self._library.root)
 
-    def download(self, source: str) -> DownloadReport:
+    def download(self, source: str, *, inspect_files: bool = False) -> DownloadReport:
         """Plan and execute a download of *source*."""
-        return self.run(self.plan(source))
+        return self.run(self.plan(source, inspect_files=inspect_files))
 
 
 def _stored_payload(entry: LibraryEntry, record: ResourceRecord | None) -> Path | None:
