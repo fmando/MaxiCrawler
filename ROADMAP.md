@@ -27,9 +27,11 @@ The mission, core principles, and non-goals are described in
     line uses, served by `maxicrawler serve`
 -   0.11 The first end-to-end workflow ✅ — crawl, report, download, library,
     in a browser, through a `DownloadService` both clients share
--   0.12 Politeness & robots.txt
--   0.13 Scheduler & Automation
--   0.14 REST API
+-   0.12 Library comfort & document viewer ✅ — search, filter, sort, paging, a
+    page per file, and the browser showing what it can
+-   0.13 Politeness & robots.txt
+-   0.14 Scheduler & Automation
+-   0.15 REST API
 -   1.0 Stable Release
 
 The desktop GUI that used to sit at 0.11 is superseded by 0.10. A local server
@@ -60,7 +62,8 @@ Each station answers exactly one question:
     beyond its name.
 
 Both clients walk the chain through `maxicrawler.app`: `CrawlService` for the
-first half, `DownloadService` for the second.
+first half, `DownloadService` for the second, and `LibraryService` for reading
+back what the chain produced.
 
 Adding a host means adding a plugin and a provider. The last two stations do
 not change.
@@ -94,6 +97,13 @@ not change.
     seam yet, so `serve` leaves a running one alone when it shuts down. The
     progress callback the sink already calls on every chunk is where a
     cooperative abort belongs
+-   An index over the library, as a cache and never as the authority (ADR-010).
+    Every listing reads one metadata document per stored resource: about 0.3
+    seconds for two thousand entries warm, and roughly sixteen the first time a
+    virus scanner sees them. Invalidated by modification time, it would turn the
+    second listing into a `stat` per entry
+-   `library` commands — list, verify, prune. `LibraryService` already answers
+    the first two questions; what is missing is the command that asks them
 -   More than one download at a time, which is the same subject as a queue: an
     order, a cancel, a resume, and something that survives a restart
 -   Filtering and sorting the crawl list, which is the point at which htmx
@@ -107,7 +117,6 @@ not change.
     staging directory already keeps a partial file out of the library
 -   Provider-side integrity verification beside the recorded SHA-256, starting
     with Mega's meta-MAC
--   `library` commands: list, verify, prune
 -   Persisting inspections so dead links can be detected over time
 
 ## Long-term

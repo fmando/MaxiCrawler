@@ -28,7 +28,8 @@ crawler → extractors → documents
        ↘ repository port ← database implements it structurally
 plugins depend on the domain only; concrete plugins extend the protocol
 app composes settings, database, crawler, web, providers, downloader and
-    library into services a client calls: CrawlService and DownloadService
+    library into services a client calls: CrawlService, DownloadService and
+    LibraryService
 cli → app, and composes documents, extractors and plugins beside it
 api → app; never providers, downloader or library, and never the cli
 ```
@@ -107,6 +108,11 @@ Sprint 11 joins the two halves of the chain, described under
 graph followed the crawl graph into `maxicrawler.app`, and the browser gained a
 Download button, a progress page and a library listing — none of which changed
 how a download is executed.
+
+Sprint 12 turns that listing into a library, described under
+[The library and the viewer](#the-library-and-the-viewer). Reading the store
+became a service of its own, and the browser shows a stored file where it can —
+without MaxiCrawler rendering, converting or interpreting anything.
 
 ## Plugin architecture
 
@@ -1286,7 +1292,10 @@ crawl, and it does not render one.
 | `POST /downloads` | Start one download, from a form field holding the link. |
 | `GET /downloads/{id}` | One transfer, live or finished. |
 | `GET /downloads/{id}/events` | Its progress stream. |
-| `GET /library` | What has been downloaded: provider, name, size, when, where. |
+| `GET /library` | What has been downloaded, searched, filtered, sorted and paged. |
+| `GET /library/{provider}/{key}` | One stored file, and everything known about it. |
+| `GET …/file` | The bytes, as a download. States no type. |
+| `GET …/view` | The bytes, for the browser to display. States a type, from an allow-list. |
 | `GET /settings` | The configuration as it was read. Read-only. |
 | `GET /health` | That the server is answering — the first route written, and the one that proves the event loop is free while a crawl runs. |
 
@@ -1464,6 +1473,70 @@ nobody states gets an indeterminate bar rather than one stuck at zero.
 - **No queue, no parallel transfers, no scheduler.**
 - **No stored downloads.** A run dies with the process; the library is the
   record.
+
+## The library and the viewer
+
+Sprint 12 is about comfort: staying in MaxiCrawler instead of reaching for a file
+manager. See ADR-027 and ADR-028.
+
+### Two services over one store
+
+`DownloadService` writes into the library; `LibraryService` reads it. Searching,
+filtering, sorting, paging and "may a browser be shown this" are the second
+service's business, and they live in `maxicrawler.app` so that a browser and a
+future `library list` command cannot answer them differently.
+
+| Type | Answers |
+| --- | --- |
+| `LibraryQuery` | *"What do you want to see?"* Search, provider, status, order, page. |
+| `LibraryPage` | *"Here it is, and here is where it sits."* Rows, counts, the providers and verdicts present. |
+| `LibraryItem` | One stored resource, from that entry's own metadata document. |
+| `StoredPayload` | A file that has been found on disk, and what may be done with it. |
+| `MediaVerdict` | A content type, an element to embed it in, or a reason it cannot be shown. |
+
+### Reading order matters
+
+Records are read, then filtered, then sorted, then cut to a page. Every ordering
+ends in the entry's own identity, so two files with the same name never swap
+places between requests. A value nobody recorded sorts last in either direction,
+because "unknown" is not a small size.
+
+The file system is still the index (ADR-010), which costs one small document per
+stored resource per listing — measured at about 0.3 seconds for two thousand
+entries warm, sixteen cold. An mtime-keyed cache would fix it and is not built
+yet; see the roadmap.
+
+### The viewer renders nothing
+
+One table maps a suffix to a content type and to the element that shows it.
+`mimetypes` is never consulted, because it reads the Windows registry and a
+content type decides whether a browser executes something. Markdown is served as
+`text/plain`: no browser renders it, and converting it would mean rendering it
+here.
+
+`…/file` is always an attachment and always `application/octet-stream`, so no
+browser decides to render it. `…/view` is the only route that states a type.
+
+### Two of these types are code
+
+A stored HTML page or SVG served inline runs in *this* origin, and there is no
+authentication in front of it. Both get `Content-Security-Policy: sandbox` and a
+sandboxed frame; a PDF, an image and plain text do not, because Chrome will not
+render a PDF under that policy and none of the three can reach our origin anyway.
+That split was measured, not reasoned — see ADR-027.
+
+A key from a URL is checked before it becomes a path segment, resolved, and
+refused if it leaves the library root — including through a symbolic link.
+
+### Deliberately not done
+
+- **No "open in the file manager".** A `file://` link from an `http://` page is
+  blocked, and the server running `explorer` would mean a web page launching a
+  local program. The path is shown and can be copied.
+- **No htmx.** Sorting and paging are links; on a loopback server a round trip
+  costs less than the vendored file would.
+- **No thumbnails, no previews in the table, no text extraction.** All three
+  would mean reading files to render them.
 
 ## Design rules
 
