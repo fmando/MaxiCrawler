@@ -1297,12 +1297,19 @@ def test_the_detail_page_shows_the_path_in_a_field_it_can_be_copied_from(
 ) -> None:
     """A `file://` link would be blocked; the server launching Explorer is worse."""
     with client(tmp_path, provider=make_provider()) as test_client:
-        body = test_client.get(stored_item(test_client)).text
+        where = stored_item(test_client)
+        body = unescape(test_client.get(where).text)
+        listing = unescape(test_client.get("/library").text)
 
     assert 'class="path"' in body
     assert "readonly" in body
     assert 'data-copy=".path"' in body
     assert "file://" not in body
+    # Native separators, and the same spelling in the table as in the field: a
+    # path somebody pastes into a file manager has one right form per platform.
+    stored = next((tmp_path / "library").rglob("stub.bin"))
+    assert str(stored) in body
+    assert str(stored) in listing
 
 
 def test_the_detail_page_never_shows_a_key(tmp_path: Path) -> None:

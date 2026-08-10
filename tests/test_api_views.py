@@ -956,7 +956,7 @@ def test_the_library_table_has_the_columns_it_promises() -> None:
     assert row["name"] == "Jump.pdf"
     assert row["size"] == "1.3 MB"
     assert row["downloaded_at"] == "2026-08-09 14:30"
-    assert row["path"] == "library/mega/abc/content/Jump.pdf"
+    assert row["path"] == str(Path("library") / "mega" / "abc" / "content" / "Jump.pdf")
     assert row["state_label"] == "completed"
     assert row["url"] == "/library/mega/abc"
 

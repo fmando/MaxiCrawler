@@ -483,7 +483,11 @@ def _library_row(item: LibraryItem) -> dict[str, Any]:
         "downloaded_at": (
             "—" if item.downloaded_at is None else format_timestamp(item.downloaded_at)
         ),
-        "path": "—" if item.path is None else item.path.as_posix(),
+        # Native separators, unlike the configured paths on the settings page.
+        # A configured value is written into a TOML file, which spells them one
+        # way on every platform; this is a location somebody pastes into their
+        # file manager, and there it has to be spelled the way the platform does.
+        "path": "—" if item.path is None else str(item.path),
         "source_url": item.source_url,
         "status": str(item.status),
         "state_label": STATUS_LABELS[item.status],
