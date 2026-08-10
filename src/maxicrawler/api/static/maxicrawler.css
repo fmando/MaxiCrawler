@@ -559,3 +559,20 @@ footer {
   height: auto;
   margin: 0 auto;
 }
+
+/*
+ * One line about the transfer that is running, on the pages you would be on
+ * while it does. Not a stream: a banner a few seconds stale still tells you the
+ * one thing it is for, which is that the download is still there.
+ */
+.running {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  font-size: 13px;
+}
+.running .url { flex: 1 1 auto; }

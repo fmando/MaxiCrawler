@@ -25,6 +25,7 @@ from urllib.parse import urlencode
 from maxicrawler.api.downloads import DownloadSnapshot
 from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.app import (
+    DownloadProgress,
     DownloadSummary,
     LibraryItem,
     LibraryPage,
@@ -264,6 +265,8 @@ def download_view(snapshot: DownloadSnapshot) -> dict[str, Any]:
         "files_finished": format_number(progress.files_finished),
         "has_many_files": progress.files_total > 1,
         "elapsed": format_duration(snapshot.elapsed_seconds),
+        "rate": _rate(progress.bytes_written, snapshot.elapsed_seconds),
+        "remaining": _remaining(progress, snapshot),
         "is_finished": snapshot.is_finished,
         "succeeded": snapshot.summary is not None and snapshot.summary.succeeded,
         "reason": snapshot.reason,
@@ -274,6 +277,39 @@ def download_view(snapshot: DownloadSnapshot) -> dict[str, Any]:
         # library itself is the right place to land.
         "item_url": _item_url(snapshot.summary),
     }
+
+
+MINIMUM_TIMED_SECONDS = 0.5
+"""How long a transfer must have run before its speed means anything.
+
+Two chunks in the first fifty milliseconds divide out to a rate no line is going
+to sustain, and a page that opened by claiming 400 MB/s would be lying twice —
+once about the speed and once about the time remaining.
+"""
+
+
+def _rate(written: int, elapsed: float) -> str | None:
+    """Return how fast a transfer is moving, or ``None`` while that is guesswork."""
+    if written <= 0 or elapsed < MINIMUM_TIMED_SECONDS:
+        return None
+    return f"{format_size(int(written / elapsed))}/s"
+
+
+def _remaining(progress: DownloadProgress, snapshot: DownloadSnapshot) -> str | None:
+    """Return how much longer this will take, when that can be said at all.
+
+    Needs three things nobody is owed: a total, a rate, and a transfer that has
+    not finished. The estimate is the crudest possible — bytes left over bytes
+    per second so far — and is offered as an estimate rather than dressed up,
+    because a download over a link nobody controls is not predictable.
+    """
+    total = progress.total_bytes
+    written = progress.bytes_written
+    if snapshot.is_finished or total is None or written <= 0:
+        return None
+    if snapshot.elapsed_seconds < MINIMUM_TIMED_SECONDS or written >= total:
+        return None
+    return format_duration((total - written) / (written / snapshot.elapsed_seconds))
 
 
 def _can_display(payload: StoredPayload | None) -> bool:

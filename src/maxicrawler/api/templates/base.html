@@ -24,6 +24,12 @@
   </header>
 
   <main>
+    {#
+      Where you are, for the pages that are one of many. A block rather than
+      something every template repeats, so the trail sits in the same place on
+      every page that has one and costs nothing on the pages that do not.
+    #}
+    {% block crumbs %}{% endblock %}
     {% block content %}{% endblock %}
   </main>
 

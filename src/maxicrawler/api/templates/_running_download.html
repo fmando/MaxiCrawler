@@ -1,0 +1,17 @@
+{#
+  The transfer that is running right now, on the pages you would be on while it
+  does.
+
+  There is one at most, and its own page is where the detail lives; this is the
+  line that keeps you from losing it by navigating away. Rendered by the server
+  on each request rather than streamed: a banner that is a few seconds stale
+  still tells you the one thing it is for.
+#}
+{% if running %}
+  <p class="running">
+    <span class="badge {{ running.state_tone }}">{{ running.state_label }}</span>
+    <span class="url">{{ running.label }}</span>
+    <span class="muted">{{ running.transferred }}</span>
+    <a href="/downloads/{{ running.download_id }}">Watch it</a>
+  </p>
+{% endif %}

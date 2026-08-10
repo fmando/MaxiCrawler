@@ -13,11 +13,13 @@
 {% extends "base.html" %}
 {% block title %}{{ item.name }} · MaxiCrawler{% endblock %}
 
-{% block content %}
+{% block crumbs %}
 <nav class="crumbs">
   <a href="/library">Library</a> <span class="muted">/</span> <span>{{ item.name }}</span>
 </nav>
+{% endblock %}
 
+{% block content %}
 <section class="panel">
   <h2>
     <span class="badge {{ item.state_tone }}">{{ item.state_label }}</span>

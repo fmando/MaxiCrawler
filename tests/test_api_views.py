@@ -1068,3 +1068,53 @@ def test_a_filter_survives_a_sort_link() -> None:
     assert "q=jump" in url
     assert "provider=mega" in url
     assert "status=completed" in url
+
+
+# --- how fast, and how much longer --------------------------------------------
+
+
+def test_a_transfer_that_has_run_long_enough_reports_a_rate() -> None:
+    shown = download_view(make_download_snapshot(written=1_000_000))
+
+    assert shown["rate"] == "80.0 KB/s"
+
+
+def test_the_first_few_milliseconds_report_nothing() -> None:
+    """Two chunks in fifty milliseconds divide out to a rate no line sustains."""
+    snapshot = DownloadSnapshot(
+        download_id="d1",
+        url="https://mega.nz/file/AaBbCcDd",
+        progress=DownloadProgress(
+            label="Jump.pdf", status=DownloadStatus.RUNNING, bytes_written=4, total_bytes=1000
+        ),
+        started_at=datetime(2026, 8, 9, 12, 0, tzinfo=UTC),
+        elapsed_seconds=0.05,
+    )
+
+    shown = download_view(snapshot)
+
+    assert shown["rate"] is None
+    assert shown["remaining"] is None
+
+
+def test_a_transfer_with_a_total_estimates_what_is_left() -> None:
+    shown = download_view(make_download_snapshot(written=650_000, total=1_300_000))
+
+    assert shown["remaining"] == "12.5 s"
+
+
+def test_nothing_is_estimated_without_a_total() -> None:
+    assert download_view(make_download_snapshot(total=None))["remaining"] is None
+
+
+def test_a_finished_transfer_estimates_nothing() -> None:
+    shown = download_view(make_download_snapshot(summary=make_summary()))
+
+    assert shown["remaining"] is None
+
+
+def test_a_transfer_that_has_arrived_in_full_estimates_nothing() -> None:
+    """Zero seconds left is a claim; saying nothing is not."""
+    shown = download_view(make_download_snapshot(written=1_300_000, total=1_300_000))
+
+    assert shown["remaining"] is None

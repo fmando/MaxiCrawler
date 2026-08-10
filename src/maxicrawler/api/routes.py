@@ -84,6 +84,17 @@ def library_of(request: Request) -> LibraryService:
     return service
 
 
+def _running(request: Request) -> dict[str, Any] | None:
+    """Return the transfer running right now, for the pages that mention it.
+
+    One line on the dashboard and above the library, so navigating away from a
+    download does not mean losing it. ``None`` when nothing is running, which is
+    most of the time.
+    """
+    run = downloads_of(request).active()
+    return None if run is None else views.download_view(run.snapshot())
+
+
 def _download(request: Request) -> DownloadRun:
     """Return the download this request addresses.
 
@@ -351,6 +362,7 @@ async def library(request: Request) -> Response:
         {
             "library": views.library_view(service.browse(_query(request))),
             "library_path": service.library_root.as_posix(),
+            "running": _running(request),
         },
         section="library",
     )
@@ -618,6 +630,7 @@ def _dashboard(
         {
             "crawls": views.crawl_rows(jobs.service.stored_crawls(limit=20), live=_live(jobs)),
             "form": {**(form_values or _default_form(jobs)), "action": "/crawls", "error": error},
+            "running": _running(request),
         },
         section="dashboard",
     )

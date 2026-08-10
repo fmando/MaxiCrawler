@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from html import unescape
 from pathlib import Path
+from threading import Event
 from time import monotonic, sleep
 
 import pytest
@@ -22,9 +23,9 @@ from maxicrawler.api.routes import SECTIONS, STATIC_DIRECTORY, TEMPLATES
 from maxicrawler.app import CrawlService, DownloadService, LibraryService, crawl_document
 from maxicrawler.config import Settings
 from maxicrawler.database import SQLiteCrawlRepository, SQLiteDatabase
-from maxicrawler.domain import ProviderCapability
+from maxicrawler.domain import ContentDescriptor, ProviderCapability, ResourceRef
 from maxicrawler.library import Library
-from maxicrawler.providers import ProviderRegistry
+from maxicrawler.providers import DownloadSink, ProviderRegistry
 from maxicrawler.web.report import CrawlReport, CrawlStatistics
 from maxicrawler.web.session import CrawlOptions, CrawlSession, CrawlState
 
@@ -88,6 +89,29 @@ def finished_download(test_client: TestClient, url: str = MEGA_URL) -> str:
             return body
         sleep(0.01)
     raise AssertionError("the download did not finish within 10s")
+
+
+class BlockingProvider(StubProvider):
+    """A stub whose transfer waits until a test lets it finish."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "mega",
+            url_prefix="https://mega.nz/",
+            capabilities=frozenset({ProviderCapability.INSPECT, ProviderCapability.DOWNLOAD}),
+            payload=b"stub payload",
+        )
+        self.transferring = Event()
+        self.release = Event()
+
+    def download(self, ref: ResourceRef, sink: DownloadSink) -> ContentDescriptor:
+        descriptor = ContentDescriptor(name="stub.bin", size=12)
+        sink.begin(descriptor)
+        sink.write(b"stub ")
+        self.transferring.set()
+        self.release.wait(timeout=10)
+        sink.write(b"payload")
+        return descriptor
 
 
 def make_provider() -> StubProvider:
@@ -1534,3 +1558,55 @@ def test_the_viewer_refuses_what_it_cannot_address(tmp_path: Path) -> None:
     with client(tmp_path) as test_client:
         assert test_client.get("/library/mega/nothing/view").status_code == 404
         assert test_client.get("/library/../../secret/view").status_code == 404
+
+
+# --- comfort around the edges -------------------------------------------------
+
+
+def test_a_running_download_is_visible_from_elsewhere(tmp_path: Path) -> None:
+    """Navigating away from a transfer should not mean losing it."""
+    provider = BlockingProvider()
+    with client(tmp_path, provider=provider) as test_client:
+        response = test_client.post("/downloads", data={"url": MEGA_URL}, follow_redirects=False)
+        assert provider.transferring.wait(timeout=10)
+        try:
+            dashboard = test_client.get("/").text
+            library = test_client.get("/library").text
+        finally:
+            provider.release.set()
+        test_client.get(response.headers["location"])
+
+    for body in (dashboard, library):
+        assert 'class="running"' in body
+        assert "Watch it" in body
+
+
+def test_nothing_is_announced_when_nothing_is_running(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        assert 'class="running"' not in test_client.get("/").text
+        assert 'class="running"' not in test_client.get("/library").text
+
+
+def test_a_crawl_page_says_where_it_sits(tmp_path: Path) -> None:
+    record_crawl(
+        tmp_path,
+        seed="https://example.test/",
+        state=CrawlState.COMPLETED,
+        pages=3,
+        session_id="c1",
+    )
+
+    with client(tmp_path) as test_client:
+        body = test_client.get("/crawls/c1").text
+
+    assert 'class="crumbs"' in body
+    assert 'href="/crawls"' in body
+
+
+def test_a_running_download_page_shows_speed_and_what_is_left(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        body = finished_download(test_client)
+
+    assert "Speed" in body
+    # A finished transfer has nothing left to estimate, so that row is gone.
+    assert "Remaining" not in body
