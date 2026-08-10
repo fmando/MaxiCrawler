@@ -534,3 +534,28 @@ footer {
   cursor: pointer;
 }
 .pathbox button:hover { background: var(--bg); }
+
+/*
+ * Where the browser shows the file. A fixed height rather than a fitted one:
+ * the content is inside a sandboxed frame of its own origin, so nothing here
+ * can measure it, and a frame that guessed would jump on every load.
+ */
+.viewer {
+  margin-top: 16px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+}
+.viewer iframe {
+  display: block;
+  width: 100%;
+  height: 70vh;
+  min-height: 320px;
+  border: 0;
+  background: #fff;
+}
+.viewer img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}

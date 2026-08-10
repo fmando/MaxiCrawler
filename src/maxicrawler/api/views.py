@@ -276,6 +276,11 @@ def download_view(snapshot: DownloadSnapshot) -> dict[str, Any]:
     }
 
 
+def _can_display(payload: StoredPayload | None) -> bool:
+    """Return whether there is a file here that a browser may be shown."""
+    return payload is not None and payload.media.can_display
+
+
 def _item_url(summary: DownloadSummary | None) -> str | None:
     """Return the library page of the one file a download fetched, if it was one."""
     if summary is None or summary.directory is None or summary.key is None:
@@ -351,6 +356,17 @@ def item_view(item: LibraryItem, payload: StoredPayload | None) -> dict[str, Any
         "library_url": "/library",
         "file_url": f"{base}/file" if payload is not None else None,
         "is_stored": payload is not None,
+        # How, and whether, the page embeds the file itself. `display` is the
+        # element to use rather than a type to branch on, so the template asks
+        # no questions about media at all.
+        "view_url": f"{base}/view" if _can_display(payload) else None,
+        "display": None if payload is None else str(payload.media.display),
+        "view_reason": None if payload is None else payload.media.reason,
+        # Whether the frame showing it needs the `sandbox` attribute. True for
+        # the types that could execute script; false for a PDF, which Chrome
+        # refuses to render inside a sandboxed frame at all, and which cannot
+        # reach our origin anyway.
+        "sandboxed": payload is not None and payload.media.is_script_capable,
         # The record says there is a file and there is not: worth its own
         # sentence, because the answer is to download it again rather than to
         # wonder what the page means.

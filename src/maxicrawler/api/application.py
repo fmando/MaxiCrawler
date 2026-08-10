@@ -122,6 +122,12 @@ def create_app(
             ),
             Route("/library", routes.library, methods=["GET"], name="library"),
             Route(
+                "/library/{provider}/{key}/view",
+                routes.library_view,
+                methods=["GET"],
+                name="library_view",
+            ),
+            Route(
                 "/library/{provider}/{key}/file",
                 routes.library_file,
                 methods=["GET"],

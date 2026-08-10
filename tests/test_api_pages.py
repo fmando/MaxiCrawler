@@ -1,5 +1,6 @@
 """Tests for the layout, the navigation and the dashboard."""
 
+import json
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -18,7 +19,7 @@ from maxicrawler.api import create_app
 from maxicrawler.api.downloads import DownloadRuns
 from maxicrawler.api.jobs import CrawlJobs
 from maxicrawler.api.routes import SECTIONS, STATIC_DIRECTORY, TEMPLATES
-from maxicrawler.app import CrawlService, DownloadService, crawl_document
+from maxicrawler.app import CrawlService, DownloadService, LibraryService, crawl_document
 from maxicrawler.config import Settings
 from maxicrawler.database import SQLiteCrawlRepository, SQLiteDatabase
 from maxicrawler.domain import ProviderCapability
@@ -33,7 +34,9 @@ MEGA_URL = f"https://mega.nz/file/AaBbCcDd#{MEGA_KEY}"
 
 
 @contextmanager
-def client(tmp_path: Path, *, provider: StubProvider | None = None) -> Iterator[TestClient]:
+def client(
+    tmp_path: Path, *, provider: StubProvider | None = None, max_view_bytes: int | None = None
+) -> Iterator[TestClient]:
     """Yield a client over an application with a throwaway database and library.
 
     Both storage locations are below *tmp_path*, so no test can read or write
@@ -43,6 +46,7 @@ def client(tmp_path: Path, *, provider: StubProvider | None = None) -> Iterator[
         user_agent="MaxiCrawler/test",
         database_path=tmp_path / "urls.db",
         library_path=tmp_path / "library",
+        **({} if max_view_bytes is None else {"max_view_bytes": max_view_bytes}),
     )
     service = CrawlService(settings)
     jobs = CrawlJobs(service, persist=False)
@@ -53,7 +57,12 @@ def client(tmp_path: Path, *, provider: StubProvider | None = None) -> Iterator[
             library=Library(settings.library_path),
         )
     )
-    application = create_app(service=service, jobs=jobs, downloads=downloads)
+    application = create_app(
+        service=service,
+        jobs=jobs,
+        downloads=downloads,
+        library=LibraryService(settings, library=Library(settings.library_path)),
+    )
     try:
         with TestClient(application) as test_client:
             yield test_client
@@ -1349,3 +1358,179 @@ def test_the_copy_script_is_served(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert "clipboard" in response.text
+
+
+# --- showing a file in the browser -------------------------------------------
+
+
+def store(tmp_path: Path, filename: str, payload: bytes = b"hello") -> str:
+    """Write one finished library entry by hand and return its page path."""
+    from maxicrawler.domain import DownloadStatus, ResourceKind, ResourceRef
+    from maxicrawler.library import new_record
+
+    library = Library(tmp_path / "library")
+    library.initialize()
+    ref = ResourceRef(
+        provider="mega",
+        resource_id="AaBbCcDd",
+        kind=ResourceKind.FILE,
+        url="https://mega.nz/file/AaBbCcDd",
+    )
+    entry = library.entry(ref)
+    stored = entry.content_path(filename)
+    stored.parent.mkdir(parents=True, exist_ok=True)
+    stored.write_bytes(payload)
+    document = new_record(
+        ref, entry.key, status=DownloadStatus.COMPLETED, name=filename
+    ).to_document()
+    document["downloaded_at"] = STARTED.isoformat()
+    document["content"] = {
+        "filename": filename,
+        "path": f"content/{filename}",
+        "size": len(payload),
+        "checksums": [{"algorithm": "sha256", "value": "abc"}],
+    }
+    entry.path.mkdir(parents=True, exist_ok=True)
+    entry.metadata_path.write_text(json.dumps(document), encoding="utf-8")
+    return f"/library/mega/{entry.key}"
+
+
+@pytest.mark.parametrize(
+    ("filename", "content_type", "element"),
+    [
+        ("notes.txt", "text/plain; charset=utf-8", "<iframe"),
+        ("readme.md", "text/plain; charset=utf-8", "<iframe"),
+        ("Jump.pdf", "application/pdf", "<iframe"),
+        ("photo.png", "image/png", "<img"),
+        ("drawing.svg", "image/svg+xml", "<img"),
+        ("page.html", "text/html; charset=utf-8", "<iframe"),
+    ],
+)
+def test_a_file_the_browser_can_show_is_shown(
+    tmp_path: Path, filename: str, content_type: str, element: str
+) -> None:
+    where = store(tmp_path, filename)
+
+    with client(tmp_path) as test_client:
+        body = test_client.get(where).text
+        response = test_client.get(f"{where}/view")
+
+    assert f'{element} src="{where}/view"' in body
+    assert response.status_code == 200
+    assert response.headers["content-type"] == content_type
+    assert "inline" in response.headers["content-disposition"]
+
+
+@pytest.mark.parametrize("filename", ["page.html", "drawing.svg"])
+def test_what_could_execute_script_is_sandboxed(tmp_path: Path, filename: str) -> None:
+    """The one assertion that keeps a stored page out of our own origin."""
+    where = store(tmp_path, filename, b"<script>fetch('/settings')</script>")
+
+    with client(tmp_path) as test_client:
+        response = test_client.get(f"{where}/view")
+
+    policy = response.headers["content-security-policy"]
+    assert "sandbox" in policy
+    assert "default-src 'none'" in policy
+
+
+@pytest.mark.parametrize("filename", ["notes.txt", "Jump.pdf", "photo.png", "page.html"])
+def test_every_inline_answer_refuses_to_be_re_sniffed(tmp_path: Path, filename: str) -> None:
+    where = store(tmp_path, filename)
+
+    with client(tmp_path) as test_client:
+        response = test_client.get(f"{where}/view")
+
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
+
+
+@pytest.mark.parametrize("filename", ["Jump.pdf", "photo.png", "notes.txt"])
+def test_what_cannot_execute_script_is_not_sandboxed(tmp_path: Path, filename: str) -> None:
+    """Measured, not assumed: Chrome refuses to render a PDF under that policy.
+
+    `ERR_BLOCKED_BY_CLIENT`, because the directive blocks the plugin its viewer
+    is. These three cannot reach our origin anyway — a PDF's own script runs in
+    the browser's viewer, not in the page that framed it — so the policy would
+    have cost the whole feature and bought nothing.
+    """
+    where = store(tmp_path, filename)
+
+    with client(tmp_path) as test_client:
+        response = test_client.get(f"{where}/view")
+
+    assert "content-security-policy" not in response.headers
+
+
+def test_a_frame_holding_script_capable_content_is_sandboxed_as_well(tmp_path: Path) -> None:
+    where = store(tmp_path, "page.html")
+
+    with client(tmp_path) as test_client:
+        body = test_client.get(where).text
+
+    assert "<iframe" in body
+    assert "sandbox" in body.split("<iframe", 1)[1].split(">", 1)[0]
+
+
+def test_a_pdf_frame_carries_no_sandbox_attribute(tmp_path: Path) -> None:
+    """The attribute blocks Chrome's PDF viewer exactly as the header does."""
+    where = store(tmp_path, "Jump.pdf")
+
+    with client(tmp_path) as test_client:
+        body = test_client.get(where).text
+
+    assert "<iframe" in body
+    assert "sandbox" not in body.split("<iframe", 1)[1].split(">", 1)[0]
+
+
+def test_an_svg_is_never_framed(tmp_path: Path) -> None:
+    """An `<img>` runs no script even when the file behind it contains some."""
+    where = store(tmp_path, "drawing.svg", b'<svg xmlns="http://www.w3.org/2000/svg"/>')
+
+    with client(tmp_path) as test_client:
+        body = test_client.get(where).text
+
+    assert f'<img src="{where}/view"' in body
+    assert "<iframe" not in body
+
+
+def test_a_type_nothing_can_show_says_so_and_offers_the_download(tmp_path: Path) -> None:
+    where = store(tmp_path, "ubuntu.iso")
+
+    with client(tmp_path) as test_client:
+        body = test_client.get(where).text
+        response = test_client.get(f"{where}/view")
+
+    assert "can show" in body
+    assert f'href="{where}/file"' in body
+    assert "<iframe" not in body
+    assert response.status_code == 415
+
+
+def test_a_file_above_the_limit_is_offered_rather_than_shown(tmp_path: Path) -> None:
+    where = store(tmp_path, "Jump.pdf", b"x" * 200)
+
+    with client(tmp_path, max_view_bytes=100) as test_client:
+        body = unescape(test_client.get(where).text)
+        response = test_client.get(f"{where}/view")
+
+    assert "above the viewer's" in body
+    assert f'href="{where}/file"' in body
+    assert response.status_code == 415
+
+
+def test_a_viewer_answer_supports_a_range_request(tmp_path: Path) -> None:
+    """What a PDF viewer uses to seek instead of fetching the whole file."""
+    where = store(tmp_path, "Jump.pdf", b"0123456789")
+
+    with client(tmp_path) as test_client:
+        response = test_client.get(f"{where}/view", headers={"Range": "bytes=2-5"})
+
+    assert response.status_code == 206
+    assert response.content == b"2345"
+
+
+def test_the_viewer_refuses_what_it_cannot_address(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        assert test_client.get("/library/mega/nothing/view").status_code == 404
+        assert test_client.get("/library/../../secret/view").status_code == 404

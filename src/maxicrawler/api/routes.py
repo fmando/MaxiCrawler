@@ -397,6 +397,61 @@ async def library_file(request: Request) -> Response:
     )
 
 
+VIEW_HEADERS = {
+    # A `.txt` must not be re-interpreted as HTML by a browser that thinks it
+    # knows better, and no URL of ours travels outward in a referrer. Both are
+    # true of every type, so both are unconditional.
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+"""What every inline answer carries."""
+
+SANDBOX_POLICY = "sandbox; default-src 'none'; frame-ancestors 'self'"
+"""What an inline answer that could execute script carries as well.
+
+``sandbox`` is the directive that matters: the browser treats the response as its
+own opaque origin, so a stored HTML page or SVG cannot reach the interface that
+served it. Without it, showing somebody's downloaded HTML inline would hand that
+HTML every power this unauthenticated interface has — reading the settings page,
+starting a crawl, starting a download.
+
+It is **not** sent for the other types, and that is a finding rather than an
+omission: Chrome refuses to render a PDF under it (``ERR_BLOCKED_BY_CLIENT``),
+because the directive blocks the plugin its viewer is. A PDF, an image and plain
+text cannot execute script in our origin in the first place — a PDF's own script
+runs inside the browser's viewer, not in the page that framed it — so the policy
+would cost the whole feature and buy nothing. See ADR-027.
+"""
+
+
+async def library_view(request: Request) -> Response:
+    """Answer with the stored bytes for a browser to display.
+
+    The only route that states what a file *is*, and it does so only for the
+    types :mod:`maxicrawler.app.viewing` allows — MaxiCrawler renders nothing
+    itself, converts nothing, and interprets nothing.
+
+    Raises:
+        HTTPException: there is no such file, or nothing here can show it. The
+            second is 415 with the reason: the resource exists, and what is
+            missing is a representation a browser could be handed.
+    """
+    payload = _payload(request)
+    media = payload.media
+    if not media.can_display:
+        raise HTTPException(status_code=415, detail=media.reason or "cannot be displayed")
+    headers = dict(VIEW_HEADERS)
+    if media.is_script_capable:
+        headers["Content-Security-Policy"] = SANDBOX_POLICY
+    return FileResponse(
+        payload.path,
+        filename=payload.filename,
+        media_type=media.content_type,
+        content_disposition_type="inline",
+        headers=headers,
+    )
+
+
 def _payload(request: Request) -> StoredPayload:
     """Return the file this request addresses.
 

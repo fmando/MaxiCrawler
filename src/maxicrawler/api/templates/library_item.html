@@ -59,6 +59,38 @@
       </tbody>
     </table>
 
+    {#
+      The file itself, shown by the browser rather than by us.
+
+      A frame holding something that could execute script is sandboxed as well
+      as the response being sandboxed by its own header -- a stored HTML page
+      must not reach the interface that framed it, and saying so twice costs
+      nothing. A PDF is framed *without* the attribute, because Chrome will not
+      render its viewer inside a sandboxed frame, and a PDF cannot reach our
+      origin in the first place.
+
+      An SVG arrives as an `<img>`, never as a frame, because an image element
+      runs no script even when the file behind it contains some.
+    #}
+    {% if item.view_url %}
+      <div class="viewer">
+        {% if item.display == "image" %}
+          <img src="{{ item.view_url }}" alt="{{ item.name }}">
+        {% else %}
+          <iframe src="{{ item.view_url }}"{% if item.sandboxed %} sandbox{% endif %}
+                  title="{{ item.name }}"></iframe>
+        {% endif %}
+      </div>
+      <p class="muted small">
+        <a href="{{ item.view_url }}">Open on its own</a>
+      </p>
+    {% elif item.is_stored and item.view_reason %}
+      <p class="empty">
+        {{ item.view_reason }}.
+        <a href="{{ item.file_url }}">Download it</a> to open it elsewhere.
+      </p>
+    {% endif %}
+
     {% if item.path %}
       <div class="pathbox">
         <label>
