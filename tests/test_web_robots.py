@@ -7,8 +7,21 @@ true if it were ever replaced -- which is exactly the list in ADR-029.
 
 import pytest
 
+from maxicrawler.web import (
+    ContentEncodingError,
+    ContentTypeError,
+    CrawlPolicy,
+    FetchedPage,
+    FetchError,
+    HttpStatusError,
+    PolicyRule,
+    ResponseTooLargeError,
+    TooManyRedirectsError,
+    TransportError,
+)
 from maxicrawler.web.robots import (
     MAX_ROBOTS_BYTES,
+    RobotsPolicy,
     RobotsRules,
     decode_robots,
     origin_of,
@@ -280,3 +293,199 @@ def no_sockets(monkeypatch: pytest.MonkeyPatch) -> None:
         raise AssertionError(message)
 
     monkeypatch.setattr("socket.socket", forbidden)
+
+
+# --- the policy over the rules -----------------------------------------------
+
+
+class FakeFetcher:
+    """A `PageFetcher` that answers from a script rather than from a network."""
+
+    def __init__(self, body: bytes | FetchError = b"", *, content_type: str = "text/plain") -> None:
+        self._body = body
+        self._content_type = content_type
+        self.asked: list[str] = []
+
+    def fetch(self, url: str) -> FetchedPage:
+        self.asked.append(url)
+        if isinstance(self._body, FetchError):
+            raise self._body
+        return FetchedPage(
+            requested_url=url,
+            final_url=url,
+            status=200,
+            body=self._body,
+            content_type=self._content_type,
+        )
+
+
+def make_policy(body: bytes | FetchError = b"", **kwargs: object) -> RobotsPolicy:
+    """Return a policy over a fetcher answering with *body*."""
+    return RobotsPolicy(FakeFetcher(body), user_agent="MaxiCrawler/0.1.0", **kwargs)  # type: ignore[arg-type]
+
+
+def test_the_policy_satisfies_the_crawl_policy_protocol() -> None:
+    assert isinstance(make_policy(), CrawlPolicy)
+
+
+def test_a_permitted_url_is_permitted() -> None:
+    policy = make_policy(b"User-agent: *\nDisallow: /private/\n")
+
+    assert policy.may_fetch("https://e.org/public").allowed is True
+
+
+def test_a_disallowed_url_is_refused_under_the_robots_rule() -> None:
+    policy = make_policy(b"User-agent: *\nDisallow: /private/\n")
+
+    decision = policy.may_fetch("https://e.org/private/x")
+
+    assert decision.allowed is False
+    assert decision.rule is PolicyRule.ROBOTS
+    assert decision.reason is not None
+    assert "robots.txt" in decision.reason
+
+
+def test_the_rules_are_looked_for_once_per_origin() -> None:
+    fetcher = FakeFetcher(b"User-agent: *\nDisallow: /private/\n")
+    policy = RobotsPolicy(fetcher, user_agent="MaxiCrawler/0.1.0")
+
+    for path in ("/a", "/b", "/private/c", "/d"):
+        policy.may_fetch(f"https://e.org{path}")
+
+    assert fetcher.asked == ["https://e.org/robots.txt"]
+
+
+def test_two_origins_are_asked_separately() -> None:
+    fetcher = FakeFetcher(b"")
+    policy = RobotsPolicy(fetcher, user_agent="MaxiCrawler/0.1.0")
+
+    policy.may_fetch("https://one.test/a")
+    policy.may_fetch("https://two.test/a")
+    policy.may_fetch("https://one.test/b")
+
+    assert fetcher.asked == ["https://one.test/robots.txt", "https://two.test/robots.txt"]
+
+
+def test_the_rules_are_asked_for_at_the_root_however_deep_the_url() -> None:
+    fetcher = FakeFetcher(b"")
+    RobotsPolicy(fetcher, user_agent="MaxiCrawler/0.1.0").may_fetch("https://e.org/a/b/c?d=e#f")
+
+    assert fetcher.asked == ["https://e.org/robots.txt"]
+
+
+def test_a_url_without_a_host_is_not_this_policys_business() -> None:
+    """Refusing it here would report the wrong reason for it."""
+    assert make_policy().may_fetch("mailto:someone@example.org").allowed is True
+
+
+# --- what a failure to read the rules means ----------------------------------
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 410, 429])
+def test_a_client_error_leaves_the_crawler_free(status: int) -> None:
+    """RFC 9309: "unavailable" means a crawler may access any resource."""
+    policy = make_policy(HttpStatusError(f"HTTP {status}", status=status))
+
+    assert policy.may_fetch("https://e.org/anything").allowed is True
+
+
+@pytest.mark.parametrize("status", [500, 502, 503])
+def test_a_server_error_forbids_everything(status: int) -> None:
+    """RFC 9309: "unreachable" means assume complete disallow.
+
+    We do not know what this host allows, and helping ourselves to the benefit
+    of the doubt is exactly what a crawler must not do.
+    """
+    policy = make_policy(HttpStatusError(f"HTTP {status}", status=status))
+
+    assert policy.may_fetch("https://e.org/anything").allowed is False
+
+
+def test_a_host_that_cannot_be_reached_forbids_everything() -> None:
+    policy = make_policy(TransportError("connection refused"))
+
+    assert policy.may_fetch("https://e.org/anything").allowed is False
+
+
+def test_denying_on_error_can_be_turned_off() -> None:
+    policy = make_policy(TransportError("connection refused"), deny_on_error=False)
+
+    assert policy.may_fetch("https://e.org/anything").allowed is True
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ContentTypeError("a page, not rules", content_type="text/html"),
+        ResponseTooLargeError("more than we will hold"),
+        ContentEncodingError("a broken body"),
+        TooManyRedirectsError("a chain that never resolved"),
+    ],
+)
+def test_rules_we_declined_to_read_are_not_a_host_saying_no(failure: FetchError) -> None:
+    """Unreadable is not the same as unreachable.
+
+    A soft 404 served as HTML, a document larger than we will hold, a redirect
+    loop -- none of them is a server failing, so each reads as "this host
+    published no robots.txt".
+    """
+    assert make_policy(failure).may_fetch("https://e.org/anything").allowed is True
+
+
+def test_a_failure_is_remembered_rather_than_repeated() -> None:
+    """Otherwise every URL on a dead host pays for the same failed request."""
+    fetcher = FakeFetcher(TransportError("connection refused"))
+    policy = RobotsPolicy(fetcher, user_agent="MaxiCrawler/0.1.0")
+
+    for path in ("/a", "/b", "/c"):
+        assert policy.may_fetch(f"https://e.org{path}").allowed is False
+
+    assert len(fetcher.asked) == 1
+
+
+# --- the delay ---------------------------------------------------------------
+
+
+def test_the_delay_comes_from_the_group_that_applies() -> None:
+    policy = make_policy(b"User-agent: MaxiCrawler\nCrawl-delay: 2.5\n")
+
+    assert policy.delay_for("https://e.org/a") == 2.5
+
+
+def test_a_host_that_asks_for_no_delay_gets_none() -> None:
+    assert make_policy(b"User-agent: *\nDisallow: /x\n").delay_for("https://e.org/a") is None
+
+
+def test_a_hostile_delay_is_clamped() -> None:
+    """One line in a stranger's file must not be able to freeze a crawl."""
+    policy = make_policy(b"User-agent: *\nCrawl-delay: 86400\n", max_delay=30.0)
+
+    assert policy.delay_for("https://e.org/a") == 30.0
+
+
+def test_a_delay_under_the_clamp_is_kept() -> None:
+    policy = make_policy(b"User-agent: *\nCrawl-delay: 5\n", max_delay=30.0)
+
+    assert policy.delay_for("https://e.org/a") == 5.0
+
+
+def test_the_delay_is_answered_from_the_same_cache_as_the_rules() -> None:
+    fetcher = FakeFetcher(b"User-agent: *\nCrawl-delay: 1\n")
+    policy = RobotsPolicy(fetcher, user_agent="MaxiCrawler/0.1.0")
+
+    policy.may_fetch("https://e.org/a")
+    policy.delay_for("https://e.org/a")
+
+    assert len(fetcher.asked) == 1
+
+
+def test_the_policy_is_matched_under_its_product_token() -> None:
+    policy = make_policy(b"User-agent: MaxiCrawler\nDisallow: /private/\n")
+
+    assert policy.token == "MaxiCrawler"
+    assert policy.may_fetch("https://e.org/private/x").allowed is False
+
+
+def test_a_negative_clamp_is_refused() -> None:
+    with pytest.raises(ValueError, match="max_delay"):
+        make_policy(max_delay=-1.0)
