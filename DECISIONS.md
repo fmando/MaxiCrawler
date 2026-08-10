@@ -754,7 +754,7 @@ a download runs travels with it.
 ADR-026 said "one at a time, and no queue", and gave the reason: a queue needs a
 policy for ordering, cancelling, resuming and surviving a restart, and none of
 that was worth inventing before a single download worked end to end. It has
-worked for two sprints. This is the ADR that pays that debt, and it answers
+worked since. This is the ADR that pays that debt, and it answers
 three of those four questions and refuses the fourth.
 
 **Ordering: the order they arrived, with a way to change it.** A queue that

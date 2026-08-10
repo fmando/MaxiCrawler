@@ -33,8 +33,15 @@
     {% block content %}{% endblock %}
   </main>
 
+  {#
+    Said on every page because it is true on every page, and kept short for the
+    same reason. It stopped saying "robots.txt is not consulted yet" when that
+    stopped being true -- a footer nobody updates is one everybody learns to
+    stop reading.
+  #}
   <footer>
-    Crawling is your responsibility: robots.txt is not consulted yet.
+    robots.txt is obeyed unless a crawl was told otherwise. What you point this
+    at is still yours to answer for.
   </footer>
 </body>
 </html>

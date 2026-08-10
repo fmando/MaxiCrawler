@@ -20,6 +20,8 @@ what the project deliberately will not do.
 - A provider-independent download manager: a new host is a plugin and a provider, nothing else.
 - A self-describing library: one directory per resource, with versioned JSON metadata beside it.
 - A searchable library in the browser, and a viewer that lets the browser display what it can — no renderer of our own.
+- A crawl report you can search, filter, sort, page and bookmark, with every link classified by what it points at.
+- A download queue you can reorder, pause and retry, and one click to queue everything a filter matches.
 - Typed interfaces and strict static checking with mypy.
 - Fast formatting and linting with Ruff.
 - Test-first baseline with pytest.
@@ -1102,6 +1104,11 @@ become the primary one.
 Naming all four from the beginning is deliberate. Two of them do very little
 yet, and saying so is cheaper than rearranging every page around them later.
 
+(A fifth, **Downloads**, joined them in Sprint 15 — not from the beginning,
+because until there was a queue it would have been a heading over a single
+link. That is the exception the rule above is about: a section earns its place
+when there is a set to show, not when there is one thing.)
+
 ### A crawl you can watch
 
 Starting a crawl redirects to its page immediately; the crawl itself runs on a
@@ -1608,6 +1615,150 @@ Every default is the safe one.
 - **Sitemaps**, which robots.txt already tells us about and nothing yet reads.
 - **A download queue.** Stopping one download is not scheduling several, and
   that is still a separate subject with an order, a resume and a restart in it.
+
+## Sprint 15: workflow and productivity
+
+The jump from Sprint 13 is not a gap in the record: the sprint numbering and
+the milestone numbering came one apart after 0.13, and nothing between them was
+large enough to be a milestone of its own. This sprint is milestone 0.14.
+
+Everything so far made MaxiCrawler *capable*: it crawls politely, downloads
+provider-independently, and stores what it fetched in a library you can search.
+What it was not yet was *quick to use*. A crawl of a link directory produced a
+table of four thousand rows with no way to narrow it, and every download was one
+click on one row followed by waiting for it to finish before the next one could
+start.
+
+This sprint is about the distance between "MaxiCrawler can do that" and "I did
+that". Five things, and the last one is what the first four were for.
+
+### A report you can navigate
+
+The link table searches, filters, sorts, pages, and lets you hide columns you
+are not reading — all rendered by the server, all in the URL, so any view of it
+can be bookmarked and shared.
+
+Filtering is by plugin, by category, by what the URL points at, and by whether
+this installation could fetch it at all. The chips carry counts, because how
+many of a thing there are is most of what decides whether you want only those:
+
+```text
+Plugin      mega 1,291    generic 2,684    (unresolved) 25
+Type        archive 902   document 411     video 87
+```
+
+Two details worth naming. The counts are over the **whole crawl** rather than
+over the matches, the same way the library lists its providers — choosing one
+filter must never remove the entry you would use to choose a different one. And
+a page number past the end is clamped rather than refused, so a bookmark from
+before a re-crawl lands on the last page instead of an error.
+
+The table of pages the crawl *reached* got the same treatment, with its own
+parameters, so filtering one never quietly discards the filter on the other.
+
+### A link is classified by what it points at
+
+`document`, `image`, `archive`, `video`, `audio`, `page`, `unknown` — decided
+from the URL alone, from an explicit table rather than from `mimetypes`, which
+reads the Windows registry and would make the same crawl classify differently on
+two machines.
+
+This is a different question from which plugin claimed a URL. A host-specific
+plugin can classify a link whose provider cannot transfer anything, and "show me
+the archives" is a question nobody could ask before.
+
+### A download queue
+
+ADR-026 said "one at a time, and no queue", and gave the reason: a queue needs a
+policy for ordering, cancelling, resuming and surviving a restart, and none of
+it was worth inventing before one download worked end to end. It has worked for
+several sprints. ADR-033 answers three of those four questions and refuses the
+fourth in writing.
+
+Requests are drained in the order they arrived by a single worker. You can move
+one up, down or to the front; pause the queue; and remove something waiting or
+stop something running with the same button, because they are one intention.
+Retry queues a *new* request rather than resetting the old one, so what happened
+the first time stays readable.
+
+Two things it deliberately does not do. It does not resume a *file* — that needs
+range requests and a stored byte offset, and the word is overloaded enough to be
+worth saying plainly. And it does not survive a restart, which it could not do
+honestly before resume exists: a restored queue could only offer to start the
+same files again from zero.
+
+One worker is a politeness decision rather than a limit. The queue is guarded
+throughout and the worker holds no state between requests, so a second thread on
+the same drain loop needs no other change — what stops it is that "how many
+transfers may one host face at once" is the kind of question robots.txt answers
+for crawling, and this sprint is about a person's workflow rather than a host's
+patience.
+
+### Downloads became a section
+
+`/downloads` shows the whole queue: what is running, what is waiting, and what
+became of the rest, with the counters that answer "how much is left".
+
+It has no event stream of its own. It embeds the running transfer's stream, and
+the same script that keeps one download's page current reloads this one when
+that transfer ends — which is exactly when the next one starts and everything
+else on the page changes. A queue nobody is draining has nothing to send.
+
+Reordering is three buttons rather than drag and drop. That would be a
+JavaScript dependency for the last five percent of a control the buttons already
+give, on a page that otherwise needs none — and it would leave anybody working
+by keyboard with no way to do it at all.
+
+### One click for a set of links
+
+The control the other four were for. A filtered report is a set somebody has
+already decided on, and ticking two hundred boxes to say so again is not less
+work than clicking two hundred buttons.
+
+So there are two controls, and the difference between them is the point:
+
+- **Queue selected** takes the rows that were ticked. The URLs travel in the
+  request body, because a share link keeps its decryption key in the URL
+  fragment and a fragment is the one part of a URL a browser never sends in a
+  link.
+- **Queue every fetchable match** takes the *filter*. The report's query travels
+  in the form's action, the server re-runs it against what the crawl recorded,
+  and the URLs — keys and all — never leave the process.
+
+That the second is also the safer half is not a coincidence: sending a set by
+*describing* it beats *enumerating* it whenever the elements carry credentials.
+
+A batch is partial rather than atomic. Two hundred links where three are
+malformed and the queue has room for a hundred and fifty is a job mostly done,
+not an error, and the three outcomes — queued, rejected, no room — get three
+different sentences.
+
+### The part that needed care
+
+The queue holds a share link's decryption key longer than anything did before:
+until the transfer runs, and after that until the run is evicted, because a
+retry needs it again. It lives in one private dictionary, and nothing the queue
+produces carries it — no snapshot, no page, no event frame, no redirect.
+`tests/test_api_secret_confinement.py` reads that rather than trusting it.
+
+The exposure is smaller than the longer life suggests. Discovery already writes
+the same URL, fragment included, into SQLite, and the report renders it into a
+table — a share link *is* its key, and one without it leads nowhere.
+
+### Still not done, on purpose
+
+- **Resume**, of a file rather than of a queue. HTTP range requests plus a byte
+  offset in the metadata record; the staging directory already keeps a partial
+  file out of the library.
+- **A queue that survives a restart**, which cannot be built honestly before
+  the above exists.
+- **Parallel downloads.** A second thread on the same drain loop, waiting on a
+  reason to raise the number that is about a host rather than about us.
+- **Filtering the crawl list itself.** The tables inside one report have it; the
+  list of crawls is still everything in the order it was recorded.
+- **Selecting across pages without a filter.** "Every match" covers every page,
+  which is the better control — but a hand-picked set spanning two pages still
+  needs two submissions.
 
 ## Documentation
 

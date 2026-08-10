@@ -200,9 +200,22 @@ def test_the_layout_carries_the_version(tmp_path: Path) -> None:
 
 
 def test_the_layout_says_who_is_responsible(tmp_path: Path) -> None:
-    """robots.txt is not consulted, and the page must not stay quiet about it."""
+    """And says it accurately.
+
+    The footer claimed robots.txt was not consulted for two sprints after it
+    was. Asserting the current sentence rather than the word alone is what
+    makes the next such drift a failing test instead of a reading.
+    """
+    body = client_text(tmp_path, "/")
+
+    assert "robots.txt is obeyed unless a crawl was told otherwise" in body
+    assert "not consulted" not in body
+
+
+def client_text(tmp_path: Path, path: str) -> str:
+    """Return one page of a throwaway application."""
     with client(tmp_path) as test_client:
-        assert "robots.txt" in test_client.get("/").text
+        return test_client.get(path).text
 
 
 def test_the_stylesheet_is_served(tmp_path: Path) -> None:

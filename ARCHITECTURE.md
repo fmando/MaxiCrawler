@@ -138,11 +138,11 @@ gefiltert, sortiert und geblättert, jede Datei hat eine Seite, und der Browser
 zeigt an, was er anzeigen kann. MaxiCrawler rendert dabei nichts selbst — es
 nennt einen Content-Type und übergibt die Bytes (ADR-027).
 
-Bis Sprint 14 bewusst genau ein Download zur Zeit, ohne Warteschlange. Was dafür
-nötig war, ist ein Service über dem Download Manager — nicht ein zweiter
-Manager.
+Der Download selbst brauchte dafür einen Service über dem Download Manager —
+keinen zweiten Manager. Bis Sprint 14 lief davon bewusst genau einer zur Zeit,
+ohne Warteschlange.
 
-Seit Sprint 15 gibt es die Warteschlange, und sie beantwortet drei der vier
+Seit Sprint 15 gibt es sie, und sie beantwortet drei der vier
 Fragen, die ADR-026 offengelassen hatte: Reihenfolge (Ankunft, mit Buttons zum
 Verschieben), Abbruch (wartend entfernen, laufend stoppen) und Pause (der
 Warteschlange, nie des laufenden Transfers). Die vierte — Neustartfestigkeit —
