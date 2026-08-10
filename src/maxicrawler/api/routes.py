@@ -38,7 +38,9 @@ from maxicrawler.app import (
     LibraryService,
     LibrarySort,
     LinkQuery,
+    LinkSort,
     StoredPayload,
+    TargetKind,
     crawl_document,
 )
 from maxicrawler.app.viewing import DOWNLOAD_CONTENT_TYPE
@@ -592,20 +594,69 @@ def _recorded_crawl(request: Request) -> Response:
 
 
 def _link_table(request: Request, session_id: str, *, discovered: int) -> dict[str, Any]:
-    """Return the discovered-link table, with a Download beside what can be.
+    """Return the discovered-link table, as the query string asks for it.
 
-    The whole question — which URLs, in which order, and which of them this
-    installation could fetch — is one call on
+    The whole question — which URLs, in which order, which page of them, and
+    which of them this installation could fetch — is one call on
     :class:`~maxicrawler.app.DiscoveryService`. Whether a link can be downloaded
     is answered from the URL alone: a plugin classifies it, a provider claims it,
     and the provider says whether it was composed with everything a transfer
     needs. No request is made, so a page of links costs nothing to render.
+
+    Every parameter is read leniently, the same way the library reads its own.
+    A report arrives from a bookmark, a shared link or a typed URL, and the
+    default listing is a better answer to a stale one than a refusal.
     """
-    return views.link_table(
-        discovery_of(request).browse(
-            session_id, LinkQuery(per_page=DEFAULT_LINKS_PER_PAGE), discovered=discovered
-        )
+    page = discovery_of(request).browse(session_id, _link_query(request), discovered=discovered)
+    return views.link_view(page, base=f"/crawls/{session_id}", hidden=_hidden_columns(request))
+
+
+def _link_query(request: Request) -> LinkQuery:
+    """Return the link query this request asks for."""
+    values = request.query_params
+    return LinkQuery(
+        search=values.get("q", "").strip(),
+        plugin=values.get("plugin") or None,
+        category=values.get("category") or None,
+        target=_target(values.get("target")),
+        downloadable=_downloadable(values.get("dl")),
+        normalized_only=values.get("norm") == "1",
+        sort=LinkSort.parse(values.get("sort"), default=LinkQuery().sort),
+        descending=values.get("dir") == "desc",
+        page=_positive(values.get("page"), default=1),
+        per_page=DEFAULT_LINKS_PER_PAGE,
     )
+
+
+def _target(value: str | None) -> TargetKind | None:
+    """Return the target kind *value* names, or ``None`` for anything else."""
+    try:
+        return TargetKind(value or "")
+    except ValueError:
+        return None
+
+
+def _downloadable(value: str | None) -> bool | None:
+    """Return which side of the downloadable filter *value* asks for.
+
+    Anything but the two words filters nothing, rather than being read as one
+    of them: "no" and "nonsense" must not mean the same thing.
+    """
+    if value == "yes":
+        return True
+    return False if value == "no" else None
+
+
+def _hidden_columns(request: Request) -> frozenset[str]:
+    """Return which columns of the link table this request wants left out.
+
+    Unknown names are dropped rather than refused. The list is written by our
+    own links, so anything else arrived from an older bookmark or a hand-typed
+    URL, and neither deserves an error page.
+    """
+    asked = request.query_params.get("hide", "")
+    known = {column.name for column in views.LINK_COLUMNS}
+    return frozenset(name for name in asked.split(",") if name in known)
 
 
 def _recorded_crawl_json(jobs: CrawlJobs, job_id: str) -> Response:

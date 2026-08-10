@@ -8,7 +8,20 @@
 {% endblock %}
 
 {% block content %}
-<section class="panel">
+{% if report %}
+  {#
+    Where the page's three parts are, on a report that is several screens long.
+    Plain anchors, so they cost nothing and work everywhere; sticky, so they are
+    still there once you have scrolled past what you were looking at.
+  #}
+  <nav class="jumps">
+    <a href="#summary">Summary</a>
+    <a href="#pages">Pages <span class="num">{{ pages.total }}</span></a>
+    <a href="#links">Links <span class="num">{{ links.recorded }}</span></a>
+  </nav>
+{% endif %}
+
+<section class="panel" id="summary">
   <h2>
     <span class="badge {{ crawl.state_tone }}" id="state">{{ crawl.state_label }}</span>
     <span class="url">{{ crawl.seed_url }}</span>

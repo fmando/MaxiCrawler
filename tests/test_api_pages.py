@@ -851,6 +851,133 @@ def test_the_link_table_puts_mega_above_the_generic_links(tmp_path: Path) -> Non
     assert links.index(">mega</td>") < links.index(">generic</td>")
 
 
+# --- navigating the report ---------------------------------------------------
+
+
+def finished_report(test_client: TestClient, base: str, **params: str) -> str:
+    """Return one finished crawl's report, asked with *params*."""
+    job_id = start(test_client, base)
+    wait_until_finished(test_client, job_id)
+    return test_client.get(f"/crawls/{job_id}", params=params).text
+
+
+def test_a_report_says_where_its_parts_are(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = wait_until_finished(test_client, start(test_client, base))
+
+    assert 'class="jumps"' in body
+    for anchor in ('id="summary"', 'id="pages"', 'id="links"'):
+        assert anchor in body
+    for jump in ('href="#summary"', 'href="#pages"', 'href="#links"'):
+        assert jump in body
+
+
+def test_the_breakdowns_fold_away(tmp_path: Path) -> None:
+    """So the link table is on the first screen rather than the third."""
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = wait_until_finished(test_client, start(test_client, base))
+
+    assert "<summary>How links were written</summary>" in body
+    assert "<script" not in body
+
+
+def test_a_report_can_be_filtered_by_plugin(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = finished_report(test_client, base, plugin="mega")
+
+    links = body.split("Discovered links", 1)[1]
+
+    assert MEGA_LINK.split("#")[0] in links
+    assert ">generic</td>" not in links
+
+
+def test_a_report_can_be_filtered_by_what_a_url_points_at(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = finished_report(test_client, base, target="image")
+
+    links = body.split("Discovered links", 1)[1]
+
+    assert "/i.png" in links
+    assert MEGA_LINK.split("#")[0] not in links
+
+
+def test_a_report_can_be_filtered_down_to_what_can_be_fetched(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = finished_report(test_client, base, dl="yes")
+
+    links = body.split("Discovered links", 1)[1]
+
+    assert MEGA_LINK.split("#")[0] in links
+    assert "/i.png" not in links
+
+
+def test_a_report_can_be_searched(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = finished_report(test_client, base, q="i.png")
+
+    links = body.split("Discovered links", 1)[1]
+
+    assert "/i.png" in links
+    assert MEGA_LINK.split("#")[0] not in links
+
+
+def test_a_filter_that_matches_nothing_says_so_and_offers_a_way_back(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = finished_report(test_client, base, q="nothing-is-called-this")
+
+    assert "Nothing matches that" in body
+    assert "Show everything" in body
+
+
+def test_a_value_nobody_recognises_filters_nothing_rather_than_refusing(tmp_path: Path) -> None:
+    """A report arrives from a bookmark; the default listing beats an error page."""
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        response = test_client.get(
+            f"/crawls/{job_id}",
+            params={"target": "wibble", "dl": "perhaps", "sort": "sideways", "page": "-3"},
+        )
+
+    assert response.status_code == 200
+    assert MEGA_LINK.split("#")[0] in response.text
+
+
+def test_a_page_past_the_end_answers_with_the_last_one(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        response = test_client.get(f"/crawls/{job_id}", params={"page": "99"})
+
+    assert response.status_code == 200
+    assert "Discovered links" in response.text
+
+
+def test_a_column_can_be_turned_off(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = finished_report(test_client, base, hide="plugin,category")
+
+    links = body.split("Discovered links", 1)[1]
+
+    assert ">mega</td>" not in links
+    assert MEGA_LINK.split("#")[0] in links  # the URL column stays
+
+
+def test_a_column_name_nobody_recognises_is_ignored(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = finished_report(test_client, base, hide="wibble")
+
+    assert ">mega</td>" in body.split("Discovered links", 1)[1]
+
+
+def test_the_url_column_survives_being_asked_to_go(tmp_path: Path) -> None:
+    """A table of discovered URLs without the URLs is not a narrower view."""
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = finished_report(test_client, base, hide="url")
+
+    assert MEGA_LINK.split("#")[0] in body.split("Discovered links", 1)[1]
+
+
 def test_a_finished_crawl_offers_no_stop_button(tmp_path: Path) -> None:
     with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
         body = wait_until_finished(test_client, start(test_client, base))

@@ -49,54 +49,63 @@
   </p>
 {% endif %}
 
+{#
+  The three breakdowns, folded away.
+
+  Native `<details>`, so this needs no script and no state on the server. They
+  start closed because they answer questions asked once about a crawl -- "which
+  plugin claimed what", "why was that not followed" -- while the counters above
+  and the tables below answer the ones asked every time. Closing them is what
+  puts the link table on the first screen instead of the third.
+#}
 {% if report.plugins %}
-  <h3>Which plugin claimed each URL</h3>
-  <table class="grid tight">
-    <tbody>
-      {% for share in report.plugins %}
-        <tr>
-          <td class="plugin">
-            {{ share.name }}{% if share.is_fallback %}<span class="muted"> (fallback)</span>{% endif %}
-          </td>
-          <td class="share"><span class="meter"><span style="width: {{ share.width }}"></span></span></td>
-          <td class="right num">{{ share.count_label }}</td>
-          <td class="right num muted">{{ share.percent }}</td>
-        </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <details class="fold" open>
+    <summary>Which plugin claimed each URL</summary>
+    <table class="grid tight">
+      <tbody>
+        {% for share in report.plugins %}
+          <tr>
+            <td class="plugin">
+              {{ share.name }}{% if share.is_fallback %}<span class="muted"> (fallback)</span>{% endif %}
+            </td>
+            <td class="share"><span class="meter"><span style="width: {{ share.width }}"></span></span></td>
+            <td class="right num">{{ share.count_label }}</td>
+            <td class="right num muted">{{ share.percent }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
 {% endif %}
 
-<div class="columns">
-  {% if report.skips %}
-    <div>
-      <h3>Why URLs were not followed</h3>
-      <table class="grid tight">
-        <tbody>
-          {% for skip in report.skips %}
-            <tr>
-              <td>{{ skip.reason }}</td>
-              <td class="right num">{{ skip.count }}</td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  {% endif %}
+{% if report.skips %}
+  <details class="fold">
+    <summary>Why URLs were not followed <span class="num">{{ report.pages_skipped }}</span></summary>
+    <table class="grid tight">
+      <tbody>
+        {% for skip in report.skips %}
+          <tr>
+            <td>{{ skip.reason }}</td>
+            <td class="right num">{{ skip.count }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+{% endif %}
 
-  {% if report.link_kinds %}
-    <div>
-      <h3>How links were written</h3>
-      <table class="grid tight">
-        <tbody>
-          {% for kind in report.link_kinds %}
-            <tr>
-              <td>{{ kind.kind }}</td>
-              <td class="right num">{{ kind.count }}</td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  {% endif %}
-</div>
+{% if report.link_kinds %}
+  <details class="fold">
+    <summary>How links were written</summary>
+    <table class="grid tight">
+      <tbody>
+        {% for kind in report.link_kinds %}
+          <tr>
+            <td>{{ kind.kind }}</td>
+            <td class="right num">{{ kind.count }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+{% endif %}

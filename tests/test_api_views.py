@@ -6,6 +6,7 @@ Pure functions, so none of this needs HTTP, a database or a crawl.
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -14,6 +15,7 @@ from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.api.views import (
     ABANDONED_LABEL,
     KIND_LABELS,
+    LINK_COLUMNS,
     STATE_LABELS,
     STATE_TONES,
     crawl_rows,
@@ -25,7 +27,7 @@ from maxicrawler.api.views import (
     format_number,
     library_view,
     link_rows,
-    link_table,
+    link_view,
     page_rows,
     page_table,
     plugin_shares,
@@ -41,9 +43,11 @@ from maxicrawler.app import (
     LibraryPage,
     LibraryQuery,
     LibrarySort,
+    LinkFacet,
     LinkItem,
     LinkPage,
     LinkQuery,
+    LinkSort,
     TargetKind,
     target_of,
 )
@@ -466,26 +470,43 @@ def make_link(
 def make_link_page(
     items: Sequence[LinkItem] = (),
     *,
+    query: LinkQuery | None = None,
     total: int | None = None,
     discovered: int = 0,
     downloadable: Iterable[str] = (),
+    pages: int = 1,
+    page: int = 1,
+    plugins: Iterable[LinkFacet] = (),
+    targets: Iterable[LinkFacet] = (),
 ) -> LinkPage:
     """Return a page of links the way the service would have built one.
 
     *total* defaults to what is shown, so a test that is not about paging says
     nothing about it. Ordering, filtering and paging are the service's subject
-    and are tested in `test_app_discovery.py`; this file is about wording.
+    and are tested in `test_app_discovery.py`; this file is about wording and
+    about the links each view builds.
     """
     return LinkPage(
         items=tuple(items),
-        query=LinkQuery(),
+        query=query if query is not None else LinkQuery(),
         total=len(items) if total is None else total,
         recorded=len(items),
         discovered=discovered,
-        page=1,
-        pages=1,
+        page=page,
+        pages=pages,
+        plugins=tuple(plugins),
+        targets=tuple(targets),
         downloadable=frozenset(downloadable),
     )
+
+
+def make_link_view(page: LinkPage, *, hidden: Iterable[str] = ()) -> dict[str, Any]:
+    """Return the link table as one crawl's report renders it."""
+    return link_view(page, base=BASE, hidden=frozenset(hidden))
+
+
+BASE = "/crawls/abc"
+"""The report every link view here belongs to."""
 
 
 def test_recorded_urls_become_rows() -> None:
@@ -532,50 +553,251 @@ def test_a_normalized_link_keeps_what_was_written() -> None:
     assert row["raw_url"] == "https://Example.test/A?b=1#frag"
 
 
-def test_the_link_table_says_how_many_it_left_out() -> None:
+def test_a_url_is_shown_as_what_it_points_at() -> None:
+    (row,) = link_rows(make_link_page([make_link("https://example.test/a.pdf")]))
+
+    assert row["target"] == "documents"
+    assert row["target_is_stated"] is True
+
+
+def test_a_url_that_says_nothing_is_not_emphasised() -> None:
+    """ "Not stated" is true of most URLs and is not worth a reader's eye."""
+    (row,) = link_rows(make_link_page([make_link("https://example.test/a")]))
+
+    assert row["target"] == "not stated"
+    assert row["target_is_stated"] is False
+
+
+def test_the_link_table_counts_the_page_against_the_crawl() -> None:
     items = [make_link(f"https://example.test/{index}", position=index) for index in range(4)]
 
-    table = link_table(make_link_page(items, total=9, discovered=9))
+    view = make_link_view(make_link_page(items, total=9, discovered=9, pages=3))
 
-    assert len(table["rows"]) == 4
-    assert table["total"] == "9"
-    assert table["hidden"] == "5"
-    assert table["has_hidden"] is True
-    assert table["was_recorded"] is True
+    assert len(view["rows"]) == 4
+    assert view["total"] == "9"
+    assert view["shown_range"] == "1–4"
+    assert view["pages"] == "3"
+    assert view["was_recorded"] is True
 
 
 def test_a_crawl_that_recorded_nothing_is_not_a_crawl_that_found_nothing() -> None:
     """The difference the page has to state rather than show an empty table for."""
-    table = link_table(make_link_page(discovered=2919))
+    view = make_link_view(make_link_page(discovered=2919))
 
-    assert table["rows"] == ()
-    assert table["was_recorded"] is False
-    assert table["discovered"] == "2,919"
+    assert view["rows"] == ()
+    assert view["has_rows"] is False
+    assert view["has_any"] is False
+    assert view["was_recorded"] is False
+    assert view["discovered"] == "2,919"
 
 
 def test_a_crawl_that_genuinely_found_nothing_says_that_instead() -> None:
-    table = link_table(make_link_page(discovered=0))
+    view = make_link_view(make_link_page(discovered=0))
 
-    assert table["rows"] == ()
-    assert table["was_recorded"] is True
+    assert view["rows"] == ()
+    assert view["was_recorded"] is True
 
 
 def test_only_a_link_a_provider_could_fetch_offers_a_download() -> None:
     mega = "https://mega.nz/file/AaBbCcDd"
     items = [make_link(mega, "mega"), make_link("https://example.test/a", position=1)]
 
-    table = link_table(make_link_page(items, downloadable=[mega]))
+    view = make_link_view(make_link_page(items, downloadable=[mega]))
 
-    assert [row["can_download"] for row in table["rows"]] == [True, False]
-    assert table["has_downloads"] is True
+    assert [row["can_download"] for row in view["rows"]] == [True, False]
+    assert view["has_downloads"] is True
 
 
 def test_a_table_with_nothing_to_fetch_grows_no_column() -> None:
     """A column of empty cells is worse than no column."""
-    table = link_table(make_link_page([make_link("https://example.test/a")]))
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
 
-    assert table["has_downloads"] is False
-    assert table["rows"][0]["can_download"] is False
+    assert view["has_downloads"] is False
+    assert view["rows"][0]["can_download"] is False
+
+
+# --- the links a report builds -----------------------------------------------
+
+
+def test_an_untouched_report_writes_no_query_string() -> None:
+    """Only what differs from the default is carried."""
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
+
+    assert view["reset_url"] == f"{BASE}#links"
+
+
+def test_every_link_leads_back_to_the_table() -> None:
+    """Clicking a filter must not put you at the top of a report three screens long."""
+    view = make_link_view(
+        make_link_page([make_link("https://example.test/a")], plugins=[LinkFacet("mega", 3)])
+    )
+
+    (group,) = view["facets"]
+    (chip,) = group["chips"]
+
+    assert chip["url"].endswith("#links")
+    assert view["action"] == f"{BASE}#links"
+
+
+def test_a_chip_carries_its_count_and_the_query_that_selects_it() -> None:
+    view = make_link_view(
+        make_link_page([make_link("https://example.test/a")], plugins=[LinkFacet("mega", 1291)])
+    )
+
+    (chip,) = view["facets"][0]["chips"]
+
+    assert chip["label"] == "mega"
+    assert chip["count"] == "1,291"
+    assert chip["active"] is False
+    assert chip["url"] == f"{BASE}?plugin=mega#links"
+
+
+def test_the_chip_you_are_standing_on_takes_the_filter_off_again() -> None:
+    """A chip is a toggle rather than a one-way door."""
+    view = make_link_view(
+        make_link_page(
+            [make_link("https://example.test/a")],
+            query=LinkQuery(plugin="mega"),
+            plugins=[LinkFacet("mega", 3)],
+        )
+    )
+
+    (chip,) = view["facets"][0]["chips"]
+
+    assert chip["active"] is True
+    assert chip["url"] == f"{BASE}#links"
+
+
+def test_a_target_chip_is_named_the_way_a_person_would_ask_for_it() -> None:
+    view = make_link_view(
+        make_link_page(
+            [make_link("https://example.test/a.pdf")],
+            targets=[LinkFacet("document", 2), LinkFacet("unknown", 40)],
+        )
+    )
+
+    (group,) = view["facets"]
+
+    assert group["heading"] == "Type"
+    assert [chip["label"] for chip in group["chips"]] == ["documents", "not stated"]
+
+
+def test_a_facet_nothing_falls_into_is_not_offered_at_all() -> None:
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
+
+    assert view["facets"] == ()
+
+
+def test_choosing_a_filter_returns_to_the_first_page() -> None:
+    """Page four of the old question is not page four of the new one."""
+    view = make_link_view(
+        make_link_page(
+            [make_link("https://example.test/a")],
+            query=LinkQuery(page=4),
+            plugins=[LinkFacet("mega", 3)],
+            pages=9,
+            page=4,
+        )
+    )
+
+    (chip,) = view["facets"][0]["chips"]
+
+    assert "page=" not in chip["url"]
+
+
+def test_paging_keeps_the_filter_it_was_reached_with() -> None:
+    view = make_link_view(
+        make_link_page(
+            [make_link("https://example.test/a")],
+            query=LinkQuery(search="pdf", plugin="mega"),
+            total=400,
+            pages=4,
+            page=2,
+        )
+    )
+
+    assert "q=pdf" in view["next_url"]
+    assert "plugin=mega" in view["next_url"]
+    assert "page=3" in view["next_url"]
+    assert "page=1" not in view["previous_url"]
+
+
+def test_the_last_page_offers_no_next() -> None:
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
+
+    assert view["next_url"] is None
+    assert view["previous_url"] is None
+
+
+# --- ordering and columns ----------------------------------------------------
+
+
+def test_a_sortable_heading_is_a_link_and_the_others_are_not() -> None:
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
+    headers = {header["name"]: header for header in view["headers"]}
+
+    assert headers["url"]["url"] is not None
+    assert headers["category"]["url"] is None
+
+
+def test_clicking_the_active_column_reverses_it() -> None:
+    view = make_link_view(
+        make_link_page([make_link("https://example.test/a")], query=LinkQuery(sort=LinkSort.URL))
+    )
+    header = next(item for item in view["headers"] if item["name"] == "url")
+
+    assert header["active"] is True
+    assert "dir=desc" in header["url"]
+
+
+def test_every_column_but_the_url_can_be_turned_off() -> None:
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
+    toggles = {toggle["name"]: toggle for toggle in view["toggles"]}
+
+    assert toggles["url"]["required"] is True
+    assert toggles["url"]["url"] is None
+    assert all(toggle["shown"] for toggle in view["toggles"])
+    assert "hide=plugin" in toggles["plugin"]["url"]
+
+
+def test_a_hidden_column_is_left_out_and_offered_back() -> None:
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]), hidden=["source"])
+    toggles = {toggle["name"]: toggle for toggle in view["toggles"]}
+
+    assert "source" not in view["shown"]
+    assert [header["name"] for header in view["headers"]] == [
+        "plugin",
+        "category",
+        "target",
+        "url",
+    ]
+    assert toggles["source"]["shown"] is False
+    assert "hide=" not in toggles["source"]["url"]
+
+
+def test_the_hidden_columns_survive_a_search() -> None:
+    """They travel as a form field, so filtering does not undo the layout."""
+    view = make_link_view(
+        make_link_page([make_link("https://example.test/a")]), hidden=["source", "category"]
+    )
+
+    assert view["hide_value"] == "category,source"
+
+
+def test_the_url_column_cannot_be_hidden_even_if_asked() -> None:
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]), hidden=["url"])
+
+    assert "url" in view["shown"]
+    assert any(header["name"] == "url" for header in view["headers"])
+
+
+def test_every_column_is_offered_as_a_toggle() -> None:
+    """A control that silently lacks an entry reads as a bug."""
+    view = make_link_view(make_link_page())
+
+    assert [toggle["name"] for toggle in view["toggles"]] == [
+        column.name for column in LINK_COLUMNS
+    ]
 
 
 # --- the label tables --------------------------------------------------------

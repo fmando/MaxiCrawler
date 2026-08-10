@@ -33,7 +33,10 @@ from maxicrawler.app import (
     LibrarySort,
     LinkItem,
     LinkPage,
+    LinkQuery,
+    LinkSort,
     StoredPayload,
+    TargetKind,
 )
 from maxicrawler.config import Settings
 from maxicrawler.crawler import PluginUsage
@@ -564,27 +567,297 @@ def page_table(report: CrawlReport, *, limit: int = MAX_LISTED_PAGES) -> dict[st
     }
 
 
-def link_table(page: LinkPage) -> dict[str, Any]:
-    """Return the link table for one page of what a crawl recorded.
+@dataclass(frozen=True, slots=True)
+class LinkColumn:
+    """One column of the link table, and whether it can be ordered by."""
 
-    Everything that decides *which* URLs these are — the filtering, the order,
-    the page — was decided by
+    name: str
+    label: str
+    sort: LinkSort | None = None
+
+
+LINK_COLUMNS: tuple[LinkColumn, ...] = (
+    LinkColumn("plugin", "Plugin", LinkSort.PLUGIN),
+    LinkColumn("category", "Category"),
+    LinkColumn("target", "Type"),
+    LinkColumn("url", "URL", LinkSort.URL),
+    LinkColumn("source", "Found on", LinkSort.SOURCE),
+)
+"""The columns a reader can turn off, in the order they are read.
+
+``category`` and ``target`` are not sortable, and deliberately have no ordering
+of their own: both are short labels with a handful of values, and grouping by
+them is what the facet chips already do in one click.
+"""
+
+REQUIRED_COLUMN = "url"
+"""The one column that cannot be hidden.
+
+A table of discovered URLs without the URLs is not a narrower view of anything.
+"""
+
+LINK_ORDERS: tuple[tuple[LinkSort, str], ...] = (
+    (LinkSort.RELEVANCE, "Plugin relevance"),
+    (LinkSort.DISCOVERED, "Discovery order"),
+    (LinkSort.URL, "URL"),
+    (LinkSort.PLUGIN, "Plugin name"),
+    (LinkSort.SOURCE, "Page it was found on"),
+)
+"""Every order offered, including the two that are not columns.
+
+"Plugin relevance" is the default and is named rather than left implicit: a
+reader who notices that Mega links are on top deserves to be told that this is
+a choice, and given the one that is not.
+"""
+
+TARGET_LABELS: dict[TargetKind, str] = {
+    TargetKind.DOCUMENT: "documents",
+    TargetKind.IMAGE: "images",
+    TargetKind.ARCHIVE: "archives",
+    TargetKind.VIDEO: "video",
+    TargetKind.AUDIO: "audio",
+    TargetKind.PAGE: "pages (.html)",
+    TargetKind.UNKNOWN: "not stated",
+}
+"""What each target kind is called on a page.
+
+"pages (.html)" says the extension because the filter means exactly that and
+nothing wider, and "not stated" rather than "unknown" because the URL not
+saying is a fact about the URL, not a gap in what we know.
+"""
+
+DOWNLOADABLE_CHOICES: tuple[tuple[str, str], ...] = (
+    ("", "any"),
+    ("yes", "can be downloaded"),
+    ("no", "cannot"),
+)
+
+
+def link_view(page: LinkPage, *, base: str, hidden: Container[str] = ()) -> dict[str, Any]:
+    """Return the link table, its filters, its facets and its paging.
+
+    Everything that decides *which* URLs these are was decided by
     :class:`~maxicrawler.app.discovery.DiscoveryService` before this was called.
-    What is left here is wording and formatting, which is the whole reason this
-    module exists.
+    What is left is wording, formatting, and building the links — each of which
+    is this query with one thing changed, which is exactly the kind of decision
+    a template must not be making.
+
+    *base* is the page the table lives on, because a report's URL contains the
+    crawl it belongs to. Every link this builds ends at ``#links``, so choosing
+    a filter puts you back at the table rather than at the top of a long page.
     """
+    query = page.query
     rows = link_rows(page)
+    shown = frozenset(
+        column.name for column in LINK_COLUMNS if column.name not in hidden
+    ) | frozenset({REQUIRED_COLUMN})
     return {
         "rows": rows,
+        "shown": shown,
+        "headers": tuple(
+            _link_header(column, query, base=base, hidden=hidden)
+            for column in LINK_COLUMNS
+            if column.name in shown
+        ),
+        "toggles": tuple(
+            _link_toggle(column, query, base=base, hidden=hidden) for column in LINK_COLUMNS
+        ),
         "total": format_number(page.total),
-        "hidden": format_number(page.hidden),
-        "has_hidden": page.hidden > 0,
+        "recorded": format_number(page.recorded),
         "discovered": format_number(page.discovered),
         "was_recorded": page.was_recorded,
+        "has_rows": bool(page.items),
+        # Whether there is anything to filter at all, which is a different
+        # question from whether this page has rows: a filter bar above "nothing
+        # matches that" is useful, and one above a crawl that found nothing is
+        # a control with no purpose.
+        "has_any": page.recorded > 0,
         # A column of empty cells is worse than no column: the table only grows
         # an action when at least one row actually has one.
         "has_downloads": any(row["can_download"] for row in rows),
+        "is_filtered": query.is_filtered,
+        "action": f"{base}#links",
+        # What the filter form shows as its current state.
+        "search": query.search,
+        "plugin": query.plugin or "",
+        "category": query.category or "",
+        "target": "" if query.target is None else str(query.target),
+        "downloadable": _downloadable_value(query.downloadable),
+        "normalized_only": query.normalized_only,
+        "downloadable_choices": DOWNLOADABLE_CHOICES,
+        "orders": tuple(
+            {"value": str(sort), "label": label, "selected": query.sort is sort}
+            for sort, label in LINK_ORDERS
+        ),
+        # Carried through the filter form as hidden fields, so searching keeps
+        # the order and the columns you had chosen instead of resetting them.
+        "direction": "desc" if query.descending else "asc",
+        "hide_value": _hide_value(hidden),
+        "facets": _link_facets(page, base=base, hidden=hidden),
+        "page": format_number(page.page),
+        "pages": format_number(page.pages),
+        "shown_range": f"{format_number(page.first)}–{format_number(page.last)}",
+        "previous_url": (
+            _link_url(base, query, hidden, page=page.page - 1) if page.has_previous else None
+        ),
+        "next_url": _link_url(base, query, hidden, page=page.page + 1) if page.has_next else None,
+        "reset_url": _link_url(base, LinkQuery(), hidden),
     }
+
+
+def _downloadable_value(downloadable: bool | None) -> str:
+    """Return the downloadable filter as the form spells it."""
+    if downloadable is None:
+        return ""
+    return "yes" if downloadable else "no"
+
+
+def _link_header(
+    column: LinkColumn, query: LinkQuery, *, base: str, hidden: Container[str]
+) -> dict[str, Any]:
+    """Return one column heading, and the link that reorders by it.
+
+    Clicking the active column reverses it; clicking another starts ascending,
+    which for a URL and a plugin name is the direction anybody means. A column
+    that cannot be ordered by is a heading and nothing more.
+    """
+    sort = column.sort
+    if sort is None:
+        return {
+            "label": column.label,
+            "name": column.name,
+            "url": None,
+            "active": False,
+            "mark": "",
+        }
+    active = query.sort is sort
+    descending = not query.descending if active else False
+    return {
+        "label": column.label,
+        "name": column.name,
+        "url": _link_url(base, query, hidden, sort=sort, descending=descending, page=1),
+        "active": active,
+        "mark": SORT_MARKS[query.descending] if active else "",
+    }
+
+
+def _link_toggle(
+    column: LinkColumn, query: LinkQuery, *, base: str, hidden: Container[str]
+) -> dict[str, Any]:
+    """Return the link that shows or hides one column.
+
+    A link rather than a checkbox, so the whole control is the same mechanism as
+    a facet chip: the state lives in the URL, the server renders the answer, and
+    it works with scripting switched off. The one column that cannot be hidden
+    is offered as a disabled entry rather than left out, because a control that
+    silently lacks an entry reads as a bug.
+    """
+    is_shown = column.name not in hidden
+    required = column.name == REQUIRED_COLUMN
+    now_hidden = {name for name in _column_names() if name in hidden}
+    if is_shown:
+        now_hidden.add(column.name)
+    else:
+        now_hidden.discard(column.name)
+    return {
+        "label": column.label,
+        "name": column.name,
+        "shown": is_shown,
+        "required": required,
+        "url": None if required else _link_url(base, query, frozenset(now_hidden)),
+    }
+
+
+def _column_names() -> tuple[str, ...]:
+    """Return every column name, which is what a hide list may contain."""
+    return tuple(column.name for column in LINK_COLUMNS)
+
+
+def _link_facets(
+    page: LinkPage, *, base: str, hidden: Container[str]
+) -> tuple[dict[str, Any], ...]:
+    """Return the chip rows that filter by one value in one click.
+
+    Counted over the whole crawl rather than over the matches, which is what the
+    service already decided; what is added here is that the chip you are
+    standing on links back to the unfiltered view, so a chip is a toggle rather
+    than a one-way door.
+    """
+    query = page.query
+    groups = (
+        ("Plugin", page.plugins, "plugin", query.plugin, lambda value: value),
+        (
+            "Type",
+            page.targets,
+            "target",
+            "" if query.target is None else str(query.target),
+            lambda value: TARGET_LABELS[TargetKind(value)],
+        ),
+        ("Category", page.categories, "category", query.category, lambda value: value),
+    )
+    rows = []
+    for heading, facets, name, active, label_of in groups:
+        if not facets:
+            continue
+        rows.append(
+            {
+                "heading": heading,
+                "chips": tuple(
+                    {
+                        "label": label_of(facet.value),
+                        "count": format_number(facet.count),
+                        "active": facet.value == active,
+                        "url": _link_url(
+                            base,
+                            query,
+                            hidden,
+                            page=1,
+                            **{name: None if facet.value == active else facet.value},
+                        ),
+                    }
+                    for facet in facets
+                ),
+            }
+        )
+    return tuple(rows)
+
+
+def _hide_value(hidden: Container[str]) -> str:
+    """Return the hidden columns as the query string writes them."""
+    return ",".join(name for name in _column_names() if name in hidden)
+
+
+def _link_url(base: str, query: LinkQuery, hidden: Container[str], **changes: Any) -> str:
+    """Return the report URL for *query* with *changes* applied.
+
+    Only what differs from the default is written, so an untouched report is
+    plain ``/crawls/{id}`` and a filtered one carries exactly what it needs. The
+    fragment is always there: every one of these links leads to the table, and a
+    reader who clicks a filter should not have to scroll back down to it.
+    """
+    target = changes.get("target", query.target)
+    downloadable = changes.get("downloadable", query.downloadable)
+    values = {
+        "q": changes.get("search", query.search),
+        "plugin": changes.get("plugin", query.plugin) or "",
+        "category": changes.get("category", query.category) or "",
+        "target": "" if target is None else str(target),
+        "dl": _downloadable_value(downloadable),
+        "norm": "1" if changes.get("normalized_only", query.normalized_only) else "",
+        "sort": str(changes.get("sort", query.sort)),
+        "dir": "desc" if changes.get("descending", query.descending) else "asc",
+        "page": str(changes.get("page", query.page)),
+        "hide": _hide_value(hidden),
+    }
+    default = LinkQuery()
+    if values["sort"] == str(default.sort):
+        del values["sort"]
+    if values["dir"] == "asc":
+        del values["dir"]
+    if values.get("page") == "1":
+        del values["page"]
+    written = {name: value for name, value in values.items() if value}
+    return f"{base}?{urlencode(written)}#links" if written else f"{base}#links"
 
 
 def crawl_rows(
@@ -851,6 +1124,10 @@ def _link_row(item: LinkItem, *, downloadable: Container[str] = ()) -> dict[str,
         "source_url": item.source_url,
         "plugin": item.plugin or "unresolved",
         "category": item.category or "—",
+        "target": TARGET_LABELS[item.target],
+        # Whether the URL said anything at all, which is what decides emphasis:
+        # "not stated" is true of most URLs and is not worth a reader's eye.
+        "target_is_stated": item.target is not TargetKind.UNKNOWN,
         # True when a host-specific plugin claimed it rather than the fallback,
         # which is what the table gives its one piece of emphasis to.
         "is_notable": item.is_notable,

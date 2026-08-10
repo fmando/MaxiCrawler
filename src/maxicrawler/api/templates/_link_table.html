@@ -1,69 +1,166 @@
 {#
   The URLs the crawl recorded.
 
-  Host-specific plugins first, then the generic fallback, then whatever could
-  not be resolved -- the same order the distribution uses, and for the same
-  reason: two hundred rows of generic links would otherwise hide the handful
-  this crawl was run to find.
+  Server-rendered, including the searching, the filtering, the ordering and the
+  choice of columns: the filter is a GET form and everything else is a link, so
+  the whole table works with scripting switched off and every view of it can be
+  bookmarked.
+
+  Nothing here decides anything. Which rows these are was decided by
+  `DiscoveryService`, and what they are called by `maxicrawler.api.views` --
+  this file places them.
 #}
-<section class="panel">
+<section class="panel" id="links">
   <h2>
     Discovered links
-    <span class="count">{{ links.total }} unique</span>
+    <span class="count">
+      {% if links.is_filtered %}{{ links.total }} of {{ links.recorded }}{% else %}{{ links.recorded }} unique{% endif %}
+    </span>
   </h2>
 
-  {% if links.rows %}
-    <table class="grid">
-      <thead>
-        <tr>
-          <th>Plugin</th>
-          <th>Category</th>
-          <th>URL</th>
-          <th>Found on</th>
-          {% if links.has_downloads %}<th>Action</th>{% endif %}
-        </tr>
-      </thead>
-      <tbody>
-        {% for link in links.rows %}
+  {% if links.has_any %}
+    <form class="filters" method="get" action="{{ links.action }}">
+      <label class="wide">
+        <span>Search</span>
+        <input type="search" name="q" value="{{ links.search }}" placeholder="URL or the page it was on"
+               autocomplete="off" spellcheck="false">
+      </label>
+
+      <label>
+        <span>Download</span>
+        <select name="dl">
+          {% for value, label in links.downloadable_choices %}
+            <option value="{{ value }}"{% if value == links.downloadable %} selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label>
+        <span>Order</span>
+        <select name="sort">
+          {% for order in links.orders %}
+            <option value="{{ order.value }}"{% if order.selected %} selected{% endif %}>{{ order.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="check">
+        <input type="checkbox" name="norm" value="1"{% if links.normalized_only %} checked{% endif %}>
+        <span>Rewritten only</span>
+      </label>
+
+      {#
+        The plugin, the type and the category are chosen from the chips below
+        rather than from a box: a chip carries its count, and how many of a
+        thing there are is most of what decides whether you want only those.
+        They travel as hidden fields here, so losing the plugin you had picked
+        because you then typed a search cannot happen.
+      #}
+      <input type="hidden" name="plugin" value="{{ links.plugin }}">
+      <input type="hidden" name="target" value="{{ links.target }}">
+      <input type="hidden" name="category" value="{{ links.category }}">
+      <input type="hidden" name="dir" value="{{ links.direction }}">
+      <input type="hidden" name="hide" value="{{ links.hide_value }}">
+
+      <button type="submit">Filter</button>
+      {% if links.is_filtered %}<a class="aside" href="{{ links.reset_url }}">Clear</a>{% endif %}
+    </form>
+
+    {% for group in links.facets %}
+      <div class="chips">
+        <span class="chips-heading">{{ group.heading }}</span>
+        {% for chip in group.chips %}
+          <a class="chip{% if chip.active %} active{% endif %}" href="{{ chip.url }}">
+            {{ chip.label }} <span class="num">{{ chip.count }}</span>
+          </a>
+        {% endfor %}
+      </div>
+    {% endfor %}
+
+    <details class="toggles">
+      <summary>Columns</summary>
+      <div class="chips">
+        {% for toggle in links.toggles %}
+          {% if toggle.required %}
+            <span class="chip fixed">{{ toggle.label }}</span>
+          {% else %}
+            <a class="chip{% if toggle.shown %} active{% endif %}" href="{{ toggle.url }}">{{ toggle.label }}</a>
+          {% endif %}
+        {% endfor %}
+      </div>
+    </details>
+  {% endif %}
+
+  {% if links.has_rows %}
+    <div class="scroller">
+      <table class="grid sticky">
+        <thead>
           <tr>
-            <td{% if not link.is_notable %} class="muted"{% endif %}>{{ link.plugin }}</td>
-            <td class="muted">{{ link.category }}</td>
-            <td class="url">
-              {{ link.url }}
-              {% if link.was_normalized %}
-                <div class="muted small">as written: {{ link.raw_url }}</div>
+            {% for header in links.headers %}
+              <th{% if header.active %} class="sorted"{% endif %}>
+                {% if header.url %}
+                  <a href="{{ header.url }}">{{ header.label }}{% if header.mark %} <span class="mark">{{ header.mark }}</span>{% endif %}</a>
+                {% else %}
+                  {{ header.label }}
+                {% endif %}
+              </th>
+            {% endfor %}
+            {% if links.has_downloads %}<th>Action</th>{% endif %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for link in links.rows %}
+            <tr>
+              {% if "plugin" in links.shown %}
+                <td{% if not link.is_notable %} class="muted"{% endif %}>{{ link.plugin }}</td>
               {% endif %}
-            </td>
-            <td class="url muted small">{{ link.source_url or "—" }}</td>
-            {% if links.has_downloads %}
-              <td>
-                {% if link.can_download %}
-                  {#
-                    A form rather than a link, because it starts something. The
-                    URL travels in the body for a second reason too: a share
-                    link keeps its decryption key in the fragment, which a
-                    browser never sends as part of a URL but does send as a
-                    field.
-                  #}
-                  <form class="row-action" method="post" action="/downloads">
-                    <input type="hidden" name="url" value="{{ link.url }}">
-                    <button type="submit">Download</button>
-                  </form>
+              {% if "category" in links.shown %}<td class="muted">{{ link.category }}</td>{% endif %}
+              {% if "target" in links.shown %}
+                <td{% if not link.target_is_stated %} class="muted"{% endif %}>{{ link.target }}</td>
+              {% endif %}
+              <td class="url">
+                {{ link.url }}
+                {% if link.was_normalized %}
+                  <div class="muted small">as written: {{ link.raw_url }}</div>
                 {% endif %}
               </td>
-            {% endif %}
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    {% if links.has_hidden %}
-      {# No report on a crawl this server only has the record of, and a link to
-         a document that does not exist is worse than no link. #}
-      <p class="empty">
-        {{ links.hidden }} more URLs are not shown here.
-        {% if report %}They are all in <a href="{{ report.json_url }}">the JSON report</a>.{% endif %}
-      </p>
-    {% endif %}
+              {% if "source" in links.shown %}
+                <td class="url muted small">{{ link.source_url or "—" }}</td>
+              {% endif %}
+              {% if links.has_downloads %}
+                <td>
+                  {% if link.can_download %}
+                    {#
+                      A form rather than a link, because it starts something. The
+                      URL travels in the body for a second reason too: a share
+                      link keeps its decryption key in the fragment, which a
+                      browser never sends as part of a URL but does send as a
+                      field.
+                    #}
+                    <form class="row-action" method="post" action="/downloads">
+                      <input type="hidden" name="url" value="{{ link.url }}">
+                      <button type="submit">Download</button>
+                    </form>
+                  {% endif %}
+                </td>
+              {% endif %}
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <p class="paging">
+      <span class="muted">{{ links.shown_range }} of {{ links.total }}</span>
+      {% if links.previous_url %}<a href="{{ links.previous_url }}">← previous</a>{% endif %}
+      <span class="muted">page {{ links.page }} of {{ links.pages }}</span>
+      {% if links.next_url %}<a href="{{ links.next_url }}">next →</a>{% endif %}
+    </p>
+  {% elif links.is_filtered %}
+    <p class="empty">
+      Nothing matches that. <a href="{{ links.reset_url }}">Show everything</a> —
+      this crawl recorded {{ links.recorded }} URLs.
+    </p>
   {% elif links.was_recorded %}
     <p class="empty">No links were found.</p>
   {% else %}

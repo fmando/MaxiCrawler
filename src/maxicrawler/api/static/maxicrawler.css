@@ -25,6 +25,12 @@
   --busy: #4c8fd6;
   --idle: #6b7280;
   --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", Menlo, Consolas, monospace;
+  /*
+   * How tall the report's jump bar is. A variable because two rules depend on
+   * it: the bar is sized from it, and a sticky table heading is offset by it so
+   * the two never occupy the same strip.
+   */
+  --jumps-height: 42px;
 }
 
 * { box-sizing: border-box; }
@@ -494,6 +500,148 @@ footer {
   border-top: 1px solid var(--border);
   font-size: 12px;
 }
+
+/*
+ * --- navigating a long report -------------------------------------------
+ *
+ * A crawl report is several screens: counters, three breakdowns, the pages, the
+ * links. Everything below is about not having to scroll through the first four
+ * to reach the fifth.
+ */
+
+/* Where the parts are. Sticky, so they are still there once you have left. */
+.jumps {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: var(--jumps-height);
+  margin: 0 0 12px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.jumps a {
+  padding: 4px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  border: 1px solid transparent;
+}
+.jumps a:hover { color: var(--text); border-color: var(--border-strong); text-decoration: none; }
+.jumps .num { color: var(--text); font-family: var(--mono); margin-left: 4px; }
+
+/*
+ * A breakdown folded away. Native `<details>`: no script, no state on the
+ * server, and the browser remembers nothing -- which is right, because what a
+ * reader wants open differs per visit rather than per person.
+ */
+.fold { border-top: 1px solid var(--border); }
+.fold > summary {
+  padding: 10px 0;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.fold > summary:hover { color: var(--text); }
+.fold > summary .num {
+  font-family: var(--mono);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  margin-left: 6px;
+}
+.fold > table { margin-bottom: 12px; }
+
+/*
+ * One value you can filter by, and how many of it there are. A link rather than
+ * a control: the state is in the URL, so the back button undoes a filter and a
+ * filtered view can be sent to somebody.
+ */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.chips-heading {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  min-width: 64px;
+}
+.chip {
+  padding: 3px 10px;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+}
+.chip:hover { color: var(--text); text-decoration: none; }
+.chip .num { font-family: var(--mono); color: var(--muted); margin-left: 4px; }
+.chip.active { color: var(--text); border-color: var(--accent); }
+.chip.active .num { color: var(--text); }
+/* The column that cannot be turned off. Present, so its absence is not a bug. */
+.chip.fixed { opacity: 0.5; }
+
+.toggles { border-bottom: 1px solid var(--border); }
+.toggles > summary {
+  padding: 8px 16px;
+  cursor: pointer;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.toggles > summary:hover { color: var(--text); }
+.toggles .chips { border-bottom: 0; padding-top: 0; }
+
+/* A row-shaped label, for the one filter that is a checkbox. */
+.filters label.check { flex-direction: row; align-items: center; gap: 6px; height: 32px; }
+.filters label.check > span { text-transform: none; letter-spacing: 0; font-size: 13px; }
+
+/*
+ * A heading that stays while its rows go past.
+ *
+ * `--panel` rather than transparent, because a sticky row with no background of
+ * its own has the table's rows read straight through it.
+ */
+.grid.sticky thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel);
+}
+
+/*
+ * A table too wide for the window scrolls itself rather than the page -- but
+ * only on a window narrow enough to need it.
+ *
+ * `overflow-x` cannot be asked for on its own: a box with one axis `auto` and
+ * the other `visible` computes *both* to `auto`, which makes the wrapper a
+ * scroll container and leaves the sticky heading stuck to the whole table
+ * instead of to the window. Measured, not assumed, and the reason this is a
+ * media query rather than one unconditional rule: a wide window keeps its
+ * heading, and a narrow one keeps the page from sliding sideways. Neither
+ * window can have both, and each gets the one that matters there.
+ */
+@media (max-width: 900px) {
+  .scroller { overflow-x: auto; }
+}
+
+/*
+ * Below the jump bar on the pages that have one, so the two do not occupy the
+ * same strip. Tied to the same variable the bar is sized from, because a
+ * heading that sticks half over the thing above it is what a hand-copied number
+ * eventually produces.
+ */
+.jumps ~ .panel .grid.sticky thead th { top: var(--jumps-height); }
 
 /* Where you are, on a page that is one of many. */
 .crumbs {
