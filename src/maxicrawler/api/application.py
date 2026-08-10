@@ -117,6 +117,7 @@ def create_app(
                 name="crawl_events",
             ),
             Route("/crawls/{job_id}/stop", routes.stop_crawl, methods=["POST"], name="stop_crawl"),
+            Route("/downloads", routes.downloads, methods=["GET"], name="downloads"),
             Route("/downloads", routes.start_download, methods=["POST"], name="start_download"),
             # Before the page, for the same reason `{job_id}.json` is: a path
             # parameter matches any single segment, and "pause" is one.

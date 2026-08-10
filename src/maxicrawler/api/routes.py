@@ -4,9 +4,10 @@ Handlers do three things and nothing else: read the request, ask a service, and
 hand plain data to a template. Every decision that is not one of those lives in
 :mod:`maxicrawler.api.views`, where it can be tested without a request.
 
-The navigation names all four sections from the first page. Two of them do very
-little yet, and saying so is cheaper than rearranging every page around them
-later.
+The navigation names every section from the first page, including the ones that
+do very little yet — saying so is cheaper than rearranging every page around
+them later. Downloads joined them in Sprint 15, when there was finally a queue
+to put on such a page.
 """
 
 from dataclasses import dataclass
@@ -70,10 +71,16 @@ class Section:
 SECTIONS = (
     Section("dashboard", "Dashboard", "dashboard"),
     Section("crawls", "Crawls", "crawls"),
+    Section("downloads", "Downloads", "downloads"),
     Section("library", "Library", "library"),
     Section("settings", "Settings", "settings"),
 )
-"""The four areas, in the order they are read."""
+"""The five areas, in the order the chain runs through them.
+
+Downloads became one of them in Sprint 15. Before the queue there was nothing to
+put on such a page — a transfer had its own page and there was only ever one —
+and a section for it would have been a heading over a single link.
+"""
 
 
 def jobs_of(request: Request) -> CrawlJobs:
@@ -282,6 +289,29 @@ async def stop_crawl(request: Request) -> Response:
     return RedirectResponse(url=f"/crawls/{job.id}", status_code=303)
 
 
+async def downloads(request: Request) -> Response:
+    """Show the queue: what is running, what is waiting, and what became of the rest.
+
+    One page rather than a list of links to pages, because the question it
+    answers is about the *set* — how much is left, is anything stuck, is the
+    order right. Every control on it is a form, so it works with scripting off.
+
+    Live without a stream of its own. The running transfer's own event stream
+    is embedded, and ``download.js`` reloads the page when that transfer ends —
+    which is exactly when the rest of this page changes. A queue nobody is
+    draining has nothing to stream, and a page that reloaded on a timer would
+    fight whoever is reading it.
+    """
+    queue = downloads_of(request)
+    snapshot = queue.snapshot()
+    return page(
+        request,
+        "downloads.html",
+        {"queue": views.queue_view(snapshot, limit=queue.limit)},
+        section="downloads",
+    )
+
+
 async def start_download(request: Request) -> Response:
     """Put one link in the queue, and send the browser to watch it.
 
@@ -323,7 +353,7 @@ async def download_detail(request: Request) -> Response:
                 is_paused=downloads.is_paused,
             )
         },
-        section="library",
+        section="downloads",
     )
 
 
@@ -340,15 +370,19 @@ async def stop_download(request: Request) -> Response:
     """
     run = _download(request)
     downloads_of(request).cancel(run.id)
-    return RedirectResponse(url=f"/downloads/{run.id}", status_code=303)
+    return RedirectResponse(url=_back_to(request, f"/downloads/{run.id}"), status_code=303)
 
 
 async def retry_download(request: Request) -> Response:
-    """Queue the same link again, and send the browser to the new request.
+    """Queue the same link again, and show the new request.
 
     A new entry rather than a reset of the old one: what happened the first time
     is a fact, and a history that overwrote its own failures would be one nobody
     could read.
+
+    From one download's page that means the new download's page, which is the
+    thing just asked for. From the queue it means the queue, where the new entry
+    is visible at the end of the line along with everything else waiting.
     """
     run = _download(request)
     try:
@@ -357,7 +391,7 @@ async def retry_download(request: Request) -> Response:
         return _refuse_download(request, str(error), status=409)
     if again is None:
         return _refuse_download(request, RETRY_UNFINISHED, status=409)
-    return RedirectResponse(url=f"/downloads/{again.id}", status_code=303)
+    return RedirectResponse(url=_back_to(request, f"/downloads/{again.id}"), status_code=303)
 
 
 RETRY_UNFINISHED = "that download has not finished, so there is nothing to retry"
@@ -399,12 +433,12 @@ async def pause_downloads(request: Request) -> Response:
 
 
 def _back_to(request: Request, default: str) -> str:
-    """Return where a form said to go afterwards, or *default*.
+    """Return where the form's action said to go afterwards, or *default*.
 
-    A field rather than the ``Referer`` header: the same button sits on the
-    queue and on one download's page, and a header a browser may withhold is
-    not a thing to route on. Only paths of our own are honoured, so this cannot
-    be turned into an open redirect.
+    A parameter on the action rather than the ``Referer`` header: the same
+    button sits on the queue and on one download's page, and a header a browser
+    may withhold is not a thing to route on. Only paths of our own are honoured,
+    so this cannot be turned into an open redirect.
     """
     asked = request.query_params.get("back", "")
     return asked if asked.startswith("/") and not asked.startswith("//") else default
@@ -433,7 +467,7 @@ def _refuse_download(request: Request, message: str, *, status: int) -> Response
         request,
         "download_refused.html",
         {"message": message, "active_id": None if active is None else active.id},
-        section="library",
+        section="downloads",
     )
     response.status_code = status
     return response

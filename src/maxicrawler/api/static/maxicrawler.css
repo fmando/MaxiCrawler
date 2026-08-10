@@ -417,6 +417,43 @@ footer {
 }
 .done .path { margin-left: 10px; }
 
+/* --- the download queue -------------------------------------------------- */
+
+/* A form that has to sit in a table cell beside other forms.
+   Each button is its own form because each posts a different thing, and
+   nothing about that should be visible in the row. */
+.inline { display: inline; }
+.inline button {
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+}
+.inline button:hover { background: var(--bg); border-color: var(--accent); }
+.inline + .inline { margin-left: 4px; }
+
+.nowrap { white-space: nowrap; }
+
+/* The action columns carry buttons, not prose: no wider than they need. */
+.grid.queue td:first-child, .grid.queue th:first-child { width: 1%; }
+.grid.queue td:last-child, .grid.queue th:last-child { width: 1%; }
+
+/* Something true about the whole page that is not an error: a paused queue,
+   a ceiling coming up. Distinguished from .error by tone rather than by
+   loudness -- neither of these is a thing going wrong. */
+.notice {
+  margin: 12px 0 0;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--muted);
+  background: var(--raised);
+  border-left: 2px solid var(--border-strong);
+}
+
 /* Queueing the same link again, beside the reason it did not work the first time. */
 .retry { margin: 12px 0 0; }
 .retry button {

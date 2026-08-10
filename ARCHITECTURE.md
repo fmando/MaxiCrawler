@@ -159,6 +159,12 @@ verschieden benannt. Die obere entscheidet *Reihenfolge und Zeitpunkt* und
 startet nichts selbst: jeder Transfer ist genau ein `DownloadService`-Aufruf.
 Ein Worker, und das ist eine Höflichkeitsentscheidung, keine technische Grenze.
 
+Seit Sprint 15 ist Downloads ein eigener Navigationsbereich mit einer Seite,
+die die ganze Warteschlange zeigt. Sie hat **keinen eigenen Ereignisstrom**:
+eingebettet ist der Strom des gerade laufenden Transfers, und `download.js`
+lädt die Seite neu, wenn dieser endet — also genau dann, wenn sich der Rest der
+Seite ändert. Eine Warteschlange, die niemand abarbeitet, hat nichts zu senden.
+
 ## Ausblick: Crawl Jobs
 
 Eine `CrawlSession` beschreibt heute genau einen Crawl-Lauf. Die Weboberfläche

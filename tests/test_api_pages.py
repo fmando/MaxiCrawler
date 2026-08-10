@@ -821,11 +821,17 @@ def test_a_mega_link_in_the_report_offers_a_download(tmp_path: Path) -> None:
 
 
 def test_the_download_button_carries_the_key_in_a_field_not_a_link(tmp_path: Path) -> None:
-    """A fragment is the one part of a URL a browser never sends. A field is."""
+    """A fragment is the one part of a URL a browser never sends. A field is.
+
+    What must not appear is a *link* that starts a download, since the key would
+    be gone by the time the server saw it. The bare link to the queue page in the
+    navigation is not one of those, so it is named here rather than swept up.
+    """
     with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
         body = wait_until_finished(test_client, start(test_client, base))
 
-    assert 'href="/downloads' not in body
+    links = re.findall(r'href="(/downloads[^"]*)"', body)
+    assert links == ["/downloads"]  # the navigation, and nothing that carries a URL
     assert MEGA_LINK.split("#")[1] in body  # in the hidden field, which is sent
 
 

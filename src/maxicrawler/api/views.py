@@ -23,7 +23,7 @@ from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlencode
 
-from maxicrawler.api.downloads import DownloadSnapshot
+from maxicrawler.api.downloads import DownloadSnapshot, QueueSnapshot
 from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.app import (
     DownloadProgress,
@@ -296,7 +296,10 @@ def download_view(
         "files_total": format_number(progress.files_total),
         "files_finished": format_number(progress.files_finished),
         "has_many_files": progress.files_total > 1,
-        "elapsed": format_duration(snapshot.elapsed_seconds),
+        # Absent for a request that was never picked up. Its zero would
+        # otherwise read as a transfer that took no time rather than one that
+        # never happened.
+        "elapsed": format_duration(snapshot.elapsed_seconds) if snapshot.was_started else None,
         "rate": _rate(progress.bytes_written, snapshot.elapsed_seconds),
         "remaining": _remaining(progress, snapshot),
         "is_finished": snapshot.is_finished,
@@ -307,6 +310,80 @@ def download_view(
         # Straight to the file rather than to a list to search through. Absent
         # when the request turned out to hold several files, which is when the
         # library itself is the right place to land.
+        "item_url": _item_url(snapshot.summary),
+    }
+
+
+def queue_view(snapshot: QueueSnapshot, *, limit: int) -> dict[str, Any]:
+    """Return what the queue page shows.
+
+    Three lists and a set of counters. The running transfer is the only thing
+    here rendered in full — it is the only one with something to report — so it
+    goes through :func:`download_view` and everything else through a row
+    builder that answers only what its table asks.
+    """
+    waiting = tuple(
+        _waiting_row(item, position, last=position == len(snapshot.waiting))
+        for position, item in enumerate(snapshot.waiting, start=1)
+    )
+    return {
+        "is_paused": snapshot.is_paused,
+        "is_busy": snapshot.is_busy,
+        "active": None if snapshot.active is None else download_view(snapshot.active),
+        "waiting": waiting,
+        "finished": tuple(_finished_row(item) for item in snapshot.finished),
+        "remaining": format_number(snapshot.remaining),
+        "waiting_count": format_number(len(snapshot.waiting)),
+        "finished_count": format_number(len(snapshot.finished)),
+        "succeeded": format_number(snapshot.succeeded),
+        "failed": format_number(snapshot.failed),
+        "stopped": format_number(snapshot.stopped),
+        "has_failures": snapshot.failed > 0,
+        "bytes_written": format_size(snapshot.bytes_written),
+        # Named rather than implied, so a refusal is not the first time somebody
+        # learns there is a ceiling at all.
+        "limit": format_number(limit),
+        "is_nearly_full": len(snapshot.waiting) >= limit * NEARLY_FULL,
+    }
+
+
+NEARLY_FULL = 0.9
+"""How full the queue gets before the page says so.
+
+Late enough not to nag over an ordinary afternoon, early enough that a refusal
+is not a surprise.
+"""
+
+
+def _waiting_row(snapshot: DownloadSnapshot, position: int, *, last: bool) -> dict[str, Any]:
+    """Return one line of the waiting list.
+
+    Whether a row can move is decided here rather than in the template: the
+    first row has no "up" and the last has no "down", and a button that does
+    nothing is worse than one that is not there.
+    """
+    return {
+        "download_id": snapshot.download_id,
+        "url": snapshot.url,
+        "label": snapshot.label,
+        "position": format_number(position),
+        "can_move_up": position > 1,
+        "can_move_down": not last,
+    }
+
+
+def _finished_row(snapshot: DownloadSnapshot) -> dict[str, Any]:
+    """Return one line of the history."""
+    return {
+        "download_id": snapshot.download_id,
+        "url": snapshot.url,
+        "label": snapshot.label,
+        "state_label": STATUS_LABELS[snapshot.status],
+        "state_tone": STATUS_TONES[snapshot.status],
+        "succeeded": snapshot.summary is not None and snapshot.summary.succeeded,
+        "reason": snapshot.reason,
+        "transferred": format_size(snapshot.progress.bytes_written),
+        "elapsed": format_duration(snapshot.elapsed_seconds) if snapshot.was_started else None,
         "item_url": _item_url(snapshot.summary),
     }
 

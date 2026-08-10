@@ -136,6 +136,14 @@ class DownloadSnapshot:
     turn to wait for, and "waiting" and "starting" are the words for that.
     """
 
+    was_started: bool = False
+    """Whether a worker ever picked this up.
+
+    Not the same as "is finished": a request removed from the queue is over and
+    was never begun. Without this, its zero elapsed time reads as a transfer
+    that took no time rather than one that never happened.
+    """
+
     summary: DownloadSummary | None = None
     """Present once the download is over, whatever way it ended."""
 
@@ -241,6 +249,7 @@ class DownloadRun:
                 started_at=self._started_at if self._started_at is not None else self._queued_at,
                 elapsed_seconds=elapsed,
                 is_queued=self._is_queued,
+                was_started=self._started is not None,
                 summary=self._summary,
                 error=self._error,
             )

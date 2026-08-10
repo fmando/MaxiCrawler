@@ -1,0 +1,52 @@
+{#
+  One waiting request per row, in the order they will be taken.
+
+  Every control is a form rather than a drag handle. Reordering by dragging
+  would be a JavaScript dependency for the last five percent of a control these
+  three buttons already give, on a page that otherwise needs none -- and it
+  would leave anybody working by keyboard without a way to do it at all.
+
+  A button that would do nothing is not rendered: the first row has no "up",
+  the last has no "down". The gap is deliberate, so the column stays readable.
+#}
+<table class="grid queue">
+  <thead>
+    <tr>
+      <th class="right">#</th>
+      <th>Link</th>
+      <th class="right">Order</th>
+      <th class="right">Remove</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for item in queue.waiting %}
+      <tr>
+        <td class="right num">{{ item.position }}</td>
+        <td class="url"><a href="/downloads/{{ item.download_id }}">{{ item.label }}</a></td>
+        <td class="right nowrap">
+          {% if item.can_move_up %}
+            <form class="inline" method="post" action="/downloads/{{ item.download_id }}/move?back=/downloads">
+              <input type="hidden" name="where" value="top">
+              <button type="submit" title="Move to the front" aria-label="Move to the front">⇈</button>
+            </form>
+            <form class="inline" method="post" action="/downloads/{{ item.download_id }}/move?back=/downloads">
+              <input type="hidden" name="where" value="up">
+              <button type="submit" title="Move up" aria-label="Move up">↑</button>
+            </form>
+          {% endif %}
+          {% if item.can_move_down %}
+            <form class="inline" method="post" action="/downloads/{{ item.download_id }}/move?back=/downloads">
+              <input type="hidden" name="where" value="down">
+              <button type="submit" title="Move down" aria-label="Move down">↓</button>
+            </form>
+          {% endif %}
+        </td>
+        <td class="right">
+          <form class="inline" method="post" action="/downloads/{{ item.download_id }}/stop?back=/downloads">
+            <button type="submit" title="Take this out of the queue" aria-label="Take this out of the queue">✕</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>

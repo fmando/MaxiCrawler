@@ -1131,8 +1131,14 @@ def make_download_snapshot(
     files_finished: int = 0,
     summary: DownloadSummary | None = None,
     error: str | None = None,
+    was_started: bool = True,
 ) -> DownloadSnapshot:
-    """Return a snapshot of a download that is not really happening."""
+    """Return a snapshot of a download that is not really happening.
+
+    Started by default, because every download described here is one that
+    got as far as moving bytes. A request still in the queue is the case
+    that has to say so.
+    """
     return DownloadSnapshot(
         download_id="d1",
         url="https://mega.nz/file/AaBbCcDd",
@@ -1146,6 +1152,7 @@ def make_download_snapshot(
         ),
         started_at=datetime(2026, 8, 9, 12, 0, tzinfo=UTC),
         elapsed_seconds=12.5,
+        was_started=was_started,
         summary=summary,
         error=error,
     )
