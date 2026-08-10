@@ -4,9 +4,10 @@ Handlers do three things and nothing else: read the request, ask a service, and
 hand plain data to a template. Every decision that is not one of those lives in
 :mod:`maxicrawler.api.views`, where it can be tested without a request.
 
-The navigation names all four sections from the first page. Two of them do very
-little yet, and saying so is cheaper than rearranging every page around them
-later.
+The navigation names every section from the first page, including the ones that
+do very little yet — saying so is cheaper than rearranging every page around
+them later. Downloads joined them in Sprint 15, when there was finally a queue
+to put on such a page.
 """
 
 from dataclasses import dataclass
@@ -27,19 +28,30 @@ from starlette.templating import Jinja2Templates
 
 from maxicrawler import __version__
 from maxicrawler.api import stream, views
-from maxicrawler.api.downloads import DownloadRun, DownloadRuns
-from maxicrawler.api.errors import DownloadBusyError
+from maxicrawler.api.downloads import Accepted, DownloadRun, Move, TransferQueue
+from maxicrawler.api.errors import QueueFullError
 from maxicrawler.api.jobs import DEFAULT_RETAINED_JOBS, CrawlJob, CrawlJobs
 from maxicrawler.app import (
+    DEFAULT_LINKS_PER_PAGE,
+    DEFAULT_PAGES_PER_PAGE,
     DEFAULT_PER_PAGE,
+    DiscoveryService,
     LibraryQuery,
     LibraryService,
     LibrarySort,
+    LinkQuery,
+    LinkSort,
+    Matches,
+    PageQuery,
+    PageState,
     StoredPayload,
+    TargetKind,
+    browse_pages,
     crawl_document,
 )
 from maxicrawler.app.viewing import DOWNLOAD_CONTENT_TYPE
 from maxicrawler.domain import DownloadStatus
+from maxicrawler.web.report import CrawlReport
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 """Where the pages live. Beside the code, so an installed wheel carries them."""
@@ -60,10 +72,16 @@ class Section:
 SECTIONS = (
     Section("dashboard", "Dashboard", "dashboard"),
     Section("crawls", "Crawls", "crawls"),
+    Section("downloads", "Downloads", "downloads"),
     Section("library", "Library", "library"),
     Section("settings", "Settings", "settings"),
 )
-"""The four areas, in the order they are read."""
+"""The five areas, in the order the chain runs through them.
+
+Downloads became one of them in Sprint 15. Before the queue there was nothing to
+put on such a page — a transfer had its own page and there was only ever one —
+and a section for it would have been a heading over a single link.
+"""
 
 
 def jobs_of(request: Request) -> CrawlJobs:
@@ -72,15 +90,21 @@ def jobs_of(request: Request) -> CrawlJobs:
     return registry
 
 
-def downloads_of(request: Request) -> DownloadRuns:
-    """Return the registry this application is running downloads through."""
-    registry: DownloadRuns = request.app.state.downloads
-    return registry
+def downloads_of(request: Request) -> TransferQueue:
+    """Return the queue this application is running downloads through."""
+    queue: TransferQueue = request.app.state.downloads
+    return queue
 
 
 def library_of(request: Request) -> LibraryService:
     """Return the service this application reads the library through."""
     service: LibraryService = request.app.state.library
+    return service
+
+
+def discovery_of(request: Request) -> DiscoveryService:
+    """Return the service this application reads crawl findings through."""
+    service: DiscoveryService = request.app.state.discovery
     return service
 
 
@@ -195,7 +219,7 @@ async def crawl_detail(request: Request) -> Response:
     report = job.report
     if report is not None:
         context["report"] = views.report_view(report)
-        context["pages"] = views.page_table(report)
+        context["pages"] = _page_table(request, report)
         context["links"] = _link_table(
             request, report.session.session_id, discovered=report.summary.unique_urls
         )
@@ -266,8 +290,31 @@ async def stop_crawl(request: Request) -> Response:
     return RedirectResponse(url=f"/crawls/{job.id}", status_code=303)
 
 
+async def downloads(request: Request) -> Response:
+    """Show the queue: what is running, what is waiting, and what became of the rest.
+
+    One page rather than a list of links to pages, because the question it
+    answers is about the *set* — how much is left, is anything stuck, is the
+    order right. Every control on it is a form, so it works with scripting off.
+
+    Live without a stream of its own. The running transfer's own event stream
+    is embedded, and ``download.js`` reloads the page when that transfer ends —
+    which is exactly when the rest of this page changes. A queue nobody is
+    draining has nothing to stream, and a page that reloaded on a timer would
+    fight whoever is reading it.
+    """
+    queue = downloads_of(request)
+    snapshot = queue.snapshot()
+    return page(
+        request,
+        "downloads.html",
+        {"queue": views.queue_view(snapshot, limit=queue.limit)},
+        section="downloads",
+    )
+
+
 async def start_download(request: Request) -> Response:
-    """Download one link, and send the browser to watch it.
+    """Put one link in the queue, and send the browser to watch it.
 
     The link arrives in a form body rather than in a query string, which is not
     only about it being an action: a share link keeps its decryption key in the
@@ -276,7 +323,7 @@ async def start_download(request: Request) -> Response:
     query string it would be written into a log.
 
     Answers with a redirect, so reloading the download afterwards does not offer
-    to start it a second time.
+    to queue it a second time.
     """
     form = await read_form(request)
     downloads = downloads_of(request)
@@ -284,9 +331,78 @@ async def start_download(request: Request) -> Response:
         run = downloads.submit(form.get("url", ""))
     except ValueError as error:
         return _refuse_download(request, str(error), status=400)
-    except DownloadBusyError as error:
+    except QueueFullError as error:
         return _refuse_download(request, str(error), status=409)
     return RedirectResponse(url=f"/downloads/{run.id}", status_code=303)
+
+
+async def queue_selection(request: Request) -> Response:
+    """Queue the links that were ticked, and show the queue.
+
+    The URLs arrive in the body, one field per ticked row, for the reason a
+    single one does: a share link keeps its decryption key in the fragment, and
+    a fragment is the one part of a URL a browser never sends in a link.
+
+    Partial by design. A selection where two links are malformed is not a
+    refusal of the other ninety-eight — the queue takes what it can and the
+    page says what it did.
+    """
+    form = await read_forms(request)
+    accepted = downloads_of(request).submit_all(form.get("url", ()))
+    if accepted.queued == 0 and not accepted.is_whole:
+        return _refuse_download(request, _nothing_queued(accepted), status=409)
+    return RedirectResponse(url=_queued_url(accepted), status_code=303)
+
+
+async def queue_matches(request: Request) -> Response:
+    """Queue every fetchable link the current filter matches, and show the queue.
+
+    The one control this sprint exists for: a filtered report is a set somebody
+    has already decided on, and ticking two hundred boxes to say so again is the
+    work this replaces.
+
+    Nothing but the query travels. The browser sends the filter it is looking
+    at, the server resolves it against what the crawl recorded, and the URLs —
+    decryption keys and all — never leave this process.
+    """
+    session_id = request.path_params["job_id"]
+    downloads = downloads_of(request)
+    matches = discovery_of(request).fetchable(
+        session_id, _link_query(request), limit=downloads.room()
+    )
+    if not matches.urls:
+        return _refuse_download(request, _nothing_matched(matches), status=409)
+    accepted = downloads.submit_all(matches.urls)
+    return RedirectResponse(url=_queued_url(accepted), status_code=303)
+
+
+def _queued_url(accepted: Accepted) -> str:
+    """Return where to land after queueing a batch.
+
+    One link goes to its own page, because that is what somebody who queued one
+    link wants to watch. Several go to the queue, because that is the thing they
+    just changed.
+    """
+    if accepted.queued == 1 and accepted.is_whole:
+        return f"/downloads/{accepted.runs[0].id}"
+    return "/downloads"
+
+
+def _nothing_queued(accepted: Accepted) -> str:
+    """Return why a selection produced no downloads at all."""
+    if accepted.no_room:
+        return f"the queue had no room for any of the {accepted.no_room} links selected"
+    return f"none of the {accepted.rejected} links selected is an absolute HTTP or HTTPS URL"
+
+
+def _nothing_matched(matches: Matches) -> str:
+    """Return why a filter produced no downloads at all."""
+    if matches.total:
+        return (
+            f"{matches.total} links match, and the queue has no room for any of them. "
+            "Let some finish, or cancel what you no longer want."
+        )
+    return "nothing this filter matches can be downloaded by the providers installed here"
 
 
 async def download_detail(request: Request) -> Response:
@@ -296,25 +412,106 @@ async def download_detail(request: Request) -> Response:
     follow a transfer. What the live stream adds is convenience, not capability.
     """
     run = _download(request)
+    downloads = downloads_of(request)
     return page(
         request,
         "download.html",
-        {"download": views.download_view(run.snapshot())},
-        section="library",
+        {
+            "download": views.download_view(
+                run.snapshot(),
+                position=downloads.position_of(run.id),
+                is_paused=downloads.is_paused,
+            )
+        },
+        section="downloads",
     )
 
 
 async def stop_download(request: Request) -> Response:
-    """Ask one transfer to stop, and show the page again.
+    """Ask one transfer to stop, or take a waiting one out of the queue.
+
+    One button for both, because they are one intention: the person clicking it
+    wants this download not to happen. What that costs differs — a waiting
+    request never started, a running one stops within a chunk — and neither
+    leaves anything behind in the library.
 
     The same shape as stopping a crawl, deliberately: a person clicking Stop
-    should not have to know which half of the chain they are looking at. This
-    one takes effect within a chunk rather than at the end of a page, and the
-    library is left exactly as it was.
+    should not have to know which half of the chain they are looking at.
     """
     run = _download(request)
-    run.stop()
-    return RedirectResponse(url=f"/downloads/{run.id}", status_code=303)
+    downloads_of(request).cancel(run.id)
+    return RedirectResponse(url=_back_to(request, f"/downloads/{run.id}"), status_code=303)
+
+
+async def retry_download(request: Request) -> Response:
+    """Queue the same link again, and show the new request.
+
+    A new entry rather than a reset of the old one: what happened the first time
+    is a fact, and a history that overwrote its own failures would be one nobody
+    could read.
+
+    From one download's page that means the new download's page, which is the
+    thing just asked for. From the queue it means the queue, where the new entry
+    is visible at the end of the line along with everything else waiting.
+    """
+    run = _download(request)
+    try:
+        again = downloads_of(request).retry(run.id)
+    except QueueFullError as error:
+        return _refuse_download(request, str(error), status=409)
+    if again is None:
+        return _refuse_download(request, RETRY_UNFINISHED, status=409)
+    return RedirectResponse(url=_back_to(request, f"/downloads/{again.id}"), status_code=303)
+
+
+RETRY_UNFINISHED = "that download has not finished, so there is nothing to retry"
+"""Said to whoever asked to retry something that is still going."""
+
+
+async def move_download(request: Request) -> Response:
+    """Move one waiting request within the queue, and show the page again."""
+    run = _download(request)
+    form = await read_form(request)
+    where = _move(form.get("where"))
+    if where is not None:
+        downloads_of(request).move(run.id, where)
+    return RedirectResponse(url=_back_to(request, f"/downloads/{run.id}"), status_code=303)
+
+
+def _move(value: str | None) -> Move | None:
+    """Return the move *value* names, or ``None`` for anything else."""
+    try:
+        return Move(value or "")
+    except ValueError:
+        return None
+
+
+async def pause_downloads(request: Request) -> Response:
+    """Hold the queue, or let it go again, and show the page again.
+
+    One route for both directions, because the button is one button and its
+    label is whichever state it would leave. A form field says which was meant,
+    so a stale page cannot pause a queue somebody has already resumed.
+    """
+    form = await read_form(request)
+    downloads = downloads_of(request)
+    if form.get("paused") == "1":
+        downloads.pause()
+    else:
+        downloads.resume()
+    return RedirectResponse(url=_back_to(request, "/downloads"), status_code=303)
+
+
+def _back_to(request: Request, default: str) -> str:
+    """Return where the form's action said to go afterwards, or *default*.
+
+    A parameter on the action rather than the ``Referer`` header: the same
+    button sits on the queue and on one download's page, and a header a browser
+    may withhold is not a thing to route on. Only paths of our own are honoured,
+    so this cannot be turned into an open redirect.
+    """
+    asked = request.query_params.get("back", "")
+    return asked if asked.startswith("/") and not asked.startswith("//") else default
 
 
 async def download_events(request: Request) -> Response:
@@ -340,7 +537,7 @@ def _refuse_download(request: Request, message: str, *, status: int) -> Response
         request,
         "download_refused.html",
         {"message": message, "active_id": None if active is None else active.id},
-        section="library",
+        section="downloads",
     )
     response.status_code = status
     return response
@@ -583,21 +780,113 @@ def _recorded_crawl(request: Request) -> Response:
 
 
 def _link_table(request: Request, session_id: str, *, discovered: int) -> dict[str, Any]:
-    """Return the discovered-link table, with a Download beside what can be.
+    """Return the discovered-link table, as the query string asks for it.
 
-    Which links those are is asked once for the whole table and answered from
-    the URL alone — a plugin classifies it, a provider claims it, and the
-    provider says whether it was composed with everything a transfer needs. No
-    request is made, so a report of two hundred links costs nothing to render.
+    The whole question — which URLs, in which order, which page of them, and
+    which of them this installation could fetch — is one call on
+    :class:`~maxicrawler.app.DiscoveryService`. Whether a link can be downloaded
+    is answered from the URL alone: a plugin classifies it, a provider claims it,
+    and the provider says whether it was composed with everything a transfer
+    needs. No request is made, so a page of links costs nothing to render.
+
+    Every parameter is read leniently, the same way the library reads its own.
+    A report arrives from a bookmark, a shared link or a typed URL, and the
+    default listing is a better answer to a stale one than a refusal.
     """
-    stored = jobs_of(request).service.discovered_urls(session_id)
-    return views.link_table(
-        stored,
-        discovered=discovered,
-        downloadable=downloads_of(request).service.downloadable(
-            item.record.normalized_url for item in stored
-        ),
+    page = discovery_of(request).browse(session_id, _link_query(request), discovered=discovered)
+    return views.link_view(
+        page,
+        base=f"/crawls/{session_id}",
+        hidden=_hidden_columns(request),
+        carry=_carry(request, views.LINK_PARAMS),
     )
+
+
+def _page_table(request: Request, report: CrawlReport) -> dict[str, Any]:
+    """Return the table of pages the crawl reached, as the query string asks.
+
+    Read from the report rather than from a database, because per-page outcomes
+    are not written down: what this shows exists only while the process that ran
+    the crawl is alive. Which is also why the page of a crawl only the database
+    remembers has no such table, and says so instead.
+    """
+    return views.page_view(
+        browse_pages(report.pages, _page_query(request)),
+        base=f"/crawls/{report.session.session_id}",
+        carry=_carry(request, views.PAGE_PARAMS),
+    )
+
+
+def _page_query(request: Request) -> PageQuery:
+    """Return the page-table query this request asks for."""
+    values = request.query_params
+    return PageQuery(
+        search=values.get("pq", "").strip(),
+        state=PageState.parse(values.get("pstate")),
+        page=_positive(values.get("ppage"), default=1),
+        per_page=DEFAULT_PAGES_PER_PAGE,
+    )
+
+
+def _carry(request: Request, owned: frozenset[str]) -> dict[str, str]:
+    """Return the query parameters that are not *owned* by the table asking.
+
+    Both tables of a report live on one URL, so each builds its links from its
+    own parameters *plus* whatever the other left there. Without this, filtering
+    the pages would quietly discard the link filter on screen — and a filter
+    that undoes another filter is one nobody keeps using.
+    """
+    return {
+        name: value for name, value in request.query_params.items() if name not in owned and value
+    }
+
+
+def _link_query(request: Request) -> LinkQuery:
+    """Return the link query this request asks for."""
+    values = request.query_params
+    return LinkQuery(
+        search=values.get("q", "").strip(),
+        plugin=values.get("plugin") or None,
+        category=values.get("category") or None,
+        target=_target(values.get("target")),
+        downloadable=_downloadable(values.get("dl")),
+        normalized_only=values.get("norm") == "1",
+        sort=LinkSort.parse(values.get("sort"), default=LinkQuery().sort),
+        descending=values.get("dir") == "desc",
+        page=_positive(values.get("page"), default=1),
+        per_page=DEFAULT_LINKS_PER_PAGE,
+    )
+
+
+def _target(value: str | None) -> TargetKind | None:
+    """Return the target kind *value* names, or ``None`` for anything else."""
+    try:
+        return TargetKind(value or "")
+    except ValueError:
+        return None
+
+
+def _downloadable(value: str | None) -> bool | None:
+    """Return which side of the downloadable filter *value* asks for.
+
+    Anything but the two words filters nothing, rather than being read as one
+    of them: "no" and "nonsense" must not mean the same thing.
+    """
+    if value == "yes":
+        return True
+    return False if value == "no" else None
+
+
+def _hidden_columns(request: Request) -> frozenset[str]:
+    """Return which columns of the link table this request wants left out.
+
+    Unknown names are dropped rather than refused. The list is written by our
+    own links, so anything else arrived from an older bookmark or a hand-typed
+    URL, and neither deserves an error page.
+    """
+    asked = request.query_params.get("hide", "")
+    known = {column.name for column in views.LINK_COLUMNS}
+    return frozenset(name for name in asked.split(",") if name in known)
 
 
 def _recorded_crawl_json(jobs: CrawlJobs, job_id: str) -> Response:
@@ -682,11 +971,23 @@ async def read_form(request: Request) -> dict[str, str]:
         HTTPException: the body was not an urlencoded form. Saying so beats
             quietly seeing no fields at all.
     """
+    return {name: values[-1] for name, values in (await read_forms(request)).items()}
+
+
+async def read_forms(request: Request) -> dict[str, list[str]]:
+    """Return the fields of a submitted form, keeping repeated names.
+
+    What :func:`read_form` is built on, and what a batch of ticked checkboxes
+    needs: they all submit under one name, and the last one is not the answer.
+
+    Raises:
+        HTTPException: the body was not an urlencoded form. Saying so beats
+            quietly seeing no fields at all.
+    """
     content_type = request.headers.get("content-type", "").split(";")[0].strip()
     if content_type != "application/x-www-form-urlencoded":
         raise HTTPException(status_code=415, detail="expected an urlencoded form")
-    fields = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
-    return {name: values[-1] for name, values in fields.items()}
+    return parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
 
 
 def _submitted(form: dict[str, str]) -> dict[str, Any]:

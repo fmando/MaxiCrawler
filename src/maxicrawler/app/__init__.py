@@ -8,11 +8,16 @@ That is why it exists rather than living in :mod:`maxicrawler.web`: the crawler
 must not import `database`, and a composition root must import both. Until now
 the command line was that root, which was fine while it was the only client.
 
-Three services, one question each:
+Four services, one question each:
 
 * :class:`CrawlService` — *"what does this site link to?"*
+* :class:`DiscoveryService` — *"what did that crawl find?"*
 * :class:`DownloadService` — *"fetch this link into the library."*
 * :class:`LibraryService` — *"what is in the library?"*
+
+The first two are a writer and a reader of the same records, kept apart for the
+reason ADR-028 keeps downloading and browsing apart: neither should end up
+speaking the other's vocabulary.
 
 Everything here is free of any interface. No terminal, no HTTP, no printing,
 no exit codes. A client decides how to render what it gets back, and the two
@@ -21,6 +26,18 @@ comes before that.
 """
 
 from maxicrawler.app.crawling import CrawlService
+from maxicrawler.app.discovery import (
+    DEFAULT_LINKS_PER_PAGE,
+    MAX_LINKS_PER_PAGE,
+    UNRESOLVED,
+    DiscoveryService,
+    LinkFacet,
+    LinkItem,
+    LinkPage,
+    LinkQuery,
+    LinkSort,
+    Matches,
+)
 from maxicrawler.app.downloading import (
     DownloadControl,
     DownloadProgress,
@@ -38,14 +55,32 @@ from maxicrawler.app.library import (
     LibrarySort,
     StoredPayload,
 )
+from maxicrawler.app.reports import (
+    DEFAULT_PAGES_PER_PAGE,
+    MAX_PAGES_PER_PAGE,
+    PageCounts,
+    PageQuery,
+    PageSlice,
+    PageState,
+    browse_pages,
+    count_pages,
+)
 from maxicrawler.app.serialization import crawl_document, page_document
+from maxicrawler.app.targets import TARGETS, TargetKind, target_of
 from maxicrawler.app.viewing import DEFAULT_MAX_VIEW_BYTES, Display, MediaVerdict, verdict_for
 
 __all__ = [
+    "DEFAULT_LINKS_PER_PAGE",
     "DEFAULT_MAX_VIEW_BYTES",
+    "DEFAULT_PAGES_PER_PAGE",
     "DEFAULT_PER_PAGE",
+    "MAX_LINKS_PER_PAGE",
+    "MAX_PAGES_PER_PAGE",
     "MAX_PER_PAGE",
+    "TARGETS",
+    "UNRESOLVED",
     "CrawlService",
+    "DiscoveryService",
     "Display",
     "DownloadControl",
     "DownloadProgress",
@@ -56,10 +91,24 @@ __all__ = [
     "LibraryQuery",
     "LibraryService",
     "LibrarySort",
+    "LinkFacet",
+    "LinkItem",
+    "LinkPage",
+    "LinkQuery",
+    "LinkSort",
+    "Matches",
     "MediaVerdict",
+    "PageCounts",
+    "PageQuery",
+    "PageSlice",
+    "PageState",
     "ProgressListener",
     "StoredPayload",
+    "TargetKind",
+    "browse_pages",
+    "count_pages",
     "crawl_document",
     "page_document",
+    "target_of",
     "verdict_for",
 ]

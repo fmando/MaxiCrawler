@@ -1,8 +1,8 @@
 {#
   The one layout every page extends.
 
-  The navigation names all four sections from the start, including the two that
-  do not do much yet. Adding them later would mean moving every page around it;
+  The navigation names every section from the start, including the ones that do
+  not do much yet. Adding them later would mean moving every page around it;
   a section that is honest about being empty costs one line and no rework.
 #}<!DOCTYPE html>
 <html lang="en">
@@ -33,8 +33,15 @@
     {% block content %}{% endblock %}
   </main>
 
+  {#
+    Said on every page because it is true on every page, and kept short for the
+    same reason. It stopped saying "robots.txt is not consulted yet" when that
+    stopped being true -- a footer nobody updates is one everybody learns to
+    stop reading.
+  #}
   <footer>
-    Crawling is your responsibility: robots.txt is not consulted yet.
+    robots.txt is obeyed unless a crawl was told otherwise. What you point this
+    at is still yours to answer for.
   </footer>
 </body>
 </html>

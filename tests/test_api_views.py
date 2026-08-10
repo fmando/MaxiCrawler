@@ -3,8 +3,10 @@
 Pure functions, so none of this needs HTTP, a database or a crawl.
 """
 
+from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -13,6 +15,7 @@ from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.api.views import (
     ABANDONED_LABEL,
     KIND_LABELS,
+    LINK_COLUMNS,
     STATE_LABELS,
     STATE_TONES,
     crawl_rows,
@@ -24,9 +27,9 @@ from maxicrawler.api.views import (
     format_number,
     library_view,
     link_rows,
-    link_table,
+    link_view,
     page_rows,
-    page_table,
+    page_view,
     plugin_shares,
     progress_view,
     report_view,
@@ -40,10 +43,19 @@ from maxicrawler.app import (
     LibraryPage,
     LibraryQuery,
     LibrarySort,
+    LinkFacet,
+    LinkItem,
+    LinkPage,
+    LinkQuery,
+    LinkSort,
+    PageQuery,
+    PageState,
+    TargetKind,
+    browse_pages,
+    target_of,
 )
 from maxicrawler.crawler import DiscoverySummary, PluginUsage
-from maxicrawler.database import StoredUrl
-from maxicrawler.domain import DownloadStatus, ScanSession, Statistics, UrlRecord
+from maxicrawler.domain import DownloadStatus, ScanSession, Statistics
 from maxicrawler.web.models import LinkKind
 from maxicrawler.web.report import CrawlReport, CrawlStatistics, PageOutcome, SkipReason
 from maxicrawler.web.session import CrawlOptions, CrawlSession, CrawlState
@@ -374,7 +386,7 @@ def test_pages_become_rows_in_the_order_they_were_reached() -> None:
         ),
     )
 
-    rows = page_rows(make_report(pages=pages))
+    rows = page_rows(pages)
 
     assert [row["url"] for row in rows] == ["https://example.test/", "https://example.test/a"]
     assert [row["depth"] for row in rows] == [0, 1]
@@ -383,7 +395,7 @@ def test_pages_become_rows_in_the_order_they_were_reached() -> None:
 def test_a_failed_page_says_so_without_a_status() -> None:
     pages = (PageOutcome(url="https://example.test/gone", depth=1, error="HTTP 404"),)
 
-    (row,) = page_rows(make_report(pages=pages))
+    (row,) = page_rows(pages)
 
     assert row["status_label"] == "err"
     assert row["succeeded"] is False
@@ -400,62 +412,180 @@ def test_a_redirected_page_carries_both_urls() -> None:
         ),
     )
 
-    (row,) = page_rows(make_report(pages=pages))
+    (row,) = page_rows(pages)
 
     assert row["was_redirected"] is True
     assert row["final_url"] == "https://example.test/new"
 
 
-def test_the_page_table_can_be_limited() -> None:
-    pages = tuple(
-        PageOutcome(url=f"https://example.test/{index}", depth=1, status=200) for index in range(10)
-    )
-
-    assert len(page_rows(make_report(pages=pages), limit=3)) == 3
-
-
 def test_a_crawl_with_no_pages_yields_no_rows() -> None:
-    assert page_rows(make_report()) == ()
+    assert page_rows(()) == ()
 
 
-def test_the_page_table_says_how_many_it_left_out() -> None:
-    pages = tuple(
-        PageOutcome(url=f"https://example.test/{index}", depth=1, status=200) for index in range(12)
+def make_pages(count: int, *, failed: int = 0) -> tuple[PageOutcome, ...]:
+    """Return *count* page outcomes, the last *failed* of them broken."""
+    return tuple(
+        PageOutcome(
+            url=f"https://example.test/{index}",
+            depth=1,
+            status=None if index >= count - failed else 200,
+            error="HTTP 404" if index >= count - failed else None,
+        )
+        for index in range(count)
     )
 
-    table = page_table(make_report(pages=pages), limit=5)
 
-    assert len(table["rows"]) == 5
-    assert table["total"] == "12"
-    assert table["hidden"] == "7"
-    assert table["has_hidden"] is True
+def make_page_view(
+    pages: tuple[PageOutcome, ...],
+    query: PageQuery | None = None,
+    *,
+    carry: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Return the page table as one crawl's report renders it."""
+    return page_view(browse_pages(pages, query), base=BASE, carry=carry or {})
 
 
-def test_a_page_table_that_shows_everything_says_nothing_about_hiding() -> None:
-    pages = (PageOutcome(url="https://example.test/", depth=0, status=200),)
+def test_the_page_table_counts_the_page_against_the_crawl() -> None:
+    view = make_page_view(make_pages(12), PageQuery(per_page=5))
 
-    table = page_table(make_report(pages=pages), limit=5)
+    assert len(view["rows"]) == 5
+    assert view["total"] == "12"
+    assert view["recorded"] == "12"
+    assert view["shown_range"] == "1–5"
+    assert view["pages"] == "3"
 
-    assert table["has_hidden"] is False
-    assert table["hidden"] == "0"
+
+def test_the_page_table_can_be_narrowed_to_the_failures() -> None:
+    view = make_page_view(make_pages(9, failed=2), PageQuery(state=PageState.FAILED))
+
+    assert len(view["rows"]) == 2
+    assert view["total"] == "2"
+    assert view["recorded"] == "9"
+    assert view["is_filtered"] is True
+
+
+def test_the_page_chips_count_the_whole_crawl() -> None:
+    view = make_page_view(make_pages(9, failed=2))
+    chips = {chip["label"]: chip for chip in view["chips"]}
+
+    assert chips["read"]["count"] == "7"
+    assert chips["failed"]["count"] == "2"
+    assert chips["failed"]["tone"] == "bad"
+
+
+def test_a_state_no_page_is_in_is_not_offered() -> None:
+    view = make_page_view(make_pages(3))
+
+    assert [chip["label"] for chip in view["chips"]] == ["read"]
+
+
+def test_the_page_chip_you_are_standing_on_takes_the_filter_off_again() -> None:
+    view = make_page_view(make_pages(9, failed=2), PageQuery(state=PageState.FAILED))
+    chips = {chip["label"]: chip for chip in view["chips"]}
+
+    assert chips["failed"]["active"] is True
+    assert chips["failed"]["url"] == f"{BASE}#pages"
+
+
+def test_the_page_table_leads_back_to_itself() -> None:
+    view = make_page_view(make_pages(9, failed=2))
+
+    assert view["action"] == f"{BASE}#pages"
+    assert all(chip["url"].endswith("#pages") for chip in view["chips"])
+
+
+def test_the_page_table_writes_its_own_parameters() -> None:
+    """Its own, so the link table's survive beside them."""
+    view = make_page_view(make_pages(12), PageQuery(state=PageState.FAILED, per_page=5))
+    chips = {chip["label"]: chip for chip in view["chips"]}
+
+    assert "pstate=" in chips["read"]["url"]
+    assert "state=" not in chips["read"]["url"].replace("pstate=", "")
+
+
+def test_the_page_table_carries_the_link_filter_through_its_own_links() -> None:
+    """Filtering one table must not throw the other table's filter away."""
+    view = make_page_view(make_pages(9, failed=2), carry={"plugin": "mega", "q": "pdf"})
+    chips = {chip["label"]: chip for chip in view["chips"]}
+
+    assert "plugin=mega" in chips["failed"]["url"]
+    assert "q=pdf" in chips["failed"]["url"]
+    assert view["carried"] == (
+        {"name": "plugin", "value": "mega"},
+        {"name": "q", "value": "pdf"},
+    )
+
+
+def test_clearing_the_page_filter_keeps_the_link_filter() -> None:
+    view = make_page_view(make_pages(9, failed=2), carry={"plugin": "mega"})
+
+    assert view["reset_url"] == f"{BASE}?plugin=mega#pages"
 
 
 # --- the link table ----------------------------------------------------------
 
 
-def make_stored_url(url: str, plugin: str | None, category: str | None = "share") -> StoredUrl:
-    """Return a discovered URL as the database holds it."""
-    return StoredUrl(
-        record=UrlRecord(raw_url=url, normalized_url=url, source_url="https://example.test/"),
-        plugin_name=plugin,
+def make_link(
+    url: str, plugin: str | None = "generic", category: str | None = "share", *, position: int = 0
+) -> LinkItem:
+    """Return one discovered URL as the service hands it over."""
+    return LinkItem(
+        url=url,
+        raw_url=url,
+        source_url="https://example.test/",
+        plugin=plugin,
         category=category,
+        target=target_of(url),
+        position=position,
     )
 
 
-def test_recorded_urls_become_rows() -> None:
-    stored = make_stored_url("https://mega.nz/file/AaBbCcDd", "mega")
+def make_link_page(
+    items: Sequence[LinkItem] = (),
+    *,
+    query: LinkQuery | None = None,
+    total: int | None = None,
+    discovered: int = 0,
+    downloadable: Iterable[str] = (),
+    pages: int = 1,
+    page: int = 1,
+    plugins: Iterable[LinkFacet] = (),
+    targets: Iterable[LinkFacet] = (),
+) -> LinkPage:
+    """Return a page of links the way the service would have built one.
 
-    (row,) = link_rows([stored])
+    *total* defaults to what is shown, so a test that is not about paging says
+    nothing about it. Ordering, filtering and paging are the service's subject
+    and are tested in `test_app_discovery.py`; this file is about wording and
+    about the links each view builds.
+    """
+    return LinkPage(
+        items=tuple(items),
+        query=query if query is not None else LinkQuery(),
+        total=len(items) if total is None else total,
+        recorded=len(items),
+        discovered=discovered,
+        page=page,
+        pages=pages,
+        plugins=tuple(plugins),
+        targets=tuple(targets),
+        downloadable=frozenset(downloadable),
+    )
+
+
+def make_link_view(page: LinkPage, *, hidden: Iterable[str] = ()) -> dict[str, Any]:
+    """Return the link table as one crawl's report renders it."""
+    return link_view(page, base=BASE, hidden=frozenset(hidden))
+
+
+BASE = "/crawls/abc"
+"""The report every link view here belongs to."""
+
+
+def test_recorded_urls_become_rows() -> None:
+    page = make_link_page([make_link("https://mega.nz/file/AaBbCcDd", "mega")])
+
+    (row,) = link_rows(page)
 
     assert row["url"] == "https://mega.nz/file/AaBbCcDd"
     assert row["plugin"] == "mega"
@@ -465,98 +595,282 @@ def test_recorded_urls_become_rows() -> None:
 
 
 def test_a_link_the_generic_plugin_claimed_is_not_notable() -> None:
-    (row,) = link_rows([make_stored_url("https://example.test/a", "generic")])
+    (row,) = link_rows(make_link_page([make_link("https://example.test/a")]))
 
     assert row["is_notable"] is False
 
 
-def test_a_link_no_plugin_claimed_says_so() -> None:
-    (row,) = link_rows([make_stored_url("https://example.test/a", None, None)])
+def test_a_link_no_plugin_claimed_is_given_a_word_here() -> None:
+    """The service leaves it as nothing; what to call nothing is a wording choice."""
+    (row,) = link_rows(make_link_page([make_link("https://example.test/a", None, None)]))
 
     assert row["plugin"] == "unresolved"
+    assert row["category"] == "—"
     assert row["is_notable"] is False
 
 
 def test_a_normalized_link_keeps_what_was_written() -> None:
-    stored = StoredUrl(
-        record=UrlRecord(
-            raw_url="https://Example.test/A?b=1#frag", normalized_url="https://example.test/A?b=1"
-        ),
-        plugin_name="generic",
+    item = LinkItem(
+        url="https://example.test/A?b=1",
+        raw_url="https://Example.test/A?b=1#frag",
+        source_url=None,
+        plugin="generic",
         category=None,
+        target=TargetKind.UNKNOWN,
+        position=0,
     )
 
-    (row,) = link_rows([stored])
+    (row,) = link_rows(make_link_page([item]))
 
     assert row["was_normalized"] is True
     assert row["raw_url"] == "https://Example.test/A?b=1#frag"
 
 
-def test_host_plugins_come_before_the_fallback() -> None:
-    """A table cut off at two hundred rows must not consist of generic links."""
-    urls = [make_stored_url(f"https://example.test/{index}", "generic") for index in range(5)]
-    urls.append(make_stored_url("https://mega.nz/file/AaBbCcDd", "mega"))
-    urls.append(make_stored_url("https://example.test/x", None, None))
+def test_a_url_is_shown_as_what_it_points_at() -> None:
+    (row,) = link_rows(make_link_page([make_link("https://example.test/a.pdf")]))
 
-    rows = link_rows(urls)
-
-    assert rows[0]["plugin"] == "mega"
-    assert rows[-1]["plugin"] == "unresolved"
+    assert row["target"] == "documents"
+    assert row["target_is_stated"] is True
 
 
-def test_discovery_order_survives_inside_a_group() -> None:
-    urls = [make_stored_url(f"https://example.test/{index}", "generic") for index in range(4)]
+def test_a_url_that_says_nothing_is_not_emphasised() -> None:
+    """ "Not stated" is true of most URLs and is not worth a reader's eye."""
+    (row,) = link_rows(make_link_page([make_link("https://example.test/a")]))
 
-    rows = link_rows(urls)
+    assert row["target"] == "not stated"
+    assert row["target_is_stated"] is False
 
-    assert [row["url"] for row in rows] == [f"https://example.test/{index}" for index in range(4)]
 
+def test_the_link_table_counts_the_page_against_the_crawl() -> None:
+    items = [make_link(f"https://example.test/{index}", position=index) for index in range(4)]
 
-def test_the_link_table_says_how_many_it_left_out() -> None:
-    urls = [make_stored_url(f"https://example.test/{index}", "generic") for index in range(9)]
+    view = make_link_view(make_link_page(items, total=9, discovered=9, pages=3))
 
-    table = link_table(urls, discovered=9, limit=4)
-
-    assert len(table["rows"]) == 4
-    assert table["total"] == "9"
-    assert table["hidden"] == "5"
-    assert table["was_recorded"] is True
+    assert len(view["rows"]) == 4
+    assert view["total"] == "9"
+    assert view["shown_range"] == "1–4"
+    assert view["pages"] == "3"
+    assert view["was_recorded"] is True
 
 
 def test_a_crawl_that_recorded_nothing_is_not_a_crawl_that_found_nothing() -> None:
     """The difference the page has to state rather than show an empty table for."""
-    table = link_table((), discovered=2919)
+    view = make_link_view(make_link_page(discovered=2919))
 
-    assert table["rows"] == ()
-    assert table["was_recorded"] is False
-    assert table["discovered"] == "2,919"
+    assert view["rows"] == ()
+    assert view["has_rows"] is False
+    assert view["has_any"] is False
+    assert view["was_recorded"] is False
+    assert view["discovered"] == "2,919"
 
 
 def test_a_crawl_that_genuinely_found_nothing_says_that_instead() -> None:
-    table = link_table((), discovered=0)
+    view = make_link_view(make_link_page(discovered=0))
 
-    assert table["rows"] == ()
-    assert table["was_recorded"] is True
+    assert view["rows"] == ()
+    assert view["was_recorded"] is True
 
 
 def test_only_a_link_a_provider_could_fetch_offers_a_download() -> None:
     mega = "https://mega.nz/file/AaBbCcDd"
-    urls = [make_stored_url(mega, "mega"), make_stored_url("https://example.test/a", "generic")]
+    items = [make_link(mega, "mega"), make_link("https://example.test/a", position=1)]
 
-    table = link_table(urls, discovered=2, downloadable=frozenset({mega}))
+    view = make_link_view(make_link_page(items, downloadable=[mega]))
 
-    assert [row["can_download"] for row in table["rows"]] == [True, False]
-    assert table["has_downloads"] is True
+    assert [row["can_download"] for row in view["rows"]] == [True, False]
+    assert view["has_downloads"] is True
 
 
 def test_a_table_with_nothing_to_fetch_grows_no_column() -> None:
     """A column of empty cells is worse than no column."""
-    urls = [make_stored_url("https://example.test/a", "generic")]
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
 
-    table = link_table(urls, discovered=1)
+    assert view["has_downloads"] is False
+    assert view["rows"][0]["can_download"] is False
 
-    assert table["has_downloads"] is False
-    assert table["rows"][0]["can_download"] is False
+
+# --- the links a report builds -----------------------------------------------
+
+
+def test_an_untouched_report_writes_no_query_string() -> None:
+    """Only what differs from the default is carried."""
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
+
+    assert view["reset_url"] == f"{BASE}#links"
+
+
+def test_every_link_leads_back_to_the_table() -> None:
+    """Clicking a filter must not put you at the top of a report three screens long."""
+    view = make_link_view(
+        make_link_page([make_link("https://example.test/a")], plugins=[LinkFacet("mega", 3)])
+    )
+
+    (group,) = view["facets"]
+    (chip,) = group["chips"]
+
+    assert chip["url"].endswith("#links")
+    assert view["action"] == f"{BASE}#links"
+
+
+def test_a_chip_carries_its_count_and_the_query_that_selects_it() -> None:
+    view = make_link_view(
+        make_link_page([make_link("https://example.test/a")], plugins=[LinkFacet("mega", 1291)])
+    )
+
+    (chip,) = view["facets"][0]["chips"]
+
+    assert chip["label"] == "mega"
+    assert chip["count"] == "1,291"
+    assert chip["active"] is False
+    assert chip["url"] == f"{BASE}?plugin=mega#links"
+
+
+def test_the_chip_you_are_standing_on_takes_the_filter_off_again() -> None:
+    """A chip is a toggle rather than a one-way door."""
+    view = make_link_view(
+        make_link_page(
+            [make_link("https://example.test/a")],
+            query=LinkQuery(plugin="mega"),
+            plugins=[LinkFacet("mega", 3)],
+        )
+    )
+
+    (chip,) = view["facets"][0]["chips"]
+
+    assert chip["active"] is True
+    assert chip["url"] == f"{BASE}#links"
+
+
+def test_a_target_chip_is_named_the_way_a_person_would_ask_for_it() -> None:
+    view = make_link_view(
+        make_link_page(
+            [make_link("https://example.test/a.pdf")],
+            targets=[LinkFacet("document", 2), LinkFacet("unknown", 40)],
+        )
+    )
+
+    (group,) = view["facets"]
+
+    assert group["heading"] == "Type"
+    assert [chip["label"] for chip in group["chips"]] == ["documents", "not stated"]
+
+
+def test_a_facet_nothing_falls_into_is_not_offered_at_all() -> None:
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
+
+    assert view["facets"] == ()
+
+
+def test_choosing_a_filter_returns_to_the_first_page() -> None:
+    """Page four of the old question is not page four of the new one."""
+    view = make_link_view(
+        make_link_page(
+            [make_link("https://example.test/a")],
+            query=LinkQuery(page=4),
+            plugins=[LinkFacet("mega", 3)],
+            pages=9,
+            page=4,
+        )
+    )
+
+    (chip,) = view["facets"][0]["chips"]
+
+    assert "page=" not in chip["url"]
+
+
+def test_paging_keeps_the_filter_it_was_reached_with() -> None:
+    view = make_link_view(
+        make_link_page(
+            [make_link("https://example.test/a")],
+            query=LinkQuery(search="pdf", plugin="mega"),
+            total=400,
+            pages=4,
+            page=2,
+        )
+    )
+
+    assert "q=pdf" in view["next_url"]
+    assert "plugin=mega" in view["next_url"]
+    assert "page=3" in view["next_url"]
+    assert "page=1" not in view["previous_url"]
+
+
+def test_the_last_page_offers_no_next() -> None:
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
+
+    assert view["next_url"] is None
+    assert view["previous_url"] is None
+
+
+# --- ordering and columns ----------------------------------------------------
+
+
+def test_a_sortable_heading_is_a_link_and_the_others_are_not() -> None:
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
+    headers = {header["name"]: header for header in view["headers"]}
+
+    assert headers["url"]["url"] is not None
+    assert headers["category"]["url"] is None
+
+
+def test_clicking_the_active_column_reverses_it() -> None:
+    view = make_link_view(
+        make_link_page([make_link("https://example.test/a")], query=LinkQuery(sort=LinkSort.URL))
+    )
+    header = next(item for item in view["headers"] if item["name"] == "url")
+
+    assert header["active"] is True
+    assert "dir=desc" in header["url"]
+
+
+def test_every_column_but_the_url_can_be_turned_off() -> None:
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
+    toggles = {toggle["name"]: toggle for toggle in view["toggles"]}
+
+    assert toggles["url"]["required"] is True
+    assert toggles["url"]["url"] is None
+    assert all(toggle["shown"] for toggle in view["toggles"])
+    assert "hide=plugin" in toggles["plugin"]["url"]
+
+
+def test_a_hidden_column_is_left_out_and_offered_back() -> None:
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]), hidden=["source"])
+    toggles = {toggle["name"]: toggle for toggle in view["toggles"]}
+
+    assert "source" not in view["shown"]
+    assert [header["name"] for header in view["headers"]] == [
+        "plugin",
+        "category",
+        "target",
+        "url",
+    ]
+    assert toggles["source"]["shown"] is False
+    assert "hide=" not in toggles["source"]["url"]
+
+
+def test_the_hidden_columns_survive_a_search() -> None:
+    """They travel as a form field, so filtering does not undo the layout."""
+    view = make_link_view(
+        make_link_page([make_link("https://example.test/a")]), hidden=["source", "category"]
+    )
+
+    assert view["hide_value"] == "category,source"
+
+
+def test_the_url_column_cannot_be_hidden_even_if_asked() -> None:
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]), hidden=["url"])
+
+    assert "url" in view["shown"]
+    assert any(header["name"] == "url" for header in view["headers"])
+
+
+def test_every_column_is_offered_as_a_toggle() -> None:
+    """A control that silently lacks an entry reads as a bug."""
+    view = make_link_view(make_link_page())
+
+    assert [toggle["name"] for toggle in view["toggles"]] == [
+        column.name for column in LINK_COLUMNS
+    ]
 
 
 # --- the label tables --------------------------------------------------------
@@ -817,8 +1131,14 @@ def make_download_snapshot(
     files_finished: int = 0,
     summary: DownloadSummary | None = None,
     error: str | None = None,
+    was_started: bool = True,
 ) -> DownloadSnapshot:
-    """Return a snapshot of a download that is not really happening."""
+    """Return a snapshot of a download that is not really happening.
+
+    Started by default, because every download described here is one that
+    got as far as moving bytes. A request still in the queue is the case
+    that has to say so.
+    """
     return DownloadSnapshot(
         download_id="d1",
         url="https://mega.nz/file/AaBbCcDd",
@@ -832,6 +1152,7 @@ def make_download_snapshot(
         ),
         started_at=datetime(2026, 8, 9, 12, 0, tzinfo=UTC),
         elapsed_seconds=12.5,
+        was_started=was_started,
         summary=summary,
         error=error,
     )

@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from maxicrawler.api.errors import MISSING_EXTRA, WebDependencyError
-from maxicrawler.app import CrawlService, DownloadService, LibraryService
+from maxicrawler.app import CrawlService, DiscoveryService, DownloadService, LibraryService
 from maxicrawler.config import DEFAULT_CONFIG_PATH, Settings
 
 try:
@@ -35,7 +35,7 @@ except ImportError as error:  # pragma: no cover - depends on the environment
     raise WebDependencyError(MISSING_EXTRA) from error
 
 from maxicrawler.api import routes  # noqa: E402 - only importable behind the guard
-from maxicrawler.api.downloads import DownloadRuns  # noqa: E402
+from maxicrawler.api.downloads import TransferQueue  # noqa: E402
 from maxicrawler.api.jobs import CrawlJobs  # noqa: E402
 
 
@@ -44,8 +44,9 @@ def create_app(
     service: CrawlService | None = None,
     settings: Settings | None = None,
     jobs: CrawlJobs | None = None,
-    downloads: DownloadRuns | None = None,
+    downloads: TransferQueue | None = None,
     library: LibraryService | None = None,
+    discovery: DiscoveryService | None = None,
     config_path: Path | None = None,
 ) -> Starlette:
     """Return the MaxiCrawler web application.
@@ -70,9 +71,18 @@ def create_app(
     transfers = (
         downloads
         if downloads is not None
-        else DownloadRuns(DownloadService(crawl_service.settings))
+        else TransferQueue(DownloadService(crawl_service.settings))
     )
     shelf = library if library is not None else LibraryService(crawl_service.settings)
+    # The download service answers "could this be fetched?" from a provider
+    # registry it builds once and caches. Handing that same instance over rather
+    # than a second one is why the resolver is injected: two registries would be
+    # two sets of providers to keep in step, for one identical answer.
+    findings = (
+        discovery
+        if discovery is not None
+        else DiscoveryService(crawl_service.settings, downloadable=transfers.service.downloadable)
+    )
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
@@ -107,7 +117,31 @@ def create_app(
                 name="crawl_events",
             ),
             Route("/crawls/{job_id}/stop", routes.stop_crawl, methods=["POST"], name="stop_crawl"),
+            # Under the crawl rather than under /downloads: what it queues is
+            # decided by re-running that crawl's link query on the server, so
+            # the crawl is what it is addressed against.
+            Route(
+                "/crawls/{job_id}/downloads",
+                routes.queue_matches,
+                methods=["POST"],
+                name="queue_matches",
+            ),
+            Route("/downloads", routes.downloads, methods=["GET"], name="downloads"),
             Route("/downloads", routes.start_download, methods=["POST"], name="start_download"),
+            Route(
+                "/downloads/selection",
+                routes.queue_selection,
+                methods=["POST"],
+                name="queue_selection",
+            ),
+            # Before the page, for the same reason `{job_id}.json` is: a path
+            # parameter matches any single segment, and "pause" is one.
+            Route(
+                "/downloads/pause",
+                routes.pause_downloads,
+                methods=["POST"],
+                name="pause_downloads",
+            ),
             Route(
                 "/downloads/{download_id}",
                 routes.download_detail,
@@ -119,6 +153,18 @@ def create_app(
                 routes.stop_download,
                 methods=["POST"],
                 name="stop_download",
+            ),
+            Route(
+                "/downloads/{download_id}/retry",
+                routes.retry_download,
+                methods=["POST"],
+                name="retry_download",
+            ),
+            Route(
+                "/downloads/{download_id}/move",
+                routes.move_download,
+                methods=["POST"],
+                name="move_download",
             ),
             Route(
                 "/downloads/{download_id}/events",
@@ -158,6 +204,7 @@ def create_app(
     application.state.jobs = registry
     application.state.downloads = transfers
     application.state.library = shelf
+    application.state.discovery = findings
     application.state.config_path = source
     return application
 

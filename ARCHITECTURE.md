@@ -64,9 +64,10 @@ gehen durch `maxicrawler.app` — den Composition Root, die einzige Schicht, die
 gleichzeitig kennen darf:
 
 ```text
-maxicrawler.cli ─┐                      ┌─ CrawlService    → web / crawler / database
-                 ├─→ maxicrawler.app ─→ ├─ DownloadService → providers / downloader / library
-maxicrawler.api ─┘                      └─ LibraryService  → library
+                                        ┌─ CrawlService     → web / crawler / database
+maxicrawler.cli ─┐                      ├─ DiscoveryService → database
+                 ├─→ maxicrawler.app ─→ ├─ DownloadService  → providers / downloader / library
+maxicrawler.api ─┘                      └─ LibraryService   → library
 ```
 
 Die CLI bleibt vollständig erhalten und ist der Client für Automatisierung,
@@ -85,6 +86,18 @@ und eine gespeicherte Datei ausliefern, ohne `downloader`, `providers` oder
 `DownloadService` schreibt in die Library, `LibraryService` liest sie. Zwei
 Fragen an denselben Speicher, getrennt gehalten, damit keine der beiden das
 Vokabular der anderen bekommt (ADR-028).
+
+Dieselbe Trennung gilt seit Sprint 15 für die Discovery: `CrawlService`
+schreibt, was ein Crawl gefunden hat, und `DiscoveryService` liest es zurück —
+gesucht, gefiltert, sortiert und geblättert. Ein Report ist damit keine Ansicht
+mehr, sondern eine Abfrage: `LinkQuery` hinein, `LinkPage` heraus. Dieselbe
+Filtersprache beantwortet eine zweite Frage: `fetchable()` gibt `Matches`
+zurück — die URLs, die der Filter trifft und die hier auch geholt werden
+könnten. Zwei Fragen, ein Vokabular; eine Tabelle ist keine Menge. Ob ein Link
+heruntergeladen werden kann, ist die eine Frage, die keine Datenbankspalte
+beantwortet; sie kommt als Funktion herein, damit dieser Service weder Plugins
+noch Provider kennen muss und eine spätere Frage derselben Form — *„liegt das
+schon in der Library?"* — denselben Weg nimmt.
 
 Die Weboberfläche ist ein **optionales** Extra (`pip install "maxicrawler[web]"`).
 Ohne sie funktioniert jeder Befehl außer `serve`, und `serve` erklärt in einem
@@ -125,11 +138,35 @@ gefiltert, sortiert und geblättert, jede Datei hat eine Seite, und der Browser
 zeigt an, was er anzeigen kann. MaxiCrawler rendert dabei nichts selbst — es
 nennt einen Content-Type und übergibt die Bytes (ADR-027).
 
-Bewusst genau ein Download zur Zeit, ohne Warteschlange, ohne Stapel und ohne
-Scheduler. Was dafür nötig war, ist ein Service über dem Download Manager —
-nicht ein zweiter Manager. Was fehlt, fehlt absichtlich: eine Queue braucht eine
-Politik für Reihenfolge, Abbruch, Fortsetzung und Neustart, und keine davon ist
-zu erfinden, bevor ein einzelner Download funktioniert.
+Der Download selbst brauchte dafür einen Service über dem Download Manager —
+keinen zweiten Manager. Bis Sprint 14 lief davon bewusst genau einer zur Zeit,
+ohne Warteschlange.
+
+Seit Sprint 15 gibt es sie, und sie beantwortet drei der vier
+Fragen, die ADR-026 offengelassen hatte: Reihenfolge (Ankunft, mit Buttons zum
+Verschieben), Abbruch (wartend entfernen, laufend stoppen) und Pause (der
+Warteschlange, nie des laufenden Transfers). Die vierte — Neustartfestigkeit —
+bleibt offen, weil sie ohne echtes Resume nur anbieten könnte, dieselben Dateien
+wieder bei null zu beginnen (ADR-033).
+
+```text
+TransferQueue (maxicrawler.api.downloads)   Aufträge: URLs, ungeplant
+  └─ ein Worker ──→ DownloadService.download(url, on_progress, control)
+                      └─ DownloadManager
+                           └─ DownloadQueue (maxicrawler.downloader.queue)
+                                            Jobs eines Plans, aufgelöst
+```
+
+Zwei Warteschlangen auf zwei Ebenen, absichtlich getrennt und absichtlich
+verschieden benannt. Die obere entscheidet *Reihenfolge und Zeitpunkt* und
+startet nichts selbst: jeder Transfer ist genau ein `DownloadService`-Aufruf.
+Ein Worker, und das ist eine Höflichkeitsentscheidung, keine technische Grenze.
+
+Seit Sprint 15 ist Downloads ein eigener Navigationsbereich mit einer Seite,
+die die ganze Warteschlange zeigt. Sie hat **keinen eigenen Ereignisstrom**:
+eingebettet ist der Strom des gerade laufenden Transfers, und `download.js`
+lädt die Seite neu, wenn dieser endet — also genau dann, wenn sich der Rest der
+Seite ändert. Eine Warteschlange, die niemand abarbeitet, hat nichts zu senden.
 
 ## Ausblick: Crawl Jobs
 
@@ -202,6 +239,19 @@ weiß.
 -   `maxicrawler.api` importiert weder `providers` noch `downloader` noch
     `library` und baut weder einen Crawl- noch einen Download-Objektgraphen
     selbst.
+-   `DownloadService` ist die einzige Stelle, die einen Download startet. Die
+    Warteschlange entscheidet, welcher Auftrag als Nächstes drankommt und ob der
+    Worker ihn nehmen darf — mehr nicht. Eine zweite Downloadlogik gibt es
+    nicht, und eine Mehrfachauswahl ist keine: sie löst eine Auswahl in URLs auf
+    und legt sie in dieselbe Warteschlange (ADR-034).
+-   Eine Menge von Links wird bevorzugt *beschrieben* statt *aufgezählt*. „Alles
+    was dieser Filter trifft" schickt die Abfrage und lässt den Server auflösen;
+    nur angehakte Zeilen schicken URLs. Wo Elemente Zugangsdaten tragen, ist die
+    beschreibende Form immer auch die sicherere.
+-   Der Entschlüsselungsschlüssel eines Shares lebt in genau einem privaten
+    Wörterbuch der Warteschlange. Kein Snapshot, keine Seite, kein Event-Frame
+    und keine Weiterleitung trägt ihn; `tests/test_api_secret_confinement.py`
+    liest das nach.
 -   Ein laufender Download wird in der Senke abgebrochen, nicht im Manager und
     nicht im Provider: dort laufen die Bytes jedes Providers ohnehin vorbei, und
     dort ist bereits garantiert, dass ein unfertiger Transfer nichts hinterlässt.

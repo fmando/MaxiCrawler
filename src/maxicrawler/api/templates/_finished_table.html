@@ -1,0 +1,54 @@
+{#
+  What became of the downloads this process has already been through.
+
+  Newest first, which is the order somebody checking on them reads. A stopped
+  download is spelled as stopped rather than as a failure, here as everywhere:
+  the person reading the word is the one who pressed the button.
+#}
+<table class="grid">
+  <thead>
+    <tr>
+      <th>State</th>
+      <th>Link</th>
+      <th class="right">Transferred</th>
+      <th class="right">Took</th>
+      <th>Then</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for item in queue.finished %}
+      <tr>
+        <td><span class="badge {{ item.state_tone }}">{{ item.state_label }}</span></td>
+        <td class="url">
+          <a href="/downloads/{{ item.download_id }}">{{ item.label }}</a>
+          {#
+            The one line explaining anything but a plain success, beside the
+            link it is about. A history that only said "failed" would send
+            somebody to another page to find out what it meant.
+          #}
+          {% if item.reason and not item.succeeded %}
+            <span class="muted small">{{ item.reason }}</span>
+          {% endif %}
+        </td>
+        <td class="right num">{{ item.transferred }}</td>
+        <td class="right num">{{ item.elapsed or "—" }}</td>
+        <td class="nowrap">
+          {% if item.item_url %}
+            <a class="aside" href="{{ item.item_url }}">Show the file</a>
+          {% endif %}
+          {#
+            A new request rather than a reset of this row, so what happened
+            stays readable. Offered for everything that ended without the file
+            arriving -- a dead share, a broken transfer, a stop somebody has
+            since thought better of.
+          #}
+          {% if not item.succeeded %}
+            <form class="inline" method="post" action="/downloads/{{ item.download_id }}/retry?back=/downloads">
+              <button type="submit">Try again</button>
+            </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>

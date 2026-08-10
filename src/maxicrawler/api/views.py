@@ -16,13 +16,14 @@ limit" on its own line, while a page shows a short badge. Sharing the *numbers*
 is what matters, and those come from the same report either way.
 """
 
-from collections.abc import Container, Iterable
+from collections.abc import Container, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlencode
 
-from maxicrawler.api.downloads import DownloadSnapshot
+from maxicrawler.api.downloads import DownloadSnapshot, QueueSnapshot
 from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.app import (
     DownloadProgress,
@@ -31,14 +32,22 @@ from maxicrawler.app import (
     LibraryPage,
     LibraryQuery,
     LibrarySort,
+    LinkItem,
+    LinkPage,
+    LinkQuery,
+    LinkSort,
+    PageQuery,
+    PageSlice,
+    PageState,
     StoredPayload,
+    TargetKind,
 )
 from maxicrawler.config import Settings
 from maxicrawler.crawler import PluginUsage
-from maxicrawler.database import StoredCrawl, StoredUrl
+from maxicrawler.database import StoredCrawl
 from maxicrawler.domain import DownloadStatus
 from maxicrawler.plugins.generic import GENERIC_PLUGIN_NAME
-from maxicrawler.utils import format_size
+from maxicrawler.utils import format_size, strip_fragment
 from maxicrawler.web.models import LinkKind
 from maxicrawler.web.report import CrawlReport, PageOutcome, SkipReason
 from maxicrawler.web.session import CrawlOptions, CrawlState
@@ -50,17 +59,6 @@ Not a :class:`~maxicrawler.web.session.CrawlState`, because nothing ever
 *enters* this state: it is what an unfinished record means once you know no
 process is behind it. The engine cannot write it, since a process that is being
 killed does not get to update a row on its way out.
-"""
-
-MAX_LISTED_PAGES = 200
-"""How many pages a report lists before saying how many it left out."""
-
-MAX_LISTED_LINKS = 200
-"""How many discovered URLs a report lists before saying the same.
-
-A crawl of fifty pages routinely finds thousands. A table that long is not a
-report, and the JSON document beside it is the right answer for anyone who
-wants all of them.
 """
 
 STATE_LABELS: dict[CrawlState, str] = {
@@ -250,7 +248,18 @@ def progress_view(snapshot: JobSnapshot) -> dict[str, Any]:
     }
 
 
-def download_view(snapshot: DownloadSnapshot) -> dict[str, Any]:
+QUEUED_LABEL = "waiting"
+"""What a request that has not been picked up yet is called.
+
+Not "starting", which is what :data:`STATUS_LABELS` says about
+:attr:`DownloadStatus.PENDING`. Both are "nothing has been transferred", and
+only one of them is somebody's turn to wait for.
+"""
+
+
+def download_view(
+    snapshot: DownloadSnapshot, *, position: int | None = None, is_paused: bool = False
+) -> dict[str, Any]:
     """Return what a download's page shows.
 
     Every value leaves here as a string a template prints unchanged, for the
@@ -268,8 +277,17 @@ def download_view(snapshot: DownloadSnapshot) -> dict[str, Any]:
         "url": snapshot.url,
         "label": snapshot.label,
         "status": str(snapshot.status),
-        "state_label": STATUS_LABELS[snapshot.status],
-        "state_tone": STATUS_TONES[snapshot.status],
+        "state_label": QUEUED_LABEL if snapshot.is_queued else STATUS_LABELS[snapshot.status],
+        "state_tone": "idle" if snapshot.is_queued else STATUS_TONES[snapshot.status],
+        "is_queued": snapshot.is_queued,
+        "is_running": snapshot.is_running,
+        # Where in the line, counting from one, for a request that is in one.
+        # `None` once it is being worked on, which is when the bar takes over
+        # from the number as the thing worth looking at.
+        "position": None if position is None else format_number(position),
+        # A queue nobody is draining is why a request is not moving, and a page
+        # that said "waiting" without saying that would be describing a stall.
+        "queue_is_paused": is_paused,
         "bytes_written": format_size(progress.bytes_written),
         "total_bytes": None if progress.total_bytes is None else format_size(progress.total_bytes),
         "transferred": _transferred(progress.bytes_written, progress.total_bytes),
@@ -278,7 +296,10 @@ def download_view(snapshot: DownloadSnapshot) -> dict[str, Any]:
         "files_total": format_number(progress.files_total),
         "files_finished": format_number(progress.files_finished),
         "has_many_files": progress.files_total > 1,
-        "elapsed": format_duration(snapshot.elapsed_seconds),
+        # Absent for a request that was never picked up. Its zero would
+        # otherwise read as a transfer that took no time rather than one that
+        # never happened.
+        "elapsed": format_duration(snapshot.elapsed_seconds) if snapshot.was_started else None,
         "rate": _rate(progress.bytes_written, snapshot.elapsed_seconds),
         "remaining": _remaining(progress, snapshot),
         "is_finished": snapshot.is_finished,
@@ -289,6 +310,80 @@ def download_view(snapshot: DownloadSnapshot) -> dict[str, Any]:
         # Straight to the file rather than to a list to search through. Absent
         # when the request turned out to hold several files, which is when the
         # library itself is the right place to land.
+        "item_url": _item_url(snapshot.summary),
+    }
+
+
+def queue_view(snapshot: QueueSnapshot, *, limit: int) -> dict[str, Any]:
+    """Return what the queue page shows.
+
+    Three lists and a set of counters. The running transfer is the only thing
+    here rendered in full — it is the only one with something to report — so it
+    goes through :func:`download_view` and everything else through a row
+    builder that answers only what its table asks.
+    """
+    waiting = tuple(
+        _waiting_row(item, position, last=position == len(snapshot.waiting))
+        for position, item in enumerate(snapshot.waiting, start=1)
+    )
+    return {
+        "is_paused": snapshot.is_paused,
+        "is_busy": snapshot.is_busy,
+        "active": None if snapshot.active is None else download_view(snapshot.active),
+        "waiting": waiting,
+        "finished": tuple(_finished_row(item) for item in snapshot.finished),
+        "remaining": format_number(snapshot.remaining),
+        "waiting_count": format_number(len(snapshot.waiting)),
+        "finished_count": format_number(len(snapshot.finished)),
+        "succeeded": format_number(snapshot.succeeded),
+        "failed": format_number(snapshot.failed),
+        "stopped": format_number(snapshot.stopped),
+        "has_failures": snapshot.failed > 0,
+        "bytes_written": format_size(snapshot.bytes_written),
+        # Named rather than implied, so a refusal is not the first time somebody
+        # learns there is a ceiling at all.
+        "limit": format_number(limit),
+        "is_nearly_full": len(snapshot.waiting) >= limit * NEARLY_FULL,
+    }
+
+
+NEARLY_FULL = 0.9
+"""How full the queue gets before the page says so.
+
+Late enough not to nag over an ordinary afternoon, early enough that a refusal
+is not a surprise.
+"""
+
+
+def _waiting_row(snapshot: DownloadSnapshot, position: int, *, last: bool) -> dict[str, Any]:
+    """Return one line of the waiting list.
+
+    Whether a row can move is decided here rather than in the template: the
+    first row has no "up" and the last has no "down", and a button that does
+    nothing is worse than one that is not there.
+    """
+    return {
+        "download_id": snapshot.download_id,
+        "url": snapshot.url,
+        "label": snapshot.label,
+        "position": format_number(position),
+        "can_move_up": position > 1,
+        "can_move_down": not last,
+    }
+
+
+def _finished_row(snapshot: DownloadSnapshot) -> dict[str, Any]:
+    """Return one line of the history."""
+    return {
+        "download_id": snapshot.download_id,
+        "url": snapshot.url,
+        "label": snapshot.label,
+        "state_label": STATUS_LABELS[snapshot.status],
+        "state_tone": STATUS_TONES[snapshot.status],
+        "succeeded": snapshot.summary is not None and snapshot.summary.succeeded,
+        "reason": snapshot.reason,
+        "transferred": format_size(snapshot.progress.bytes_written),
+        "elapsed": format_duration(snapshot.elapsed_seconds) if snapshot.was_started else None,
         "item_url": _item_url(snapshot.summary),
     }
 
@@ -559,51 +654,447 @@ def report_view(report: CrawlReport) -> dict[str, Any]:
     }
 
 
-def page_table(report: CrawlReport, *, limit: int = MAX_LISTED_PAGES) -> dict[str, Any]:
-    """Return the page table, and an honest count of what it left out."""
-    total = len(report.pages)
+PAGE_STATE_LABELS: dict[PageState, str] = {
+    PageState.SUCCEEDED: "read",
+    PageState.FAILED: "failed",
+    PageState.REDIRECTED: "redirected",
+}
+"""What each state of a crawled page is called on a page.
+
+"read" rather than "succeeded", because the counter above the table has said
+"Pages read" since the first version of this report and two words for one
+number is how a reader starts wondering whether they are two numbers.
+"""
+
+PAGE_PARAMS = frozenset({"pq", "pstate", "ppage"})
+"""Which query parameters the page table owns.
+
+Both tables live on one URL, so each has to know which parameters are not its
+own — and carry them through untouched. Without that, filtering the pages would
+silently throw away the link filter you were looking at, which is the kind of
+thing that teaches somebody to stop using the filters.
+"""
+
+
+def page_view(
+    slice: PageSlice, *, base: str, carry: Mapping[str, str] = MappingProxyType({})
+) -> dict[str, Any]:
+    """Return the page table, its filter, its chips and its paging.
+
+    The same shape as :func:`link_view` and for the same reasons; what differs
+    is that these records were never written down, so there is no order to
+    choose and no column to hide. The order a crawl reached its pages in is the
+    only one that means anything.
+    """
+    query = slice.query
     return {
-        "rows": page_rows(report, limit=limit),
-        "total": format_number(total),
-        "hidden": format_number(max(0, total - limit)),
-        "has_hidden": total > limit,
+        "rows": page_rows(slice.items),
+        "total": format_number(slice.total),
+        "recorded": format_number(slice.recorded),
+        "has_rows": bool(slice.items),
+        "has_any": slice.recorded > 0,
+        "is_filtered": query.is_filtered,
+        "action": f"{base}#pages",
+        "search": query.search,
+        "state": "" if query.state is None else str(query.state),
+        "chips": tuple(
+            {
+                "label": PAGE_STATE_LABELS[state],
+                "count": format_number(slice.counts.of(state)),
+                "active": query.state is state,
+                "tone": "bad" if state is PageState.FAILED else "",
+                "url": _page_url(
+                    base,
+                    query,
+                    carry,
+                    state=None if query.state is state else state,
+                    page=1,
+                ),
+            }
+            for state in PageState
+            if slice.counts.of(state)
+        ),
+        "carried": tuple({"name": name, "value": value} for name, value in sorted(carry.items())),
+        "page": format_number(slice.page),
+        "pages": format_number(slice.pages),
+        "shown_range": f"{format_number(slice.first)}–{format_number(slice.last)}",
+        "previous_url": (
+            _page_url(base, query, carry, page=slice.page - 1) if slice.has_previous else None
+        ),
+        "next_url": _page_url(base, query, carry, page=slice.page + 1) if slice.has_next else None,
+        "reset_url": _page_url(base, PageQuery(), carry),
     }
 
 
-def link_table(
-    urls: Iterable[StoredUrl],
-    *,
-    discovered: int,
-    limit: int = MAX_LISTED_LINKS,
-    downloadable: Container[str] = (),
-) -> dict[str, Any]:
-    """Return the link table for the URLs one crawl recorded.
+def _page_url(base: str, query: PageQuery, carry: Mapping[str, str], **changes: Any) -> str:
+    """Return the report URL for the page table's *query* with *changes* applied.
 
-    *discovered* is what the report counted, which is not always what the
-    database holds: a crawl run without persistence records nothing at all. The
-    two numbers are kept apart so the page can say "not recorded" rather than
-    showing an empty table that reads as "nothing found".
-
-    *downloadable* names the URLs some provider here could fetch, which is what
-    decides whether a row offers a Download button. Deciding it once for the
-    whole table rather than per row is why it arrives as a set: the answer comes
-    from a plugin and a declared capability, and asking it two hundred times
-    would be two hundred identical resolutions.
+    *carry* is every parameter this table does not own, written back unchanged.
     """
-    recorded = tuple(urls)
-    total = len(recorded)
-    rows = link_rows(recorded, limit=limit, downloadable=downloadable)
+    state = changes.get("state", query.state)
+    values = {
+        "pq": changes.get("search", query.search),
+        "pstate": "" if state is None else str(state),
+        "ppage": str(changes.get("page", query.page)),
+    }
+    if values["ppage"] == "1":
+        del values["ppage"]
+    written = {**carry, **{name: value for name, value in values.items() if value}}
+    return f"{base}?{urlencode(written)}#pages" if written else f"{base}#pages"
+
+
+@dataclass(frozen=True, slots=True)
+class LinkColumn:
+    """One column of the link table, and whether it can be ordered by."""
+
+    name: str
+    label: str
+    sort: LinkSort | None = None
+
+
+LINK_COLUMNS: tuple[LinkColumn, ...] = (
+    LinkColumn("plugin", "Plugin", LinkSort.PLUGIN),
+    LinkColumn("category", "Category"),
+    LinkColumn("target", "Type"),
+    LinkColumn("url", "URL", LinkSort.URL),
+    LinkColumn("source", "Found on", LinkSort.SOURCE),
+)
+"""The columns a reader can turn off, in the order they are read.
+
+``category`` and ``target`` are not sortable, and deliberately have no ordering
+of their own: both are short labels with a handful of values, and grouping by
+them is what the facet chips already do in one click.
+"""
+
+REQUIRED_COLUMN = "url"
+"""The one column that cannot be hidden.
+
+A table of discovered URLs without the URLs is not a narrower view of anything.
+"""
+
+LINK_ORDERS: tuple[tuple[LinkSort, str], ...] = (
+    (LinkSort.RELEVANCE, "Plugin relevance"),
+    (LinkSort.DISCOVERED, "Discovery order"),
+    (LinkSort.URL, "URL"),
+    (LinkSort.PLUGIN, "Plugin name"),
+    (LinkSort.SOURCE, "Page it was found on"),
+)
+"""Every order offered, including the two that are not columns.
+
+"Plugin relevance" is the default and is named rather than left implicit: a
+reader who notices that Mega links are on top deserves to be told that this is
+a choice, and given the one that is not.
+"""
+
+TARGET_LABELS: dict[TargetKind, str] = {
+    TargetKind.DOCUMENT: "documents",
+    TargetKind.IMAGE: "images",
+    TargetKind.ARCHIVE: "archives",
+    TargetKind.VIDEO: "video",
+    TargetKind.AUDIO: "audio",
+    TargetKind.PAGE: "pages (.html)",
+    TargetKind.UNKNOWN: "not stated",
+}
+"""What each target kind is called on a page.
+
+"pages (.html)" says the extension because the filter means exactly that and
+nothing wider, and "not stated" rather than "unknown" because the URL not
+saying is a fact about the URL, not a gap in what we know.
+"""
+
+DOWNLOADABLE_CHOICES: tuple[tuple[str, str], ...] = (
+    ("", "any"),
+    ("yes", "can be downloaded"),
+    ("no", "cannot"),
+)
+
+
+LINK_PARAMS = frozenset(
+    {"q", "plugin", "category", "target", "dl", "norm", "sort", "dir", "page", "hide"}
+)
+"""Which query parameters the link table owns; see :data:`PAGE_PARAMS`."""
+
+
+def link_view(
+    page: LinkPage,
+    *,
+    base: str,
+    hidden: Container[str] = (),
+    carry: Mapping[str, str] = MappingProxyType({}),
+) -> dict[str, Any]:
+    """Return the link table, its filters, its facets and its paging.
+
+    Everything that decides *which* URLs these are was decided by
+    :class:`~maxicrawler.app.discovery.DiscoveryService` before this was called.
+    What is left is wording, formatting, and building the links — each of which
+    is this query with one thing changed, which is exactly the kind of decision
+    a template must not be making.
+
+    *base* is the page the table lives on, because a report's URL contains the
+    crawl it belongs to. Every link this builds ends at ``#links``, so choosing
+    a filter puts you back at the table rather than at the top of a long page.
+    """
+    query = page.query
+    rows = link_rows(page)
+    shown = frozenset(
+        column.name for column in LINK_COLUMNS if column.name not in hidden
+    ) | frozenset({REQUIRED_COLUMN})
     return {
         "rows": rows,
-        "total": format_number(total),
-        "hidden": format_number(max(0, total - limit)),
-        "has_hidden": total > limit,
-        "discovered": format_number(discovered),
-        "was_recorded": total > 0 or discovered == 0,
+        "shown": shown,
+        "headers": tuple(
+            _link_header(column, query, base=base, hidden=hidden, carry=carry)
+            for column in LINK_COLUMNS
+            if column.name in shown
+        ),
+        "toggles": tuple(
+            _link_toggle(column, query, base=base, hidden=hidden, carry=carry)
+            for column in LINK_COLUMNS
+        ),
+        "total": format_number(page.total),
+        "recorded": format_number(page.recorded),
+        "discovered": format_number(page.discovered),
+        "was_recorded": page.was_recorded,
+        "has_rows": bool(page.items),
+        # Whether there is anything to filter at all, which is a different
+        # question from whether this page has rows: a filter bar above "nothing
+        # matches that" is useful, and one above a crawl that found nothing is
+        # a control with no purpose.
+        "has_any": page.recorded > 0,
         # A column of empty cells is worse than no column: the table only grows
         # an action when at least one row actually has one.
         "has_downloads": any(row["can_download"] for row in rows),
+        "is_filtered": query.is_filtered,
+        "action": f"{base}#links",
+        # Where a batch of ticked rows goes. One form for the whole table,
+        # which the checkboxes join by id rather than by sitting inside it —
+        # each row already has a form of its own, and forms cannot nest.
+        "selection_action": SELECTION_ACTION,
+        # Where "queue everything this matches" goes. The filter travels in the
+        # query string of the action and the URLs never leave the server, which
+        # is what makes this the half of the feature that cannot leak a key.
+        "matches_action": _matches_action(base, query, hidden, carry),
+        "match_count": format_number(page.total),
+        # What the filter form shows as its current state.
+        "search": query.search,
+        "plugin": query.plugin or "",
+        "category": query.category or "",
+        "target": "" if query.target is None else str(query.target),
+        "downloadable": _downloadable_value(query.downloadable),
+        "normalized_only": query.normalized_only,
+        "downloadable_choices": DOWNLOADABLE_CHOICES,
+        "orders": tuple(
+            {"value": str(sort), "label": label, "selected": query.sort is sort}
+            for sort, label in LINK_ORDERS
+        ),
+        # Carried through the filter form as hidden fields, so searching keeps
+        # the order and the columns you had chosen instead of resetting them.
+        "direction": "desc" if query.descending else "asc",
+        "hide_value": _hide_value(hidden),
+        "facets": _link_facets(page, base=base, hidden=hidden, carry=carry),
+        "carried": tuple({"name": name, "value": value} for name, value in sorted(carry.items())),
+        "page": format_number(page.page),
+        "pages": format_number(page.pages),
+        "shown_range": f"{format_number(page.first)}–{format_number(page.last)}",
+        "previous_url": (
+            _link_url(base, query, hidden, carry, page=page.page - 1) if page.has_previous else None
+        ),
+        "next_url": (
+            _link_url(base, query, hidden, carry, page=page.page + 1) if page.has_next else None
+        ),
+        "reset_url": _link_url(base, LinkQuery(), hidden, carry),
     }
+
+
+SELECTION_ACTION = "/downloads/selection"
+"""Where the whole-table form posts. Named once so the template cannot drift."""
+
+
+def _matches_action(
+    base: str, query: LinkQuery, hidden: Container[str], carry: Mapping[str, str]
+) -> str:
+    """Return where "queue every match" posts, filter and all.
+
+    Built from :func:`_link_url` so it is the same query string the links use,
+    minus the page — which match is on which page has nothing to do with a set
+    somebody is queueing whole — and minus the fragment, which a form action
+    would only carry as far as the redirect.
+    """
+    listing = _link_url(base, query, hidden, carry, page=1).removesuffix("#links")
+    _, separator, parameters = listing.partition("?")
+    return f"{base}/downloads{separator}{parameters}"
+
+
+def _downloadable_value(downloadable: bool | None) -> str:
+    """Return the downloadable filter as the form spells it."""
+    if downloadable is None:
+        return ""
+    return "yes" if downloadable else "no"
+
+
+def _link_header(
+    column: LinkColumn,
+    query: LinkQuery,
+    *,
+    base: str,
+    hidden: Container[str],
+    carry: Mapping[str, str],
+) -> dict[str, Any]:
+    """Return one column heading, and the link that reorders by it.
+
+    Clicking the active column reverses it; clicking another starts ascending,
+    which for a URL and a plugin name is the direction anybody means. A column
+    that cannot be ordered by is a heading and nothing more.
+    """
+    sort = column.sort
+    if sort is None:
+        return {
+            "label": column.label,
+            "name": column.name,
+            "url": None,
+            "active": False,
+            "mark": "",
+        }
+    active = query.sort is sort
+    descending = not query.descending if active else False
+    return {
+        "label": column.label,
+        "name": column.name,
+        "url": _link_url(base, query, hidden, carry, sort=sort, descending=descending, page=1),
+        "active": active,
+        "mark": SORT_MARKS[query.descending] if active else "",
+    }
+
+
+def _link_toggle(
+    column: LinkColumn,
+    query: LinkQuery,
+    *,
+    base: str,
+    hidden: Container[str],
+    carry: Mapping[str, str],
+) -> dict[str, Any]:
+    """Return the link that shows or hides one column.
+
+    A link rather than a checkbox, so the whole control is the same mechanism as
+    a facet chip: the state lives in the URL, the server renders the answer, and
+    it works with scripting switched off. The one column that cannot be hidden
+    is offered as a disabled entry rather than left out, because a control that
+    silently lacks an entry reads as a bug.
+    """
+    is_shown = column.name not in hidden
+    required = column.name == REQUIRED_COLUMN
+    now_hidden = {name for name in _column_names() if name in hidden}
+    if is_shown:
+        now_hidden.add(column.name)
+    else:
+        now_hidden.discard(column.name)
+    return {
+        "label": column.label,
+        "name": column.name,
+        "shown": is_shown,
+        "required": required,
+        "url": None if required else _link_url(base, query, frozenset(now_hidden), carry),
+    }
+
+
+def _column_names() -> tuple[str, ...]:
+    """Return every column name, which is what a hide list may contain."""
+    return tuple(column.name for column in LINK_COLUMNS)
+
+
+def _link_facets(
+    page: LinkPage, *, base: str, hidden: Container[str], carry: Mapping[str, str]
+) -> tuple[dict[str, Any], ...]:
+    """Return the chip rows that filter by one value in one click.
+
+    Counted over the whole crawl rather than over the matches, which is what the
+    service already decided; what is added here is that the chip you are
+    standing on links back to the unfiltered view, so a chip is a toggle rather
+    than a one-way door.
+    """
+    query = page.query
+    groups = (
+        ("Plugin", page.plugins, "plugin", query.plugin, lambda value: value),
+        (
+            "Type",
+            page.targets,
+            "target",
+            "" if query.target is None else str(query.target),
+            lambda value: TARGET_LABELS[TargetKind(value)],
+        ),
+        ("Category", page.categories, "category", query.category, lambda value: value),
+    )
+    rows = []
+    for heading, facets, name, active, label_of in groups:
+        if not facets:
+            continue
+        rows.append(
+            {
+                "heading": heading,
+                "chips": tuple(
+                    {
+                        "label": label_of(facet.value),
+                        "count": format_number(facet.count),
+                        "active": facet.value == active,
+                        "url": _link_url(
+                            base,
+                            query,
+                            hidden,
+                            carry,
+                            page=1,
+                            **{name: None if facet.value == active else facet.value},
+                        ),
+                    }
+                    for facet in facets
+                ),
+            }
+        )
+    return tuple(rows)
+
+
+def _hide_value(hidden: Container[str]) -> str:
+    """Return the hidden columns as the query string writes them."""
+    return ",".join(name for name in _column_names() if name in hidden)
+
+
+def _link_url(
+    base: str,
+    query: LinkQuery,
+    hidden: Container[str],
+    carry: Mapping[str, str] = MappingProxyType({}),
+    **changes: Any,
+) -> str:
+    """Return the report URL for *query* with *changes* applied.
+
+    Only what differs from the default is written, so an untouched report is
+    plain ``/crawls/{id}`` and a filtered one carries exactly what it needs. The
+    fragment is always there: every one of these links leads to the table, and a
+    reader who clicks a filter should not have to scroll back down to it.
+    """
+    target = changes.get("target", query.target)
+    downloadable = changes.get("downloadable", query.downloadable)
+    values = {
+        "q": changes.get("search", query.search),
+        "plugin": changes.get("plugin", query.plugin) or "",
+        "category": changes.get("category", query.category) or "",
+        "target": "" if target is None else str(target),
+        "dl": _downloadable_value(downloadable),
+        "norm": "1" if changes.get("normalized_only", query.normalized_only) else "",
+        "sort": str(changes.get("sort", query.sort)),
+        "dir": "desc" if changes.get("descending", query.descending) else "asc",
+        "page": str(changes.get("page", query.page)),
+        "hide": _hide_value(hidden),
+    }
+    default = LinkQuery()
+    if values["sort"] == str(default.sort):
+        del values["sort"]
+    if values["dir"] == "asc":
+        del values["dir"]
+    if values.get("page") == "1":
+        del values["page"]
+    written = {**carry, **{name: value for name, value in values.items() if value}}
+    return f"{base}?{urlencode(written)}#links" if written else f"{base}#links"
 
 
 def crawl_rows(
@@ -827,9 +1318,8 @@ def _toml_bool(value: bool) -> str:
     return "true" if value else "false"
 
 
-def page_rows(report: CrawlReport, *, limit: int | None = None) -> tuple[dict[str, Any], ...]:
+def page_rows(pages: Iterable[PageOutcome]) -> tuple[dict[str, Any], ...]:
     """Return one row per page the crawl reached, in the order it reached them."""
-    pages = report.pages if limit is None else report.pages[:limit]
     return tuple(_page_row(page) for page in pages)
 
 
@@ -850,47 +1340,43 @@ def _page_row(page: PageOutcome) -> dict[str, Any]:
     }
 
 
-def link_rows(
-    urls: Iterable[StoredUrl], *, limit: int | None = None, downloadable: Container[str] = ()
-) -> tuple[dict[str, Any], ...]:
-    """Return one row per recorded URL, the interesting plugins first.
+def link_rows(page: LinkPage) -> tuple[dict[str, Any], ...]:
+    """Return one row per URL on *page*, in the order the service put them in."""
+    return tuple(_link_row(item, downloadable=page.downloadable) for item in page.items)
 
-    Same ordering as :func:`plugin_shares`, for the same reason. Discovery
-    order would be the honest default, but a page of share links produces
-    thousands of generic URLs and a handful of Mega ones, and a table cut off
-    at two hundred rows would then contain none of the links this project
-    exists to find. Within each group the discovery order is kept.
+
+def _link_row(item: LinkItem, *, downloadable: Container[str] = ()) -> dict[str, Any]:
+    """Return one recorded URL as a table row.
+
+    ``plugin`` and ``category`` are where a URL nothing claimed gets its
+    wording. The service leaves both as ``None``, because what to call an
+    unanswered question is a decision for whoever is showing it — a terminal
+    and a table legitimately word it differently.
     """
-    ordered = sorted(enumerate(urls), key=lambda entry: (_link_priority(entry[1]), entry[0]))
-    chosen = ordered if limit is None else ordered[:limit]
-    return tuple(_link_row(stored, downloadable=downloadable) for _, stored in chosen)
-
-
-def _link_row(stored: StoredUrl, *, downloadable: Container[str] = ()) -> dict[str, Any]:
-    """Return one recorded URL as a table row."""
-    record = stored.record
     return {
-        "url": record.normalized_url,
-        "raw_url": record.raw_url,
-        "was_normalized": record.raw_url != record.normalized_url,
-        "source_url": record.source_url,
-        "plugin": stored.plugin_name or "unresolved",
-        "category": stored.category or "—",
+        "url": item.url,
+        # The same link with its fragment dropped, for the checkbox's spoken
+        # label. The key is in the cell beside it either way — a share link is
+        # its key — but a screen reader announcing forty random characters
+        # before every row is not how anybody finds the row they wanted.
+        "spoken_url": strip_fragment(item.url),
+        "raw_url": item.raw_url,
+        "was_normalized": item.was_normalized,
+        "source_url": item.source_url,
+        "plugin": item.plugin or "unresolved",
+        "category": item.category or "—",
+        "target": TARGET_LABELS[item.target],
+        # Whether the URL said anything at all, which is what decides emphasis:
+        # "not stated" is true of most URLs and is not worth a reader's eye.
+        "target_is_stated": item.target is not TargetKind.UNKNOWN,
         # True when a host-specific plugin claimed it rather than the fallback,
         # which is what the table gives its one piece of emphasis to.
-        "is_notable": _link_priority(stored) == 0,
+        "is_notable": item.is_notable,
         # A link this installation could actually fetch. Not the same question
         # as "is it notable": a host-specific plugin can classify a link whose
         # provider cannot transfer anything.
-        "can_download": record.normalized_url in downloadable,
+        "can_download": item.url in downloadable,
     }
-
-
-def _link_priority(stored: StoredUrl) -> int:
-    """Return which group a recorded URL sorts into: host, generic, unresolved."""
-    if stored.plugin_name is None:
-        return 2
-    return 1 if stored.plugin_name == GENERIC_PLUGIN_NAME else 0
 
 
 def _skip_rows(skips: Iterable[tuple[SkipReason, int]]) -> tuple[dict[str, Any], ...]:

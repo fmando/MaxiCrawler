@@ -31,8 +31,11 @@ The mission, core principles, and non-goals are described in
     page per file, and the browser showing what it can
 -   0.13 Politeness & robots.txt ✅ — robots.txt obeyed by default, per-host
     waiting, a private-network guard, and a stoppable download
--   0.14 Scheduler & Automation
--   0.15 REST API
+-   0.14 Workflow & productivity ✅ — a report you can search, filter and page
+    through, a download queue you can reorder and pause, and one click to queue
+    everything a filter matches
+-   0.15 Scheduler & Automation
+-   0.16 REST API
 -   1.0 Stable Release
 
 The desktop GUI that used to sit at 0.11 is superseded by 0.10. A local server
@@ -94,9 +97,10 @@ not change.
 -   Crawl jobs — the unit the web interface manages, holding a `CrawlSession`
     beside its discovery results and its downloads. Today's registry is memory
     only: after a restart the pages fall back to what the database holds, and
-    a crawl that was running is shown as abandoned. Downloads have the same
-    shape and the same gap: a finished one is found again in the library, but
-    its own page dies with the process
+    a crawl that was running is shown as abandoned. The download queue has the
+    same shape and the same gap, and it cannot close it before resume exists —
+    a restored queue could otherwise only offer to start the same files again
+    from zero (ADR-033)
 -   An index over the library, as a cache and never as the authority (ADR-010).
     Every listing reads one metadata document per stored resource: about 0.3
     seconds for two thousand entries warm, and roughly sixteen the first time a
@@ -104,15 +108,20 @@ not change.
     second listing into a `stat` per entry
 -   `library` commands — list, verify, prune. `LibraryService` already answers
     the first two questions; what is missing is the command that asks them
--   More than one download at a time, which is the same subject as a queue: an
-    order, a cancel, a resume, and something that survives a restart
--   Filtering and sorting the crawl list, which is the point at which htmx
-    earns being vendored — the routes already render standalone fragments
+-   Per-host politeness for downloads. The queue drains one at a time, and that
+    is a decision rather than a limit (ADR-033) — but the reason to keep it is
+    a host's patience, which nothing currently measures. A schedule like the
+    crawler's is what would let the number rise honestly
+-   Filtering and sorting the *crawl* list. The link and page tables inside one
+    report have it since 0.14; the list of crawls itself is still everything in
+    the order it was recorded. This is the point at which htmx would earn being
+    vendored — the routes already render standalone fragments
 -   Authentication, before the interface is anything but loopback. Until then
     `serve` refuses a public address unless `--allow-remote` asks for it
 -   Further providers: Pixeldrain, GoFile, MediaFire
--   Parallel downloads — a thread pool around the drain loop; the queue and the
-    worker are already built for it
+-   Parallel downloads — a second thread on the same drain loop, which needs no
+    other change: the queue is guarded throughout and the worker holds no state
+    between requests
 -   Resume — HTTP range requests plus a byte offset in the metadata record; the
     staging directory already keeps a partial file out of the library
 -   Provider-side integrity verification beside the recorded SHA-256, starting

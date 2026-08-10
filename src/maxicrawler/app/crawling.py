@@ -14,6 +14,11 @@ without touching :class:`~maxicrawler.crawler.DiscoveryPipeline`, which is not
 thread-safe. Sharing a graph between crawls would be a bug; the shape of this
 API is what makes that hard to do by accident.
 
+**This service writes discovery; it does not read it back.** What one crawl
+found is answered by :class:`~maxicrawler.app.discovery.DiscoveryService`, which
+searches, filters, orders and pages it. Two questions about one set of records,
+kept apart the way ADR-028 keeps writing and browsing the library apart.
+
 **One event bus for both halves.** The pipeline publishes ``UrlDiscovered`` and
 the engine publishes ``PageCrawled``; a caller that wants to watch a crawl needs
 both on the same bus. The CLI passes none and sees nothing, which costs it
@@ -41,7 +46,6 @@ from maxicrawler.database import (
     SQLiteDatabase,
     SQLiteDiscoveryRepository,
     StoredCrawl,
-    StoredUrl,
 )
 from maxicrawler.events import EventBus
 from maxicrawler.utils import require_http_scheme
@@ -306,19 +310,3 @@ class CrawlService:
         repository = SQLiteCrawlRepository(SQLiteDatabase(self._settings.database_path))
         repository.initialize()
         return repository.stored_crawl(session_id)
-
-    def discovered_urls(self, session_id: str) -> tuple[StoredUrl, ...]:
-        """Return the URLs one crawl recorded, in the order it found them.
-
-        Empty for a crawl run with ``persist=False``, which is not the same
-        thing as a crawl that found nothing — a caller that shows this has the
-        report's own count to tell the two apart, and should.
-
-        Every row is read rather than a page of them. The crawl's own page
-        ceiling bounds how many there can be, and reading all of them is what
-        lets a caller order them by something other than the insertion order
-        the ``LIMIT`` would have to follow.
-        """
-        repository = SQLiteDiscoveryRepository(SQLiteDatabase(self._settings.database_path))
-        repository.initialize()
-        return repository.stored_urls(session_id)

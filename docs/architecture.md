@@ -1280,7 +1280,7 @@ maxicrawler.api ─┘
 | `routes` | *"What does this URL reply with?"* Reads the request, asks a service, hands plain data to a template. |
 | `views` | *"How is this shown?"* Every decision that is not one of those three, testable without a request. |
 | `jobs` | *"What is running?"* Crawls on worker threads, and a registry of them. |
-| `downloads` | *"What is transferring?"* One download on a worker thread, and a registry holding one at a time. |
+| `downloads` | *"What is transferring?"* A queue of requests, drained one at a time by a worker thread. |
 | `stream` | *"What has changed?"* Snapshots from a worker thread to an `EventSource`, for either of the two. |
 | `errors` | *"What is missing?"* Imports nothing, so it can be read by an installation that cannot import the rest. |
 | `templates/`, `static/` | The pages, one stylesheet, one script. |
@@ -1450,13 +1450,43 @@ is one class: a `ProgressReporter` implementation inside the service that turns
 `DownloadJob` and `DownloadOutcome` into a `DownloadProgress` and calls a
 listener with it.
 
-### One download at a time
+### A queue, drained one at a time
 
-`DownloadRuns` holds a single-worker pool and a single slot. A second request
-while one is running raises `DownloadBusyError`, which becomes a page naming the
-running transfer. There is no queue, because a queue needs a policy for
-ordering, cancelling, resuming and surviving a restart, and none of it is worth
-inventing before one download works end to end.
+`TransferQueue` holds the requests and one long-lived worker takes them in the
+order they arrived. A second request waits rather than being refused; above the
+ceiling it raises `QueueFullError`, which becomes a page naming the limit.
+
+Until Sprint 15 there was no queue at all, and the reason was written down: a
+queue needs a policy for ordering, cancelling, resuming and surviving a restart,
+and none of it was worth inventing before one download worked end to end
+(ADR-026). ADR-033 supplies three of those policies and refuses the fourth —
+surviving a restart, which cannot be built honestly before a partial transfer
+can be resumed.
+
+One worker is a politeness decision rather than a limit. Every mutation is
+guarded by one condition and the worker holds no state between requests, so a
+second thread on `_drain` would need no other change.
+
+There are two classes called something like this, one above the other, and they
+are named apart on purpose. `downloader.queue.DownloadQueue` holds the jobs of
+one *plan* — the files a single share link turned out to contain, already
+resolved. `api.downloads.TransferQueue` holds *requests* nobody has planned yet.
+`api` may not import `downloader` at all, and the boundary test matches on the
+class name alone, so two `DownloadQueue`s would have made a real rule
+unenforceable.
+
+### Queueing a set rather than a link
+
+A batch is partial rather than atomic: `submit_all` returns how many were
+queued, how many were not URLs, and how many did not fit, because those need
+three different sentences.
+
+Two controls put a set in the queue, and the difference between them is worth
+reading twice. Ticked rows send their URLs in the body. "Every fetchable match"
+sends only the *filter*, and `DiscoveryService.fetchable` resolves it on the
+server — so the URLs, and the keys in them, never make the round trip. Sending
+a set by describing it beats enumerating it whenever the elements carry
+credentials (ADR-034).
 
 ### Only a URL, never a path
 
@@ -1470,8 +1500,20 @@ worker thread starts.
 
 A Mega share carries its decryption key in the URL fragment — the one part of a
 URL a browser never transmits, and which it does transmit as a form field. The
-Download button is therefore a form, and everything downstream of it holds the
-fragment-free URL: the run, every snapshot, every page, every event frame.
+Download button is therefore a form, and so is every control that queues a set
+of links.
+
+Since the queue arrived, the key is held longer than it used to be: a request
+that is waiting still needs it, and so does a retry after that. It lives in one
+private dictionary on `TransferQueue`, keyed by run, and is dropped when the run
+is evicted. Everything else downstream holds the fragment-free URL — the run,
+every snapshot, every page, every event frame, every redirect.
+`tests/test_api_secret_confinement.py` reads that rather than trusting it.
+
+The exposure is smaller than the longer life suggests, and worth stating so
+nobody over-corrects: discovery already writes the same URL, fragment included,
+into SQLite, and the report renders it into a table. A share link *is* its key,
+and one without it leads nowhere.
 
 ### A denominator before the first byte
 

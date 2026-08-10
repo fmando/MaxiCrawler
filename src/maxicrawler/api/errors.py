@@ -32,12 +32,16 @@ class WebDependencyError(WebInterfaceError):
     """
 
 
-class DownloadBusyError(WebInterfaceError):
-    """Raised when a download is asked for while one is already running.
+class QueueFullError(WebInterfaceError):
+    """Raised when a download is asked for and the queue has no room.
 
-    This interface runs one transfer at a time and has no queue, which is a
-    decision rather than a limitation: a queue needs a policy for ordering,
-    cancelling, resuming and surviving a restart, and none of that is worth
-    inventing before a single download works end to end. Saying "one at a time,
-    here is the one that is running" is the honest answer until then.
+    A ceiling rather than an unbounded backlog, because the queue lives in
+    memory and because one click will soon be able to add several thousand
+    entries to it (the report's Download-selected button). The message names
+    the limit and what is already waiting, so the answer to it is to let some
+    of that finish rather than to guess.
+
+    It replaced ``DownloadBusyError``, which said "one at a time, here is the
+    one that is running" — true until Sprint 15 and, since ADR-033, no longer
+    a thing this interface does.
     """
