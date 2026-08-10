@@ -17,7 +17,7 @@ from web_server import Site, serve
 
 from maxicrawler import __version__
 from maxicrawler.api import create_app
-from maxicrawler.api.downloads import DownloadRuns
+from maxicrawler.api.downloads import TransferQueue
 from maxicrawler.api.jobs import CrawlJobs
 from maxicrawler.api.routes import SECTIONS, STATIC_DIRECTORY, TEMPLATES
 from maxicrawler.app import CrawlService, DownloadService, LibraryService, crawl_document
@@ -55,7 +55,7 @@ def client(
     )
     service = CrawlService(settings)
     jobs = CrawlJobs(service, persist=False)
-    downloads = DownloadRuns(
+    downloads = TransferQueue(
         DownloadService(
             settings,
             providers=None if provider is None else ProviderRegistry([provider]),

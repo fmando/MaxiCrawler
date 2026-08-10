@@ -27,8 +27,8 @@ from starlette.templating import Jinja2Templates
 
 from maxicrawler import __version__
 from maxicrawler.api import stream, views
-from maxicrawler.api.downloads import DownloadRun, DownloadRuns
-from maxicrawler.api.errors import DownloadBusyError
+from maxicrawler.api.downloads import DownloadRun, Move, TransferQueue
+from maxicrawler.api.errors import QueueFullError
 from maxicrawler.api.jobs import DEFAULT_RETAINED_JOBS, CrawlJob, CrawlJobs
 from maxicrawler.app import (
     DEFAULT_LINKS_PER_PAGE,
@@ -82,10 +82,10 @@ def jobs_of(request: Request) -> CrawlJobs:
     return registry
 
 
-def downloads_of(request: Request) -> DownloadRuns:
-    """Return the registry this application is running downloads through."""
-    registry: DownloadRuns = request.app.state.downloads
-    return registry
+def downloads_of(request: Request) -> TransferQueue:
+    """Return the queue this application is running downloads through."""
+    queue: TransferQueue = request.app.state.downloads
+    return queue
 
 
 def library_of(request: Request) -> LibraryService:
@@ -283,7 +283,7 @@ async def stop_crawl(request: Request) -> Response:
 
 
 async def start_download(request: Request) -> Response:
-    """Download one link, and send the browser to watch it.
+    """Put one link in the queue, and send the browser to watch it.
 
     The link arrives in a form body rather than in a query string, which is not
     only about it being an action: a share link keeps its decryption key in the
@@ -292,7 +292,7 @@ async def start_download(request: Request) -> Response:
     query string it would be written into a log.
 
     Answers with a redirect, so reloading the download afterwards does not offer
-    to start it a second time.
+    to queue it a second time.
     """
     form = await read_form(request)
     downloads = downloads_of(request)
@@ -300,7 +300,7 @@ async def start_download(request: Request) -> Response:
         run = downloads.submit(form.get("url", ""))
     except ValueError as error:
         return _refuse_download(request, str(error), status=400)
-    except DownloadBusyError as error:
+    except QueueFullError as error:
         return _refuse_download(request, str(error), status=409)
     return RedirectResponse(url=f"/downloads/{run.id}", status_code=303)
 
@@ -312,25 +312,102 @@ async def download_detail(request: Request) -> Response:
     follow a transfer. What the live stream adds is convenience, not capability.
     """
     run = _download(request)
+    downloads = downloads_of(request)
     return page(
         request,
         "download.html",
-        {"download": views.download_view(run.snapshot())},
+        {
+            "download": views.download_view(
+                run.snapshot(),
+                position=downloads.position_of(run.id),
+                is_paused=downloads.is_paused,
+            )
+        },
         section="library",
     )
 
 
 async def stop_download(request: Request) -> Response:
-    """Ask one transfer to stop, and show the page again.
+    """Ask one transfer to stop, or take a waiting one out of the queue.
+
+    One button for both, because they are one intention: the person clicking it
+    wants this download not to happen. What that costs differs — a waiting
+    request never started, a running one stops within a chunk — and neither
+    leaves anything behind in the library.
 
     The same shape as stopping a crawl, deliberately: a person clicking Stop
-    should not have to know which half of the chain they are looking at. This
-    one takes effect within a chunk rather than at the end of a page, and the
-    library is left exactly as it was.
+    should not have to know which half of the chain they are looking at.
     """
     run = _download(request)
-    run.stop()
+    downloads_of(request).cancel(run.id)
     return RedirectResponse(url=f"/downloads/{run.id}", status_code=303)
+
+
+async def retry_download(request: Request) -> Response:
+    """Queue the same link again, and send the browser to the new request.
+
+    A new entry rather than a reset of the old one: what happened the first time
+    is a fact, and a history that overwrote its own failures would be one nobody
+    could read.
+    """
+    run = _download(request)
+    try:
+        again = downloads_of(request).retry(run.id)
+    except QueueFullError as error:
+        return _refuse_download(request, str(error), status=409)
+    if again is None:
+        return _refuse_download(request, RETRY_UNFINISHED, status=409)
+    return RedirectResponse(url=f"/downloads/{again.id}", status_code=303)
+
+
+RETRY_UNFINISHED = "that download has not finished, so there is nothing to retry"
+"""Said to whoever asked to retry something that is still going."""
+
+
+async def move_download(request: Request) -> Response:
+    """Move one waiting request within the queue, and show the page again."""
+    run = _download(request)
+    form = await read_form(request)
+    where = _move(form.get("where"))
+    if where is not None:
+        downloads_of(request).move(run.id, where)
+    return RedirectResponse(url=_back_to(request, f"/downloads/{run.id}"), status_code=303)
+
+
+def _move(value: str | None) -> Move | None:
+    """Return the move *value* names, or ``None`` for anything else."""
+    try:
+        return Move(value or "")
+    except ValueError:
+        return None
+
+
+async def pause_downloads(request: Request) -> Response:
+    """Hold the queue, or let it go again, and show the page again.
+
+    One route for both directions, because the button is one button and its
+    label is whichever state it would leave. A form field says which was meant,
+    so a stale page cannot pause a queue somebody has already resumed.
+    """
+    form = await read_form(request)
+    downloads = downloads_of(request)
+    if form.get("paused") == "1":
+        downloads.pause()
+    else:
+        downloads.resume()
+    return RedirectResponse(url=_back_to(request, "/downloads"), status_code=303)
+
+
+def _back_to(request: Request, default: str) -> str:
+    """Return where a form said to go afterwards, or *default*.
+
+    A field rather than the ``Referer`` header: the same button sits on the
+    queue and on one download's page, and a header a browser may withhold is
+    not a thing to route on. Only paths of our own are honoured, so this cannot
+    be turned into an open redirect.
+    """
+    asked = request.query_params.get("back", "")
+    return asked if asked.startswith("/") and not asked.startswith("//") else default
 
 
 async def download_events(request: Request) -> Response:

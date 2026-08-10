@@ -748,3 +748,85 @@ pressed the button.
 the download layer, because the interface may not import `downloader` (ADR-022)
 and should not start now. It is a handle rather than a result: nothing about how
 a download runs travels with it.
+
+## ADR-033: A download queue, and what it deliberately does not promise
+
+ADR-026 said "one at a time, and no queue", and gave the reason: a queue needs a
+policy for ordering, cancelling, resuming and surviving a restart, and none of
+that was worth inventing before a single download worked end to end. It has
+worked for two sprints. This is the ADR that pays that debt, and it answers
+three of those four questions and refuses the fourth.
+
+**Ordering: the order they arrived, with a way to change it.** A queue that
+guessed at priorities would need a reason to guess, and there is not one — the
+person adding the links knows which matters. So the default is arrival order,
+and moving one up, down or to the front is three form buttons. No drag and drop:
+that is a JavaScript dependency for the last five percent of a control the
+buttons already give, on a page that otherwise works with scripting off.
+
+**Cancelling: one intention, two costs.** Removing a waiting request and
+stopping a running one are the same click for the person doing it — this
+download should not happen. They cost differently underneath: one never started,
+the other stops within a chunk. Neither leaves anything in the library, because
+content becomes visible only once it is whole (ADR-012). A removed request is
+recorded as `CANCELLED` with a reason, not as a failure; the person reading the
+word is the person who pressed the button.
+
+**Pausing: the queue, not the transfer.** Pause stops the worker from taking
+anything *new* off the queue and leaves the running transfer alone. "Let me
+think" and "undo what is happening" are different intentions, and the running
+download already has its own Stop. One button doing both would make the cheap,
+reversible action carry the cost of the expensive one.
+
+**Resuming a transfer: not this.** The word is overloaded and the overload is
+dangerous, so it is worth stating plainly: this sprint resumes a *queue*, never
+a *file*. Resuming a partial transfer needs HTTP range requests, a byte offset
+in the metadata record, and a provider that supports both. It stays on the
+roadmap where it was.
+
+**Surviving a restart: not this either.** The queue lives in memory and ends
+with the process, like the crawl-job registry beside it (ADR-024). Persisting it
+is the Crawl Jobs subject, and it drags in a question this sprint cannot answer
+honestly: what does a half-finished transfer come back as? Until "resume" exists,
+a restored queue could only offer to start those files again from zero, which is
+what the person can do themselves from the library.
+
+**One worker, and that is a politeness decision.** The queue, the run and the
+worker loop are all written for more than one — every mutation is guarded, the
+worker holds no state between requests, and a second thread on the same drain
+loop would need no other change. What stops it is that "how many transfers may
+one host face at once" is the same kind of question `robots.txt` answers for
+crawling, and this sprint is about a person's workflow rather than a host's
+patience.
+
+**`DownloadService` is still the only thing that starts a download.** The queue
+decides which request is next and whether the worker may take it. Every transfer
+that happens is one `DownloadService.download` call, unchanged, with the same
+progress listener and the same control handle. There is no second download path,
+and the bulk selection that follows adds none: it resolves a selection into URLs
+and puts them in this queue.
+
+**A ceiling instead of an unbounded backlog.** Five hundred waiting requests,
+refused above that with a message naming the limit. One click on a filtered
+report will soon be able to ask for every match at once, and a queue that
+accepted forty thousand would be a memory problem wearing a convenience.
+
+**The credential is now held longer, and confined harder.** A queued request
+keeps its whole URL, fragment included, because the transfer that needs the
+decryption key has not started yet — and a retry may need it again after that.
+It lives in one private dictionary on the queue, is dropped when the run is
+evicted, and reaches nothing else: `DownloadRun` still knows only the
+fragment-free URL, which is what every snapshot, page, event frame and redirect
+is built from. `tests/test_api_secret_confinement.py` reads that rather than
+trusting it. The exposure is smaller than the longer life suggests: discovery
+already writes the same URL, key included, into SQLite, and the report renders
+it into a table — a share link *is* its key, and one without it leads nowhere.
+
+**Two queues, named apart.** `maxicrawler.downloader.queue.DownloadQueue` holds
+the jobs of one plan; `maxicrawler.api.downloads.TransferQueue` holds requests
+nobody has planned yet. They are not merged because they answer different
+questions and because `api` may not import `downloader` at all. They are not
+*named* alike because `tests/test_api_boundaries.py` forbids `api` from naming
+the download layer's builders and matches on the class name alone — two classes
+called `DownloadQueue` would have made a real rule unenforceable to save one
+word. The test found this rather than a review; that is what it is for.

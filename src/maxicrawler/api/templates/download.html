@@ -16,18 +16,36 @@
 
     {% if not download.is_finished %}
       {#
-        A plain form, like the one on a crawl, so the button works with
-        scripting switched off. This stop is nearly instant -- the transfer
-        checks on every chunk -- and nothing half-written is left behind.
+        One button for a waiting request and a running one, because they are
+        one intention: this download should not happen. A plain form, like the
+        one on a crawl, so it works with scripting switched off. Stopping a
+        transfer is nearly instant -- it checks on every chunk -- and nothing
+        half-written is left behind either way.
       #}
       <form class="stop" method="post" action="/downloads/{{ download.download_id }}/stop">
-        <button type="submit">Stop</button>
+        <button type="submit">{% if download.is_queued %}Remove{% else %}Stop{% endif %}</button>
       </form>
     {% endif %}
   </h2>
 
   <div class="body">
     <p class="muted url">{{ download.url }}</p>
+
+    {#
+      A queued request has nothing to show but its place in the line. The page
+      that lists the whole queue arrives with the next commit; until then this
+      is where somebody learns their download has not been forgotten.
+    #}
+    {% if download.is_queued %}
+      <p class="facts">
+        {% if download.position %}
+          <span>number <b class="num">{{ download.position }}</b> in the queue</span>
+        {% endif %}
+        {% if download.queue_is_paused %}
+          <span class="bad-text">the queue is paused, so nothing is being taken off it</span>
+        {% endif %}
+      </p>
+    {% endif %}
 
     {% if download.error %}
       {#
@@ -38,7 +56,13 @@
       <p class="error">{{ download.error }}</p>
     {% endif %}
 
-    {% include "_download_progress.html" %}
+    {#
+      A queued request has moved nothing, so it gets no bar and no counters: an
+      indeterminate bar above four dashes would claim something is happening.
+    #}
+    {% if not download.is_queued %}
+      {% include "_download_progress.html" %}
+    {% endif %}
 
     {% if download.is_finished %}
       {% if download.succeeded %}
@@ -54,6 +78,18 @@
         </p>
       {% elif not download.error %}
         <p class="error">{{ download.reason or "the download did not finish" }}</p>
+      {% endif %}
+
+      {#
+        A new request rather than a reset of this one, so what happened here
+        stays readable. Offered for everything that finished without the file
+        arriving -- a dead share, a broken transfer, a stop somebody has since
+        changed their mind about.
+      #}
+      {% if not download.succeeded %}
+        <form class="retry" method="post" action="/downloads/{{ download.download_id }}/retry">
+          <button type="submit">Try again</button>
+        </form>
       {% endif %}
     {% endif %}
   </div>

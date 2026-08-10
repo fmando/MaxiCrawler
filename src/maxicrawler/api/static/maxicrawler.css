@@ -417,6 +417,19 @@ footer {
 }
 .done .path { margin-left: 10px; }
 
+/* Queueing the same link again, beside the reason it did not work the first time. */
+.retry { margin: 12px 0 0; }
+.retry button {
+  padding: 5px 12px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+}
+.retry button:hover { background: var(--bg); }
+
 /* A link that reads as something you do, beside links that read as places. */
 .action {
   display: inline-block;

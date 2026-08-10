@@ -248,7 +248,18 @@ def progress_view(snapshot: JobSnapshot) -> dict[str, Any]:
     }
 
 
-def download_view(snapshot: DownloadSnapshot) -> dict[str, Any]:
+QUEUED_LABEL = "waiting"
+"""What a request that has not been picked up yet is called.
+
+Not "starting", which is what :data:`STATUS_LABELS` says about
+:attr:`DownloadStatus.PENDING`. Both are "nothing has been transferred", and
+only one of them is somebody's turn to wait for.
+"""
+
+
+def download_view(
+    snapshot: DownloadSnapshot, *, position: int | None = None, is_paused: bool = False
+) -> dict[str, Any]:
     """Return what a download's page shows.
 
     Every value leaves here as a string a template prints unchanged, for the
@@ -266,8 +277,17 @@ def download_view(snapshot: DownloadSnapshot) -> dict[str, Any]:
         "url": snapshot.url,
         "label": snapshot.label,
         "status": str(snapshot.status),
-        "state_label": STATUS_LABELS[snapshot.status],
-        "state_tone": STATUS_TONES[snapshot.status],
+        "state_label": QUEUED_LABEL if snapshot.is_queued else STATUS_LABELS[snapshot.status],
+        "state_tone": "idle" if snapshot.is_queued else STATUS_TONES[snapshot.status],
+        "is_queued": snapshot.is_queued,
+        "is_running": snapshot.is_running,
+        # Where in the line, counting from one, for a request that is in one.
+        # `None` once it is being worked on, which is when the bar takes over
+        # from the number as the thing worth looking at.
+        "position": None if position is None else format_number(position),
+        # A queue nobody is draining is why a request is not moving, and a page
+        # that said "waiting" without saying that would be describing a stall.
+        "queue_is_paused": is_paused,
         "bytes_written": format_size(progress.bytes_written),
         "total_bytes": None if progress.total_bytes is None else format_size(progress.total_bytes),
         "transferred": _transferred(progress.bytes_written, progress.total_bytes),

@@ -35,7 +35,7 @@ except ImportError as error:  # pragma: no cover - depends on the environment
     raise WebDependencyError(MISSING_EXTRA) from error
 
 from maxicrawler.api import routes  # noqa: E402 - only importable behind the guard
-from maxicrawler.api.downloads import DownloadRuns  # noqa: E402
+from maxicrawler.api.downloads import TransferQueue  # noqa: E402
 from maxicrawler.api.jobs import CrawlJobs  # noqa: E402
 
 
@@ -44,7 +44,7 @@ def create_app(
     service: CrawlService | None = None,
     settings: Settings | None = None,
     jobs: CrawlJobs | None = None,
-    downloads: DownloadRuns | None = None,
+    downloads: TransferQueue | None = None,
     library: LibraryService | None = None,
     discovery: DiscoveryService | None = None,
     config_path: Path | None = None,
@@ -71,7 +71,7 @@ def create_app(
     transfers = (
         downloads
         if downloads is not None
-        else DownloadRuns(DownloadService(crawl_service.settings))
+        else TransferQueue(DownloadService(crawl_service.settings))
     )
     shelf = library if library is not None else LibraryService(crawl_service.settings)
     # The download service answers "could this be fetched?" from a provider
@@ -118,6 +118,14 @@ def create_app(
             ),
             Route("/crawls/{job_id}/stop", routes.stop_crawl, methods=["POST"], name="stop_crawl"),
             Route("/downloads", routes.start_download, methods=["POST"], name="start_download"),
+            # Before the page, for the same reason `{job_id}.json` is: a path
+            # parameter matches any single segment, and "pause" is one.
+            Route(
+                "/downloads/pause",
+                routes.pause_downloads,
+                methods=["POST"],
+                name="pause_downloads",
+            ),
             Route(
                 "/downloads/{download_id}",
                 routes.download_detail,
@@ -129,6 +137,18 @@ def create_app(
                 routes.stop_download,
                 methods=["POST"],
                 name="stop_download",
+            ),
+            Route(
+                "/downloads/{download_id}/retry",
+                routes.retry_download,
+                methods=["POST"],
+                name="retry_download",
+            ),
+            Route(
+                "/downloads/{download_id}/move",
+                routes.move_download,
+                methods=["POST"],
+                name="move_download",
             ),
             Route(
                 "/downloads/{download_id}/events",

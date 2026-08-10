@@ -135,11 +135,29 @@ gefiltert, sortiert und geblättert, jede Datei hat eine Seite, und der Browser
 zeigt an, was er anzeigen kann. MaxiCrawler rendert dabei nichts selbst — es
 nennt einen Content-Type und übergibt die Bytes (ADR-027).
 
-Bewusst genau ein Download zur Zeit, ohne Warteschlange, ohne Stapel und ohne
-Scheduler. Was dafür nötig war, ist ein Service über dem Download Manager —
-nicht ein zweiter Manager. Was fehlt, fehlt absichtlich: eine Queue braucht eine
-Politik für Reihenfolge, Abbruch, Fortsetzung und Neustart, und keine davon ist
-zu erfinden, bevor ein einzelner Download funktioniert.
+Bis Sprint 14 bewusst genau ein Download zur Zeit, ohne Warteschlange. Was dafür
+nötig war, ist ein Service über dem Download Manager — nicht ein zweiter
+Manager.
+
+Seit Sprint 15 gibt es die Warteschlange, und sie beantwortet drei der vier
+Fragen, die ADR-026 offengelassen hatte: Reihenfolge (Ankunft, mit Buttons zum
+Verschieben), Abbruch (wartend entfernen, laufend stoppen) und Pause (der
+Warteschlange, nie des laufenden Transfers). Die vierte — Neustartfestigkeit —
+bleibt offen, weil sie ohne echtes Resume nur anbieten könnte, dieselben Dateien
+wieder bei null zu beginnen (ADR-033).
+
+```text
+TransferQueue (maxicrawler.api.downloads)   Aufträge: URLs, ungeplant
+  └─ ein Worker ──→ DownloadService.download(url, on_progress, control)
+                      └─ DownloadManager
+                           └─ DownloadQueue (maxicrawler.downloader.queue)
+                                            Jobs eines Plans, aufgelöst
+```
+
+Zwei Warteschlangen auf zwei Ebenen, absichtlich getrennt und absichtlich
+verschieden benannt. Die obere entscheidet *Reihenfolge und Zeitpunkt* und
+startet nichts selbst: jeder Transfer ist genau ein `DownloadService`-Aufruf.
+Ein Worker, und das ist eine Höflichkeitsentscheidung, keine technische Grenze.
 
 ## Ausblick: Crawl Jobs
 
@@ -212,6 +230,14 @@ weiß.
 -   `maxicrawler.api` importiert weder `providers` noch `downloader` noch
     `library` und baut weder einen Crawl- noch einen Download-Objektgraphen
     selbst.
+-   `DownloadService` ist die einzige Stelle, die einen Download startet. Die
+    Warteschlange entscheidet, welcher Auftrag als Nächstes drankommt und ob der
+    Worker ihn nehmen darf — mehr nicht. Eine zweite Downloadlogik gibt es
+    nicht, und eine Mehrfachauswahl ist keine.
+-   Der Entschlüsselungsschlüssel eines Shares lebt in genau einem privaten
+    Wörterbuch der Warteschlange. Kein Snapshot, keine Seite, kein Event-Frame
+    und keine Weiterleitung trägt ihn; `tests/test_api_secret_confinement.py`
+    liest das nach.
 -   Ein laufender Download wird in der Senke abgebrochen, nicht im Manager und
     nicht im Provider: dort laufen die Bytes jedes Providers ohnehin vorbei, und
     dort ist bereits garantiert, dass ein unfertiger Transfer nichts hinterlässt.
