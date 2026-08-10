@@ -15,3 +15,17 @@ class DownloadError(RuntimeError):
 
 class SourceError(DownloadError):
     """Raised when a download source cannot be turned into URLs."""
+
+
+class DownloadCancelledError(DownloadError):
+    """Raised inside a transfer that was asked to stop.
+
+    A :class:`DownloadError` on purpose. Every provider already lets one out of
+    ``sink.write`` — that is how a full disk ends a transfer — so cancellation
+    travels the path each of them was already written to survive, and no
+    provider had to learn a second one.
+
+    What separates it from a failure is what the *manager* does with it: a
+    cancelled transfer is not recorded as an attempt that failed, because
+    nobody attempted anything. It was called off.
+    """

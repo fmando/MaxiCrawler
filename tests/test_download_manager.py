@@ -24,6 +24,7 @@ from maxicrawler.domain import (
     ResourceRef,
 )
 from maxicrawler.downloader import (
+    DownloadControl,
     DownloadManager,
     DownloadPlanner,
     SourceError,
@@ -509,3 +510,111 @@ def test_a_manager_can_be_composed_with_its_own_collaborators(tmp_path: Path) ->
 
     assert manager.library is library
     assert manager.download(FILE_URL).succeeded is True
+
+
+# --- stopping a run ----------------------------------------------------------
+
+
+def make_stoppable(tmp_path: Path, control: DownloadControl) -> tuple[DownloadManager, Library]:
+    """Return a manager whose transfers can be stopped."""
+    registry = ProviderRegistry([make_provider()])
+    library = Library(tmp_path / "library")
+    manager = DownloadManager(
+        registry,
+        library,
+        control=control,
+        clock=lambda: datetime(2026, 8, 2, 12, 0, tzinfo=UTC),
+    )
+    return manager, library
+
+
+def test_a_stop_before_the_run_leaves_every_job_cancelled(tmp_path: Path) -> None:
+    control = DownloadControl()
+    control.request_stop()
+    manager, library = make_stoppable(tmp_path, control)
+
+    report = manager.download(FILE_URL)
+
+    assert [outcome.status for outcome in report.outcomes] == [DownloadStatus.CANCELLED]
+    assert report.cancelled != ()
+    assert report.failed == ()
+
+
+def test_a_stopped_run_is_not_a_successful_one(tmp_path: Path) -> None:
+    """Nothing went wrong, and the resource is still not here."""
+    control = DownloadControl()
+    control.request_stop()
+    manager, _ = make_stoppable(tmp_path, control)
+
+    assert manager.download(FILE_URL).succeeded is False
+
+
+def test_a_stop_mid_transfer_ends_it_and_stores_nothing(tmp_path: Path) -> None:
+    """The realistic case: somebody clicks Stop while bytes are moving.
+
+    The reporter runs on the thread doing the transfer, one call per chunk,
+    which is exactly where a listener holding the control would press it.
+    """
+    control = DownloadControl()
+    registry = ProviderRegistry([make_provider(chunk_size=1)])
+    library = Library(tmp_path / "library")
+
+    class StopAfterFirstChunk(RecordingProgressReporter):
+        def advanced(self, job: object, written: int) -> None:  # type: ignore[override]
+            control.request_stop()
+
+    manager = DownloadManager(
+        registry,
+        library,
+        reporter=StopAfterFirstChunk(),
+        control=control,
+        clock=lambda: datetime(2026, 8, 2, 12, 0, tzinfo=UTC),
+    )
+
+    report = manager.download(FILE_URL)
+
+    assert report.cancelled != ()
+    assert report.bytes_written == 0
+    assert list((tmp_path / "library").rglob("*.bin")) == []
+
+
+def test_a_cancelled_transfer_writes_no_record(tmp_path: Path) -> None:
+    """A record saying "failed" would turn somebody's decision into a fault.
+
+    It would also count an attempt nobody made, which the next run would then
+    report as a retry.
+    """
+    control = DownloadControl()
+    control.request_stop()
+    manager, library = make_stoppable(tmp_path, control)
+
+    manager.download(FILE_URL)
+
+    assert list((tmp_path / "library").rglob(METADATA_FILENAME)) == []
+
+
+def test_a_folder_stops_at_the_file_it_is_on(tmp_path: Path) -> None:
+    """Not after all two hundred of them."""
+    control = DownloadControl()
+    provider = make_provider(kind=ResourceKind.FOLDER)
+    provider._inspection = folder_inspection(  # noqa: SLF001 - the stub has no other seam
+        ResourceRef(
+            provider="mega",
+            resource_id="FolderAA",
+            kind=ResourceKind.FOLDER,
+            url="https://mega.nz/folder/FolderAA",
+        )
+    )
+    registry = ProviderRegistry([provider])
+    library = Library(tmp_path / "library")
+    manager = DownloadManager(
+        registry, library, control=control, clock=lambda: datetime(2026, 8, 2, 12, 0, tzinfo=UTC)
+    )
+    plan = manager.plan(FOLDER_URL)
+    control.request_stop()
+
+    report = manager.run(plan)
+
+    assert len(plan.jobs) == 2
+    assert len(report.cancelled) == 2
+    assert report.completed == ()

@@ -90,8 +90,14 @@ STATUS_LABELS: dict[DownloadStatus, str] = {
     DownloadStatus.COMPLETED: "completed",
     DownloadStatus.SKIPPED: "already stored",
     DownloadStatus.FAILED: "failed",
+    DownloadStatus.CANCELLED: "stopped",
 }
-"""A skipped download is not a lesser success; it is one that needed no bytes."""
+"""A skipped download is not a lesser success; it is one that needed no bytes.
+
+A stopped one is not a failure either. The person reading that word is the
+person who clicked the button, and calling their decision an error is how an
+interface teaches somebody to distrust it.
+"""
 
 STATUS_TONES: dict[DownloadStatus, str] = {
     DownloadStatus.PENDING: "idle",
@@ -99,6 +105,7 @@ STATUS_TONES: dict[DownloadStatus, str] = {
     DownloadStatus.COMPLETED: "good",
     DownloadStatus.SKIPPED: "good",
     DownloadStatus.FAILED: "bad",
+    DownloadStatus.CANCELLED: "idle",
 }
 
 KIND_LABELS: dict[LinkKind, str] = {

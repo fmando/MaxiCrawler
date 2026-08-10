@@ -35,7 +35,12 @@ from time import monotonic
 from uuid import uuid4
 
 from maxicrawler.api.errors import DownloadBusyError
-from maxicrawler.app import DownloadProgress, DownloadService, DownloadSummary
+from maxicrawler.app import (
+    DownloadControl,
+    DownloadProgress,
+    DownloadService,
+    DownloadSummary,
+)
 from maxicrawler.domain import DownloadStatus
 from maxicrawler.utils import strip_fragment
 
@@ -108,6 +113,7 @@ class DownloadRun:
     def __init__(self, download_id: str, url: str) -> None:
         self._id = download_id
         self._url = url
+        self.control = DownloadControl()
         self._lock = Lock()
         self._started = monotonic()
         self._started_at = datetime.now(UTC)
@@ -163,6 +169,19 @@ class DownloadRun:
         """Stop calling *listener*; unknown listeners are ignored."""
         if listener in self._listeners:
             self._listeners.remove(listener)
+
+    def stop(self) -> None:
+        """Ask this transfer to stop.
+
+        Takes effect within one chunk rather than at the end of the file, and
+        leaves the library exactly as it was — the staging directory means a
+        transfer that does not finish was never visible in the first place.
+
+        The same shape as :meth:`~maxicrawler.api.jobs.CrawlJob.stop`, because
+        a person clicking Stop should not have to learn which half of the chain
+        they are looking at.
+        """
+        self.control.request_stop()
 
     def report_progress(self, progress: DownloadProgress) -> None:
         """Record what the service reports, and tell whoever is watching."""
@@ -262,18 +281,25 @@ class DownloadRuns:
         return newest_first[:limit]
 
     def shutdown(self, *, wait: bool = True) -> None:
-        """Stop accepting downloads.
+        """Stop accepting downloads, asking a running transfer to stop first.
 
-        A transfer already running is not interrupted: there is no cooperative
-        stop yet, and the staging directory means an abandoned one leaves no
-        half file in the library either way.
+        Before this there was no cooperative stop, so a server shutting down
+        left a transfer running until its file was done — on a large file, a
+        shutdown that looked like a hang. Now it ends at the next chunk, and
+        the library is left as it was.
         """
+        with self._lock:
+            active = self._active
+        if active is not None:
+            active.stop()
         self._executor.shutdown(wait=wait)
 
     def _run(self, run: DownloadRun, url: str) -> None:
         """Run one download to its end, whatever that end turns out to be."""
         try:
-            summary = self._service.download(url, on_progress=run.report_progress)
+            summary = self._service.download(
+                url, on_progress=run.report_progress, control=run.control
+            )
         except Exception as error:  # noqa: BLE001
             # A transfer that fails is a summary, not an exception, so anything
             # arriving here is a fault below us. A run left saying "downloading"

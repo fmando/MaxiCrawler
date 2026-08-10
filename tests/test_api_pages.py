@@ -1229,6 +1229,26 @@ def test_an_unknown_download_is_not_found(tmp_path: Path) -> None:
     with client(tmp_path) as test_client:
         assert test_client.get("/downloads/nothing").status_code == 404
         assert test_client.get("/downloads/nothing/events").status_code == 404
+        assert test_client.post("/downloads/nothing/stop").status_code == 404
+
+
+def test_a_finished_download_offers_no_stop_button(tmp_path: Path) -> None:
+    """A button that cannot do anything is a button that teaches distrust."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        body = finished_download(test_client)
+
+    assert "/stop" not in body
+
+
+def test_stopping_a_download_redirects_back_to_its_page(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        started = test_client.post("/downloads", data={"url": MEGA_URL}, follow_redirects=False)
+        location = started.headers["location"]
+
+        response = test_client.post(f"{location}/stop", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == location
 
 
 def test_the_download_script_is_served(tmp_path: Path) -> None:

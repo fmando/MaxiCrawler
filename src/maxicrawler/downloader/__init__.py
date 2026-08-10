@@ -12,7 +12,8 @@ asked for through the provider protocol or declared through
 plugs in without a line changing here.
 """
 
-from maxicrawler.downloader.errors import DownloadError, SourceError
+from maxicrawler.downloader.control import DownloadControl
+from maxicrawler.downloader.errors import DownloadCancelledError, DownloadError, SourceError
 from maxicrawler.downloader.manager import DownloadManager, DownloadWorker
 from maxicrawler.downloader.models import (
     DownloadJob,
@@ -34,6 +35,8 @@ from maxicrawler.downloader.sources import SourceItem, SourceResolver, looks_lik
 
 __all__ = [
     "DEFAULT_HASH_ALGORITHM",
+    "DownloadCancelledError",
+    "DownloadControl",
     "DownloadError",
     "DownloadJob",
     "DownloadManager",

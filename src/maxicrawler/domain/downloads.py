@@ -39,6 +39,18 @@ class DownloadStatus(StrEnum):
     FAILED = "failed"
     """The transfer was attempted and did not finish."""
 
+    CANCELLED = "cancelled"
+    """Somebody asked for it to stop, and it did.
+
+    Not a failure: nothing went wrong, and a page that reported one would be
+    telling a person their own decision was an error.
+
+    Never written to a metadata document. A cancelled transfer leaves the
+    library exactly as it was — no partial file, and no record claiming an
+    attempt that nobody made — so this value lives only in an outcome a client
+    is being shown right now.
+    """
+
     @property
     def is_final(self) -> bool:
         """Return whether no further work is expected for this status."""
@@ -46,6 +58,7 @@ class DownloadStatus(StrEnum):
             DownloadStatus.COMPLETED,
             DownloadStatus.SKIPPED,
             DownloadStatus.FAILED,
+            DownloadStatus.CANCELLED,
         }
 
     @property

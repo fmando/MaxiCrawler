@@ -277,3 +277,88 @@ def test_the_stream_describes_a_finished_download_and_stops() -> None:
     names = asyncio.run(asyncio.wait_for(collect(), timeout=5))
 
     assert names == ["progress", "finished"]
+
+
+# --- stopping ------------------------------------------------------------------
+
+
+def test_a_running_download_can_be_stopped(tmp_path: Path) -> None:
+    """What Sprint 12 had no seam for: a transfer that is already moving."""
+    provider = BlockingProvider()
+    with registry(tmp_path, provider) as runs:
+        run = runs.submit(FILE_URL)
+        assert provider.transferring.wait(timeout=10)
+
+        run.stop()
+        provider.release.set()
+        snapshot = wait_for(run)
+
+    assert snapshot.status is DownloadStatus.CANCELLED
+    assert snapshot.error is None
+
+
+def test_a_stopped_download_stores_nothing(tmp_path: Path) -> None:
+    provider = BlockingProvider()
+    with registry(tmp_path, provider) as runs:
+        run = runs.submit(FILE_URL)
+        assert provider.transferring.wait(timeout=10)
+
+        run.stop()
+        provider.release.set()
+        snapshot = wait_for(run)
+
+    assert snapshot.path is None
+    assert list((tmp_path / "library").rglob("*.bin")) == []
+
+
+def test_a_stopped_download_is_not_reported_as_a_failure(tmp_path: Path) -> None:
+    """The person reading the word is the person who pressed the button."""
+    provider = BlockingProvider()
+    with registry(tmp_path, provider) as runs:
+        run = runs.submit(FILE_URL)
+        assert provider.transferring.wait(timeout=10)
+
+        run.stop()
+        provider.release.set()
+        snapshot = wait_for(run)
+
+    assert snapshot.status is not DownloadStatus.FAILED
+    assert snapshot.summary is not None
+    assert snapshot.summary.succeeded is False
+
+
+def test_the_slot_is_free_again_after_a_stop(tmp_path: Path) -> None:
+    provider = BlockingProvider()
+    with registry(tmp_path, provider) as runs:
+        first = runs.submit(FILE_URL)
+        assert provider.transferring.wait(timeout=10)
+        first.stop()
+        provider.release.set()
+        wait_for(first)
+
+        assert runs.active() is None
+
+
+def test_shutting_down_stops_a_transfer_rather_than_waiting_for_it(tmp_path: Path) -> None:
+    """The behaviour `serve` inherits.
+
+    Before this there was no cooperative stop, so a server going down waited
+    for the file -- on a large one, a shutdown that looked like a hang.
+    """
+    provider = BlockingProvider()
+    runs = DownloadRuns(make_service(tmp_path, provider))
+    run = runs.submit(FILE_URL)
+    assert provider.transferring.wait(timeout=10)
+
+    runs.shutdown(wait=False)
+    provider.release.set()
+    snapshot = wait_for(run)
+
+    assert snapshot.status is DownloadStatus.CANCELLED
+
+
+def test_stopping_a_download_nobody_started_is_harmless(tmp_path: Path) -> None:
+    with registry(tmp_path) as runs:
+        runs.shutdown(wait=False)
+
+        assert runs.active() is None

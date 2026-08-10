@@ -7,7 +7,12 @@ import pytest
 from doubles import make_ref
 
 from maxicrawler.domain import ContentDescriptor
-from maxicrawler.downloader import DownloadError, LibrarySink
+from maxicrawler.downloader import (
+    DownloadCancelledError,
+    DownloadControl,
+    DownloadError,
+    LibrarySink,
+)
 from maxicrawler.library import CONTENT_DIRECTORY, Library, LibraryEntry
 
 PAYLOAD = b"ubuntu release image, in miniature"
@@ -189,3 +194,71 @@ def test_the_sink_reports_what_it_knows(tmp_path: Path) -> None:
         assert sink.filename == "ubuntu.iso"
         assert sink.bytes_written == len(PAYLOAD)
         assert sink.expected_size == 99
+
+
+# --- stopping a transfer -----------------------------------------------------
+
+
+def test_a_stop_ends_the_transfer_at_the_next_chunk(tmp_path: Path) -> None:
+    entry = make_entry(tmp_path)
+    control = DownloadControl()
+
+    with pytest.raises(DownloadCancelledError), LibrarySink(entry, control=control) as sink:
+        sink.begin(ContentDescriptor(name="ubuntu.iso", size=len(PAYLOAD)))
+        sink.write(b"first half ")
+        control.request_stop()
+        sink.write(b"second half")
+
+
+def test_a_stopped_transfer_leaves_the_library_as_it_was(tmp_path: Path) -> None:
+    """The property that makes cancelling safe, and it is not new.
+
+    A transfer that stops is discarded by the same context manager that
+    discards one that broke, so nothing half-written was ever visible.
+    """
+    entry = make_entry(tmp_path)
+    control = DownloadControl()
+    control.request_stop()
+
+    with pytest.raises(DownloadCancelledError), LibrarySink(entry, control=control) as sink:
+        sink.begin(ContentDescriptor(name="ubuntu.iso", size=len(PAYLOAD)))
+        sink.write(PAYLOAD)
+
+    assert not (entry.path / CONTENT_DIRECTORY).exists()
+    assert not entry.staging_directory.exists()
+
+
+def test_a_stop_says_how_far_it_got(tmp_path: Path) -> None:
+    entry = make_entry(tmp_path)
+    control = DownloadControl()
+
+    with (
+        pytest.raises(DownloadCancelledError, match="11 bytes"),
+        LibrarySink(entry, control=control) as sink,
+    ):
+        sink.begin(ContentDescriptor(name="ubuntu.iso", size=len(PAYLOAD)))
+        sink.write(b"first half ")
+        control.request_stop()
+        sink.write(b"second half")
+
+
+def test_a_sink_without_a_control_is_unchanged(tmp_path: Path) -> None:
+    entry = make_entry(tmp_path)
+
+    with LibrarySink(entry) as sink:
+        sink.begin(ContentDescriptor(name="ubuntu.iso", size=len(PAYLOAD)))
+        sink.write(PAYLOAD)
+        content = sink.commit()
+
+    assert content.size == len(PAYLOAD)
+
+
+def test_a_control_nobody_pressed_changes_nothing(tmp_path: Path) -> None:
+    entry = make_entry(tmp_path)
+
+    with LibrarySink(entry, control=DownloadControl()) as sink:
+        sink.begin(ContentDescriptor(name="ubuntu.iso", size=len(PAYLOAD)))
+        sink.write(PAYLOAD)
+        content = sink.commit()
+
+    assert (entry.path / content.path).read_bytes() == PAYLOAD
