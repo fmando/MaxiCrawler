@@ -29,7 +29,8 @@ The mission, core principles, and non-goals are described in
     in a browser, through a `DownloadService` both clients share
 -   0.12 Library comfort & document viewer ✅ — search, filter, sort, paging, a
     page per file, and the browser showing what it can
--   0.13 Politeness & robots.txt
+-   0.13 Politeness & robots.txt ✅ — robots.txt obeyed by default, per-host
+    waiting, a private-network guard, and a stoppable download
 -   0.14 Scheduler & Automation
 -   0.15 REST API
 -   1.0 Stable Release
@@ -70,11 +71,14 @@ not change.
 
 ## Next
 
--   robots.txt — a `RobotsPolicy` behind the existing one-method `CrawlPolicy`
-    seam, reading through the same fetcher. The most pressing item on this
-    list: recursion means a crawl now fetches many pages rather than one
--   Per-host politeness — a `ThrottledFetcher` wrapping another `PageFetcher`,
-    so neither the engine nor the crawler learns about timing
+-   Pinning the resolved address onto the connection that is opened, which is
+    what closes DNS rebinding. The private-network guard raises the cost of
+    reaching an internal address and does not make it impossible (ADR-031), and
+    the difference is a custom `HTTPConnection` rather than another policy
+-   A politeness schedule shared across concurrent crawls. Today a `HostSchedule`
+    lives per crawl, which is exactly right while `serve` runs one worker and
+    wrong the moment it runs two
+-   Sitemaps, which robots.txt already tells us about and nothing yet reads
 -   Real schema versioning for the SQLite metadata database. Today each adapter
     creates its tables with `CREATE TABLE IF NOT EXISTS` and declares the
     columns it has added since, which covers an appended column and nothing
@@ -93,10 +97,6 @@ not change.
     a crawl that was running is shown as abandoned. Downloads have the same
     shape and the same gap: a finished one is found again in the library, but
     its own page dies with the process
--   Stopping a download. A crawl checks between pages; a transfer has no such
-    seam yet, so `serve` leaves a running one alone when it shuts down. The
-    progress callback the sink already calls on every chunk is where a
-    cooperative abort belongs
 -   An index over the library, as a cache and never as the authority (ADR-010).
     Every listing reads one metadata document per stored resource: about 0.3
     seconds for two thousand entries warm, and roughly sixteen the first time a

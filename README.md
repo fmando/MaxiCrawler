@@ -15,6 +15,7 @@ what the project deliberately will not do.
 - Clear package boundaries for crawling, extraction, downloads, storage, plugins, and delivery layers.
 - Two clients over one implementation: a command line and a web interface, both calling the same services.
 - A recursive web crawler with a pluggable frontier, depth and scope limits, and a crawl summary you can stop, resume the design of, and store.
+- Responsible by default: robots.txt is obeyed, a host's own `Crawl-delay` is waited out, and loopback, private and cloud-metadata addresses are refused — on the URL and on every redirect.
 - Links found on a page feed the same discovery pipeline and the same plugins local documents use.
 - A provider-independent download manager: a new host is a plugin and a provider, nothing else.
 - A self-describing library: one directory per resource, with versioned JSON metadata beside it.
@@ -847,11 +848,10 @@ fragments would silently lose every one of them.
 - **No cookies, no login, no forms, no headless browser.** Static HTML only.
 - **No downloads.** `crawl` contacts a web server; it contacts no provider and
   writes no file into the library.
-- **No robots.txt — yet.** Fetching one page named by its operator is what a
-  browser does when the same person types the same address. The architecture
-  reserves a one-method `CrawlPolicy` seam for it, and a `RobotsPolicy` will
-  read `/robots.txt` through the same fetcher. Until then, **you** are
-  responsible for what you point it at.
+- **No robots.txt — at the time.** Fetching one page named by its operator is
+  what a browser does when the same person types the same address. Sprint 13
+  changed that answer along with the premise: a crawl follows links now, and
+  robots.txt is obeyed by default.
 
 ### Every fetch is bounded
 
@@ -1021,19 +1021,17 @@ was told — so that exits 0 and says so in words.
 | Exit code | Meaning |
 | --- | --- |
 | 0 | the crawl ran to an end, or to a limit it was given |
-| 5 | the starting page could not be retrieved |
+| 5 | the starting page could not be retrieved, or was refused |
 | 6 | the starting page was not a page |
 | 7 | the crawl was interrupted |
 
 ### Still not done, on purpose
 
-- **robots.txt.** Unchanged from Sprint 8, and the stakes are higher now that a
-  crawl fetches many pages rather than one. The `CrawlPolicy` seam is there and
-  a `RobotsPolicy` will read `/robots.txt` through the same fetcher. Until then,
-  **what you point this at is your responsibility.**
-- **No delay between requests.** Politeness, rate limits and scheduling belong
-  with robots.txt and are one subject; the `ThrottledFetcher` seam is documented
-  and empty.
+- **robots.txt** — the stakes rose here, with a crawl fetching many pages rather
+  than one, and Sprint 13 answered it: the `CrawlPolicy` seam took a
+  `RobotsPolicy` without the engine changing.
+- **No delay between requests** — the `ThrottledFetcher` seam was documented and
+  empty at this point, and filled in Sprint 13.
 - **No parallelism, no downloads, no JavaScript, no cookies, no login.** The
   crawler discovers; downloading stays a separate pipeline.
 
@@ -1457,6 +1455,156 @@ means. The web layer still imports neither `library` nor `downloader` nor
 - **No renaming, no deleting, no tags.** The library is browsable, not yet
   editable.
 
+## Sprint 13: responsible and safe crawling
+
+Everything so far made MaxiCrawler fetch more: many pages instead of one, from a
+browser instead of a terminal. This sprint is about what a program that fetches
+a lot owes the machines it fetches from — and what a program that takes a URL
+from a browser owes the machine it runs on.
+
+Four things, and none of them is a special case anywhere in the engine.
+
+### robots.txt is obeyed, by default
+
+```text
+$ maxicrawler crawl https://example.org/ --depth 2 --same-domain
+
+Crawl:     https://example.org/  (depth 2, same domain, max 50 pages)
+Finished:  completed in 3.1s
+
+Pages visited: 12
+Skipped:
+  disallowed by robots.txt   7
+  already seen               4
+```
+
+The refusal has a name of its own. *"Outside my scope"* is a choice you made;
+*"disallowed by robots.txt"* is one the site made, and a report that merged them
+could not tell a narrow crawl from a refused one.
+
+Wildcards (`*`), the end anchor (`$`), longest-match precedence with `Allow`
+breaking ties, several user-agent groups and `Crawl-delay` are all honoured,
+because the matching is [Protego](https://github.com/scrapy/protego)'s. The
+standard library's `urllib.robotparser` compares paths with `startswith`, so
+`Disallow: /*.pdf$` matches nothing there — it would let us fetch what a site
+forbade while believing we obeyed. ADR-029 records the evaluation, including the
+one thing Protego does not do (strip a byte-order mark) and where we do it.
+
+| The host answers | MaxiCrawler | Why |
+| --- | --- | --- |
+| a robots.txt | obeys it | |
+| 404, 403, 410 | crawls | RFC 9309: unavailable means you may |
+| 500, a timeout | **does not crawl** | not knowing what a site permits is not permission |
+| HTML, or 3 MB of it | crawls | content we declined to read is not a server saying no |
+
+It is read **once per host**, and only for URLs actually about to be fetched. At
+the moment a link is *found* it would cost one request per domain a page
+mentions: one page linking to three hundred sites would spend three hundred
+requests before crawling fifty pages.
+
+Turning it off is one flag — `--ignore-robots`, a checkbox on the crawl form, or
+`respect_robots = false`. A safe default nobody can find is a default people work
+around instead of with. And a stored crawl remembers which it was, because a
+setting that has changed since cannot answer that later.
+
+**Downloads are not affected.** No provider consults robots.txt: a download is an
+explicit act on a resource you named, and file hosts disallow crawlers as a
+matter of course.
+
+### Politeness, without a delay nobody asked for
+
+`crawl_delay` defaults to **0.0**. A host that wants to be crawled slowly says so
+in its robots.txt, and that *is* obeyed — up to `max_crawl_delay`, because one
+line reading `Crawl-delay: 86400` would otherwise freeze a crawl for a day.
+
+Waiting happens in a `ThrottledFetcher` wrapping the fetcher, never in the
+engine and never in the frontier. *"May I fetch this?"* and *"may I fetch it
+yet?"* are different questions, and there is no `sleep` anywhere above that one
+file. A stop during a delay returns at once rather than holding a shutdown open.
+
+Both fetchers — pages and robots.txt — share one schedule, so the robots request
+is spaced like every other request without the file having to describe its own
+retrieval.
+
+### It will not crawl your own machine
+
+```text
+$ maxicrawler crawl http://localhost:9200/
+Error: nothing to crawl: the seed was private network
+```
+
+Loopback, RFC 1918, link-local, carrier-grade NAT, unique local addresses, the
+names that mean a local network (`localhost`, `*.local`, `*.internal`,
+`*.home.arpa`), and every cloud metadata service are refused — in the URL, in
+what a name resolves to, **and on every redirect hop**. That last one is where
+this actually matters: a public URL answering `302 Location:
+http://169.254.169.254/` walks straight past a check made once at the start.
+
+`127.1`, `0x7f.0.0.1` and `2130706433` are refused too. Python's `ipaddress`
+calls them malformed and the C resolver every socket goes through calls them
+loopback, so a guard that trusted only the strict reading would permit the fetch
+and the connection would go to loopback anyway.
+
+Crawling your own network stays possible:
+
+```toml
+[maxicrawler]
+allow_private_networks = true                    # the whole of it
+private_network_allowlist = ["192.168.1.20"]     # or one machine
+```
+
+`--allow-private` does the same for one run. Neither opens a cloud metadata
+service: opening an intranet to a crawler is not volunteering an instance
+credential, and those are one setting only by accident.
+
+**What this does not close is DNS rebinding** — between our lookup and the
+connection's there is a second lookup. It raises the cost of reaching an
+internal address; it does not make it impossible, and ADR-031 says so rather
+than implying otherwise.
+
+### A download can be stopped
+
+A crawl has had a Stop button since Sprint 9. A transfer had none: it checked
+nothing between the first byte and the last, so stopping meant waiting for the
+file, and `serve` shutting down held on until it was done.
+
+The button is now beside the crawl's, and the stop takes effect within one
+chunk. Nothing half-written is left behind — the staging directory already
+guaranteed that for a transfer that broke, and this takes exactly the same path.
+
+A stopped download is not called a failure anywhere you read it, and writes no
+metadata record: a record saying "failed" would turn your own decision into a
+fault you later have to explain, and would count an attempt nobody made.
+
+### Configuration
+
+```toml
+[maxicrawler]
+respect_robots         = true    # obey each host's robots.txt
+robots_user_agent      = ""      # empty: derive the token from user_agent
+robots_timeout         = 10.0    # shorter than network_timeout: this is overhead
+robots_deny_on_error   = true    # a host we could not reach forbids everything
+
+crawl_delay            = 0.0     # no delay of our own
+respect_crawl_delay    = true    # a host's own Crawl-delay is obeyed
+max_crawl_delay        = 30.0    # ...up to here
+
+allow_private_networks    = false
+private_network_allowlist = []
+```
+
+Every default is the safe one.
+
+### Still not done, on purpose
+
+- **DNS rebinding**, as above: closing it means pinning the checked address onto
+  the connection that is opened, which is a change to how sockets are made.
+- **One politeness schedule per crawl**, not per process. Exactly right while
+  `serve` runs one crawl worker; wrong the moment it runs two.
+- **Sitemaps**, which robots.txt already tells us about and nothing yet reads.
+- **A download queue.** Stopping one download is not scheduling several, and
+  that is still a separate subject with an order, a resume and a restart in it.
+
 ## Documentation
 
 | Document | Purpose |
@@ -1484,10 +1632,12 @@ requests.
 
 ## Responsible crawling
 
-Users are responsible for complying with websites' terms, robots directives,
-applicable law, and sensible rate limits. MaxiCrawler is deliberately designed
-to make transport policies and crawl behavior explicit rather than bypassing
-access controls.
+MaxiCrawler obeys robots.txt by default, honours a host's `Crawl-delay`, and
+refuses to reach into private address space unless told to. None of that makes
+you unaccountable for what you point it at: users remain responsible for
+complying with websites' terms, applicable law, and sensible rate limits — and
+the switches that turn each of these off exist for the cases where somebody has
+decided, not so that nobody has to.
 
 ## License
 

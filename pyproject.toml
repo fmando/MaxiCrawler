@@ -20,7 +20,7 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Typing :: Typed",
 ]
-dependencies = ["rich>=13.7", "typer>=0.15"]
+dependencies = ["protego>=0.5", "rich>=13.7", "typer>=0.15"]
 
 [project.scripts]
 maxicrawler = "maxicrawler.cli:app"
@@ -42,6 +42,7 @@ dev = [
   "jinja2>=3.1",
   "mypy>=1.13",
   "pre-commit>=4.0",
+  "protego>=0.5",
   "pytest>=8.3",
   "pytest-cov>=6.0",
   "ruff>=0.8",

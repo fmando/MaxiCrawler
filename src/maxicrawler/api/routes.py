@@ -168,6 +168,7 @@ async def start_crawl(request: Request) -> Response:
             depth=_whole_number(form, "depth"),
             max_pages=_whole_number(form, "max_pages"),
             same_domain=values["same_domain"],
+            respect_robots=values["respect_robots"],
         )
     except ValueError as error:
         # The values they typed come back with the message. Losing a pasted URL
@@ -301,6 +302,19 @@ async def download_detail(request: Request) -> Response:
         {"download": views.download_view(run.snapshot())},
         section="library",
     )
+
+
+async def stop_download(request: Request) -> Response:
+    """Ask one transfer to stop, and show the page again.
+
+    The same shape as stopping a crawl, deliberately: a person clicking Stop
+    should not have to know which half of the chain they are looking at. This
+    one takes effect within a chunk rather than at the end of a page, and the
+    library is left exactly as it was.
+    """
+    run = _download(request)
+    run.stop()
+    return RedirectResponse(url=f"/downloads/{run.id}", status_code=303)
 
 
 async def download_events(request: Request) -> Response:
@@ -650,6 +664,7 @@ def _default_form(jobs: CrawlJobs) -> dict[str, Any]:
         "depth": settings.crawl_depth,
         "max_pages": settings.crawl_max_pages,
         "same_domain": settings.crawl_same_domain,
+        "respect_robots": settings.respect_robots,
     }
 
 
@@ -681,6 +696,7 @@ def _submitted(form: dict[str, str]) -> dict[str, Any]:
         "depth": form.get("depth", "").strip(),
         "max_pages": form.get("max_pages", "").strip(),
         "same_domain": bool(form.get("same_domain")),
+        "respect_robots": bool(form.get("respect_robots")),
     }
 
 

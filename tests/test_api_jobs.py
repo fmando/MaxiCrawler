@@ -31,7 +31,15 @@ def make_site(pages: dict[str, str] | None = None) -> Site:
 
 def make_service() -> CrawlService:
     """Return a service over throwaway settings."""
-    return CrawlService(Settings(user_agent="MaxiCrawler/test", network_timeout=5.0))
+    return CrawlService(
+        Settings(
+            user_agent="MaxiCrawler/test",
+            network_timeout=5.0,
+            # The site these crawls reach is on loopback, which the shipped
+            # default refuses. Stated here rather than turned off globally.
+            allow_private_networks=True,
+        )
+    )
 
 
 @contextmanager

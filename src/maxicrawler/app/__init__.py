@@ -22,6 +22,7 @@ comes before that.
 
 from maxicrawler.app.crawling import CrawlService
 from maxicrawler.app.downloading import (
+    DownloadControl,
     DownloadProgress,
     DownloadService,
     DownloadSummary,
@@ -46,6 +47,7 @@ __all__ = [
     "MAX_PER_PAGE",
     "CrawlService",
     "Display",
+    "DownloadControl",
     "DownloadProgress",
     "DownloadService",
     "DownloadSummary",

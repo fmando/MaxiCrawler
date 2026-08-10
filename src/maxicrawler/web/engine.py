@@ -9,10 +9,27 @@ lines, because the pieces it composes were built to be composed.
 
 Three properties are worth naming before reading the code.
 
-**There is one gate.** :meth:`CrawlEngine._consider` is the only place a URL is
-turned away, and every turn-away is counted with its reason. A consequence
-worth having: the frontier only ever holds URLs that will actually be fetched,
-which is what bounds its size without needing a cap.
+**There are two gates, and the difference between them is cost.**
+:meth:`CrawlEngine._consider` runs when a URL is *found* and asks only policies
+that answer from the URL itself. :meth:`CrawlEngine._admit` runs when a URL is
+*popped*, immediately before the request, and is where a policy that has to
+make a request of its own belongs — reading ``/robots.txt``, resolving a host.
+
+The rule that decides which gate a policy goes to:
+
+    A policy that can make a request is asked once, immediately before the
+    request it guards. A policy that cannot is asked when the URL is found, so
+    the frontier stays clean.
+
+Asking robots.txt at the first gate would tie the number of ``/robots.txt``
+requests to the number of *discovered* hosts rather than to anything the
+operator set: one page linking to three hundred domains would cost three
+hundred requests to then crawl fifty pages. At the second gate it is asked only
+about URLs that are genuinely next.
+
+Both gates count every turn-away with its reason, through the same
+:func:`~maxicrawler.web.report.skip_reason_for`, so there is still exactly one
+vocabulary for "why not".
 
 **One dead page never stops a run.** A failure on any page becomes a
 :class:`~maxicrawler.web.report.PageOutcome` and the loop continues, the same
@@ -46,8 +63,21 @@ from maxicrawler.web.frontier import (
     visit_key,
 )
 from maxicrawler.web.models import CrawlResult, LinkKind
-from maxicrawler.web.policy import AllowAllPolicy, CompositePolicy, CrawlPolicy, SameDomainPolicy
-from maxicrawler.web.report import CrawlReport, CrawlStatistics, PageOutcome, SkipReason
+from maxicrawler.web.policy import (
+    AllowAllPolicy,
+    CompositePolicy,
+    CrawlPolicy,
+    PolicyDecision,
+    PolicyRule,
+    SameDomainPolicy,
+)
+from maxicrawler.web.report import (
+    CrawlReport,
+    CrawlStatistics,
+    PageOutcome,
+    SkipReason,
+    skip_reason_for,
+)
 from maxicrawler.web.repository import CrawlRepository, NullCrawlRepository
 from maxicrawler.web.resolve import looks_like_a_page
 from maxicrawler.web.service import WebDiscoveryService
@@ -66,12 +96,21 @@ meta refresh, and a URL somebody wrote out in the text.
 """
 
 
+def _reason_of(refusal: PolicyRefusedError) -> SkipReason:
+    """Return how a report counts a refusal that arrived as an exception."""
+    return skip_reason_for(PolicyDecision.refuse(str(refusal), rule=refusal.rule))
+
+
 class CrawlEngine:
     """Crawls from a seed, following links until a limit or the work runs out.
 
     Every collaborator is injected and every one of them is a protocol, so a
     priority frontier, a persistent visited set, or a policy that reads
     ``robots.txt`` each replace one argument and change nothing here.
+
+    Two of those arguments are policies, and which one a policy belongs in is
+    decided by whether it can make a request: *policy* is asked when a URL is
+    found, *gate* immediately before it is fetched. See the module docstring.
     """
 
     def __init__(
@@ -81,6 +120,7 @@ class CrawlEngine:
         frontier: Frontier | None = None,
         visited: VisitedSet | None = None,
         policy: CrawlPolicy | None = None,
+        gate: CrawlPolicy | None = None,
         control: CrawlControl | None = None,
         event_bus: EventBus | None = None,
         repository: CrawlRepository | None = None,
@@ -90,10 +130,12 @@ class CrawlEngine:
         self._frontier = frontier if frontier is not None else FifoFrontier()
         self._visited = visited if visited is not None else InMemoryVisitedSet()
         self._policy = policy if policy is not None else AllowAllPolicy()
+        self._gate = gate if gate is not None else AllowAllPolicy()
         self._control = control if control is not None else CrawlControl()
         self._event_bus = event_bus
         self._scope: CrawlPolicy = self._policy
         self._skips: Counter[SkipReason] = Counter()
+        self._refusal: PolicyDecision | None = None
         self._kinds: Counter[LinkKind] = Counter()
         self._pages: list[PageOutcome] = []
         self._fetched: set[str] = set()
@@ -207,6 +249,7 @@ class CrawlEngine:
         """
         self._skips = Counter()
         self._kinds = Counter()
+        self._refusal = None
         self._pages = []
         self._attempts = 0
         self._deepest = 0
@@ -237,7 +280,11 @@ class CrawlEngine:
             return
         reason = next(iter(self._skips), SkipReason.UNUSABLE)
         msg = f"nothing to crawl: the seed was {reason}"
-        raise PolicyRefusedError(msg)
+        # The rule travels with the error, not only the sentence: a caller
+        # deciding what to show a person should not have to read English to
+        # find out whether this was scope, robots.txt, or an address.
+        rule = self._refusal.rule if self._refusal is not None else PolicyRule.SCOPE
+        raise PolicyRefusedError(msg, rule=rule)
 
     def _drain(self, session: CrawlSession) -> CrawlState:
         """Fetch pages until something stops the crawl, and say what did."""
@@ -259,7 +306,35 @@ class CrawlEngine:
                 # catch that, because the redirect was not known yet.
                 self._skips[SkipReason.ALREADY_SEEN] += 1
                 continue
+            if not self._admit(item):
+                continue
             self._visit(item, session)
+
+    def _admit(self, item: CrawlItem) -> bool:
+        """Ask the costly policies, immediately before the request they cost.
+
+        Checked here rather than at :meth:`_consider` so that a policy which
+        makes a request of its own is asked about URLs that are genuinely next,
+        and about no others.
+
+        Refused *before* the attempt is counted, so a URL that robots.txt
+        forbids does not consume a page of the ceiling. It never became a
+        request, and the ceiling counts requests.
+
+        Raises:
+            PolicyRefusedError: the **seed** was refused. Nothing has been read,
+                so there is no report to hand back and the caller is told by an
+                exception — the same rule a seed that cannot be fetched follows.
+        """
+        decision = self._gate.may_fetch(item.url)
+        if decision.allowed:
+            return True
+        reason = skip_reason_for(decision)
+        if not self._pages:
+            msg = f"nothing to crawl: the seed was {reason}"
+            raise PolicyRefusedError(msg, rule=decision.rule)
+        self._skips[reason] += 1
+        return False
 
     def _visit(self, item: CrawlItem, session: CrawlSession) -> None:
         """Fetch one page, record what happened, and queue what it linked to."""
@@ -267,6 +342,15 @@ class CrawlEngine:
         self._attempts += 1
         try:
             result = self._service.crawl_page(item.url, session.scan_session)
+        except PolicyRefusedError as refusal:
+            # A rule said no *during* the fetch rather than before it — which
+            # today means a redirect landed somewhere the destination was not
+            # allowed to be. Still a skip rather than a failure: nothing broke,
+            # we declined.
+            if not self._pages:
+                raise
+            self._skips[_reason_of(refusal)] += 1
+            return
         except ContentTypeError:
             # Not a failure. We asked "is this a page?" and got a clear no,
             # which is the same answer the extension filter gives for free —
@@ -359,20 +443,27 @@ class CrawlEngine:
     def _consider(self, item: CrawlItem) -> None:
         """Queue *item*, or count why it will never be fetched.
 
-        The single gate. Depth is checked first because it costs nothing and
-        rejects the most; scope next; identity last — so a URL refused for
-        being out of scope is *not* also remembered as seen, and a later crawl
-        under a wider scope still finds it.
+        The first gate, and the only one a URL passes before it is queued.
+        Depth is checked first because it costs nothing and rejects the most;
+        scope next; identity last — so a URL refused for being out of scope is
+        *not* also remembered as seen, and a later crawl under a wider scope
+        still finds it.
 
         The counters therefore count occurrences rather than distinct URLs: a
         link to the same off-site page from forty pages is forty skips, which
         is the honest answer to "how much did this crawl turn away".
+
+        What a refusal is counted as comes from the decision itself rather than
+        from this line, so a policy added later is counted under its own name
+        without the gate learning what it does.
         """
         if item.depth > self._max_depth:
             self._skips[SkipReason.TOO_DEEP] += 1
             return
-        if not self._scope.may_fetch(item.url).allowed:
-            self._skips[SkipReason.OUT_OF_SCOPE] += 1
+        decision = self._scope.may_fetch(item.url)
+        if not decision.allowed:
+            self._refusal = decision
+            self._skips[skip_reason_for(decision)] += 1
             return
         try:
             key = visit_key(item.url)

@@ -57,6 +57,81 @@ class Settings:
     workflows an installation mostly serves is an installation's business.
     """
 
+    respect_robots: bool = True
+    """Whether a crawl obeys the ``/robots.txt`` of the hosts it visits.
+
+    On. A crawl follows links now, and something that fetches many pages
+    unattended is a bot however it was started; robots.txt is the convention
+    bots are held to. It is also never silent — a refused URL is counted under
+    its own reason in the report — and it is one flag to turn off for the run
+    where somebody has decided otherwise.
+
+    This governs *crawling* only. A download is an explicit act on a resource a
+    person named, and no provider consults robots.txt.
+    """
+
+    robots_user_agent: str = ""
+    """Which product token ``robots.txt`` groups are matched against.
+
+    Empty means "derive it from :attr:`user_agent`", which is right unless the
+    header has been customized into something whose first word is not this
+    crawler's name.
+    """
+
+    robots_timeout: float = 10.0
+    """Seconds to wait for a ``robots.txt``.
+
+    Shorter than :attr:`network_timeout`, because this request is overhead
+    rather than the work, and a host that is slow to serve one file should cost
+    a crawl seconds rather than half a minute per host.
+    """
+
+    robots_deny_on_error: bool = True
+    """Whether a ``robots.txt`` we could not reach means "do not crawl".
+
+    RFC 9309 says to assume complete disallow when a host answers 5xx or does
+    not answer at all: not knowing what a site permits is not permission. Off
+    turns that into "carry on", which is a decision an operator may make and
+    this program may not make for them.
+    """
+
+    crawl_delay: float = 0.0
+    """Seconds to leave between two requests to the same host.
+
+    Zero: no artificial delay nobody asked for. A host that wants to be crawled
+    slowly says so in its ``robots.txt``, and that *is* honoured — see
+    :attr:`respect_crawl_delay`. Raise this to be slower than any site asked.
+    """
+
+    respect_crawl_delay: bool = True
+    """Whether a host's own ``Crawl-delay`` is honoured when it states one."""
+
+    max_crawl_delay: float = 30.0
+    """The longest ``Crawl-delay`` that will be obeyed before it is clamped.
+
+    A stranger's file must not be able to freeze a crawl. Above this, the
+    request is spaced by this instead — which is still polite and still ends.
+    """
+
+    allow_private_networks: bool = False
+    """Whether a crawl may reach loopback, this network, or link-local space.
+
+    Off. The web interface accepts a URL from whoever is looking at it, and a
+    browser can be pointed at a form by any page it visits, so *"fetch
+    http://localhost:9200/"* is a request that arrives on its own. Turning this
+    on stays possible for an operator crawling their own network — and never
+    opens a cloud metadata service, which is a different decision.
+    """
+
+    private_network_allowlist: tuple[str, ...] = ()
+    """Hosts, addresses, or CIDR blocks exempt from the private-network rule.
+
+    The fine-grained escape, so that crawling one machine on a home network
+    does not mean opening the whole of it. An entry may be a host name
+    (``wiki.local``), an address (``192.168.1.20``), or a block
+    (``10.0.0.0/8``).
+    """
+
     def __post_init__(self) -> None:
         if not self.user_agent.strip():
             msg = "user_agent must not be empty"
@@ -94,6 +169,15 @@ class Settings:
         if self.crawl_max_pages < 1:
             msg = "crawl_max_pages must be at least 1"
             raise ValueError(msg)
+        if self.robots_timeout <= 0:
+            msg = "robots_timeout must be positive"
+            raise ValueError(msg)
+        if self.crawl_delay < 0:
+            msg = "crawl_delay must not be negative"
+            raise ValueError(msg)
+        if self.max_crawl_delay < 0:
+            msg = "max_crawl_delay must not be negative"
+            raise ValueError(msg)
 
     @classmethod
     def from_toml(cls, path: Path = DEFAULT_CONFIG_PATH) -> "Settings":
@@ -128,6 +212,25 @@ class Settings:
             crawl_same_domain=_bool_value(
                 app_config, "crawl_same_domain", defaults.crawl_same_domain
             ),
+            respect_robots=_bool_value(app_config, "respect_robots", defaults.respect_robots),
+            robots_user_agent=_string_value(
+                app_config, "robots_user_agent", defaults.robots_user_agent
+            ),
+            robots_timeout=_float_value(app_config, "robots_timeout", defaults.robots_timeout),
+            robots_deny_on_error=_bool_value(
+                app_config, "robots_deny_on_error", defaults.robots_deny_on_error
+            ),
+            crawl_delay=_float_value(app_config, "crawl_delay", defaults.crawl_delay),
+            respect_crawl_delay=_bool_value(
+                app_config, "respect_crawl_delay", defaults.respect_crawl_delay
+            ),
+            max_crawl_delay=_float_value(app_config, "max_crawl_delay", defaults.max_crawl_delay),
+            allow_private_networks=_bool_value(
+                app_config, "allow_private_networks", defaults.allow_private_networks
+            ),
+            private_network_allowlist=_string_list_value(
+                app_config, "private_network_allowlist", defaults.private_network_allowlist
+            ),
         )
 
     def to_toml(self) -> str:
@@ -148,6 +251,15 @@ class Settings:
             f"crawl_depth = {self.crawl_depth}\n"
             f"crawl_max_pages = {self.crawl_max_pages}\n"
             f"crawl_same_domain = {str(self.crawl_same_domain).lower()}\n"
+            f"respect_robots = {str(self.respect_robots).lower()}\n"
+            f'robots_user_agent = "{self.robots_user_agent}"\n'
+            f"robots_timeout = {self.robots_timeout}\n"
+            f"robots_deny_on_error = {str(self.robots_deny_on_error).lower()}\n"
+            f"crawl_delay = {self.crawl_delay}\n"
+            f"respect_crawl_delay = {str(self.respect_crawl_delay).lower()}\n"
+            f"max_crawl_delay = {self.max_crawl_delay}\n"
+            f"allow_private_networks = {str(self.allow_private_networks).lower()}\n"
+            f"private_network_allowlist = {_toml_array(self.private_network_allowlist)}\n"
         )
 
 
@@ -173,6 +285,24 @@ def _bool_value(values: dict[str, Any], key: str, default: bool) -> bool:
         msg = f"{key} must be true or false"
         raise ValueError(msg)
     return value
+
+
+def _string_list_value(
+    values: dict[str, Any], key: str, default: tuple[str, ...]
+) -> tuple[str, ...]:
+    value = values.get(key, default)
+    if isinstance(value, str) or not isinstance(value, list | tuple):
+        msg = f"{key} must be a list of strings"
+        raise ValueError(msg)
+    if any(not isinstance(entry, str) for entry in value):
+        msg = f"{key} must be a list of strings"
+        raise ValueError(msg)
+    return tuple(value)
+
+
+def _toml_array(values: tuple[str, ...]) -> str:
+    """Return *values* as a TOML array of strings."""
+    return "[" + ", ".join(f'"{value}"' for value in values) + "]"
 
 
 def _float_value(values: dict[str, Any], key: str, default: float) -> float:

@@ -152,6 +152,16 @@ class DownloadReport:
         return self._with(DownloadStatus.FAILED)
 
     @property
+    def cancelled(self) -> tuple[DownloadOutcome, ...]:
+        """Return the jobs somebody asked to stop.
+
+        Kept apart from :attr:`failed` on purpose: a run that was stopped is
+        not a run that broke, and a caller deciding what to tell a person needs
+        to be able to tell those two apart.
+        """
+        return self._with(DownloadStatus.CANCELLED)
+
+    @property
     def bytes_written(self) -> int:
         """Return how many bytes this run actually stored."""
         return sum(outcome.bytes_written for outcome in self.outcomes)
@@ -161,9 +171,10 @@ class DownloadReport:
         """Return whether the run left nothing unaccounted for.
 
         A skipped download counts as a success; an unresolved source does not,
-        because the user asked for something that did not happen.
+        because the user asked for something that did not happen. Neither does
+        a cancelled one — nothing went wrong, but the resource is not here.
         """
-        return not self.failed and not self.unresolved
+        return not self.failed and not self.cancelled and not self.unresolved
 
     def _with(self, status: DownloadStatus) -> tuple[DownloadOutcome, ...]:
         """Return the outcomes in *status*, in the order they were produced."""

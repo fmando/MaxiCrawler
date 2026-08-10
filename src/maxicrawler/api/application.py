@@ -80,9 +80,9 @@ def create_app(
 
         Without waiting: a crawl asked to stop finishes the page it is on, and a
         shutdown that blocked on a slow fetch would look like a hang. A transfer
-        already moving is not interrupted at all — there is no cooperative stop
-        yet — but an abandoned one leaves no half file in the library, because
-        content becomes visible only once it is whole.
+        stops at its next chunk, which is as close to immediate as a cooperative
+        stop gets — and leaves no half file either way, because content becomes
+        visible only once it is whole.
         """
         try:
             yield
@@ -113,6 +113,12 @@ def create_app(
                 routes.download_detail,
                 methods=["GET"],
                 name="download_detail",
+            ),
+            Route(
+                "/downloads/{download_id}/stop",
+                routes.stop_download,
+                methods=["POST"],
+                name="stop_download",
             ),
             Route(
                 "/downloads/{download_id}/events",

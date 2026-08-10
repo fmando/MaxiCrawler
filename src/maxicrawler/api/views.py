@@ -90,8 +90,14 @@ STATUS_LABELS: dict[DownloadStatus, str] = {
     DownloadStatus.COMPLETED: "completed",
     DownloadStatus.SKIPPED: "already stored",
     DownloadStatus.FAILED: "failed",
+    DownloadStatus.CANCELLED: "stopped",
 }
-"""A skipped download is not a lesser success; it is one that needed no bytes."""
+"""A skipped download is not a lesser success; it is one that needed no bytes.
+
+A stopped one is not a failure either. The person reading that word is the
+person who clicked the button, and calling their decision an error is how an
+interface teaches somebody to distrust it.
+"""
 
 STATUS_TONES: dict[DownloadStatus, str] = {
     DownloadStatus.PENDING: "idle",
@@ -99,6 +105,7 @@ STATUS_TONES: dict[DownloadStatus, str] = {
     DownloadStatus.COMPLETED: "good",
     DownloadStatus.SKIPPED: "good",
     DownloadStatus.FAILED: "bad",
+    DownloadStatus.CANCELLED: "idle",
 }
 
 KIND_LABELS: dict[LinkKind, str] = {
@@ -733,6 +740,61 @@ def settings_view(settings: Settings) -> tuple[dict[str, Any], ...]:
                     "max_links",
                     format_number(settings.max_links),
                     "How many links one page may contribute.",
+                ),
+            ),
+        },
+        {
+            "heading": "Responsible crawling",
+            "rows": (
+                _setting(
+                    "respect_robots",
+                    _toml_bool(settings.respect_robots),
+                    "Obey each host's robots.txt. A URL it forbids is reported as skipped.",
+                ),
+                _setting(
+                    "robots_user_agent",
+                    settings.robots_user_agent or "(from user_agent)",
+                    "Which product token robots.txt groups are matched against.",
+                ),
+                _setting(
+                    "robots_timeout",
+                    f"{settings.robots_timeout:g} s",
+                    "How long to wait for a robots.txt before giving up on it.",
+                ),
+                _setting(
+                    "robots_deny_on_error",
+                    _toml_bool(settings.robots_deny_on_error),
+                    "A host we could not reach is treated as forbidding everything.",
+                ),
+                _setting(
+                    "crawl_delay",
+                    f"{settings.crawl_delay:g} s",
+                    "Waiting between requests to one host. Zero adds no delay of our own.",
+                ),
+                _setting(
+                    "respect_crawl_delay",
+                    _toml_bool(settings.respect_crawl_delay),
+                    "Honour a Crawl-delay a host states for itself.",
+                ),
+                _setting(
+                    "max_crawl_delay",
+                    f"{settings.max_crawl_delay:g} s",
+                    "The longest such delay obeyed, so one file cannot freeze a crawl.",
+                ),
+            ),
+        },
+        {
+            "heading": "Private networks",
+            "rows": (
+                _setting(
+                    "allow_private_networks",
+                    _toml_bool(settings.allow_private_networks),
+                    "Off, so a URL from a browser cannot reach this machine or this network.",
+                ),
+                _setting(
+                    "private_network_allowlist",
+                    ", ".join(settings.private_network_allowlist) or "(none)",
+                    "Hosts, addresses or blocks exempt from that rule.",
                 ),
             ),
         },

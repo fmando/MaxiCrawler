@@ -132,7 +132,7 @@ class WebDiscoveryService:
         decision = self._policy.may_fetch(url)
         if not decision.allowed:
             message = f"refused by the crawl policy: {decision.reason or 'no reason given'}"
-            raise PolicyRefusedError(message)
+            raise PolicyRefusedError(message, rule=decision.rule)
         page = self._fetcher.fetch(url)
         text, encoding = decode_body(page.body, declared=page.declared_charset)
         parsed = self._parser.parse(text)

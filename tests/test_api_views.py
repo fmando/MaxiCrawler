@@ -584,6 +584,7 @@ def make_stored_crawl(**kwargs: object):  # type: ignore[no-untyped-def]
         "max_pages": 50,
         "same_domain": True,
         "include_subdomains": False,
+        "respect_robots": True,
         "pages_visited": 28,
         "pages_failed": 2,
         "pages_attempted": 31,

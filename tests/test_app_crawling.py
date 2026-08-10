@@ -10,7 +10,9 @@ from maxicrawler.app import CrawlService
 from maxicrawler.cli import app
 from maxicrawler.config import Settings
 from maxicrawler.events import CrawlFinished, EventBus, PageCrawled, UrlDiscovered
+from maxicrawler.web import PolicyRefusedError, PolicyRule
 from maxicrawler.web.engine import CrawlEngine
+from maxicrawler.web.report import SkipReason
 from maxicrawler.web.session import CrawlControl, CrawlState
 
 runner = CliRunner()
@@ -33,8 +35,20 @@ def make_site() -> Site:
 
 
 def make_service(**settings: object) -> CrawlService:
-    """Return a service over throwaway settings."""
-    return CrawlService(Settings(user_agent="MaxiCrawler/test", **settings))  # type: ignore[arg-type]
+    """Return a service over throwaway settings.
+
+    Loopback is allowed, because the site every test here crawls is on
+    127.0.0.1 and the shipped default refuses that. Stating it in one place
+    rather than turning the guard off globally is the point: a test that wants
+    the guard's own behaviour builds a service without this.
+    """
+    return CrawlService(make_settings(**settings))
+
+
+def make_settings(**settings: object) -> Settings:
+    """Return throwaway settings that may reach the local test server."""
+    settings.setdefault("allow_private_networks", True)
+    return Settings(user_agent="MaxiCrawler/test", **settings)  # type: ignore[arg-type]
 
 
 # --- building a session ------------------------------------------------------
@@ -214,7 +228,7 @@ def test_persisting_writes_both_tables(tmp_path: Path) -> None:
     from maxicrawler.database import SQLiteCrawlRepository, SQLiteDatabase
 
     database = tmp_path / "urls.db"
-    service = CrawlService(Settings(user_agent="MaxiCrawler/test", database_path=database))
+    service = CrawlService(make_settings(database_path=database))
 
     with serve(make_site()) as base:
         session = service.build_session(f"{base}/", depth=1, same_domain=True)
@@ -227,7 +241,7 @@ def test_persisting_writes_both_tables(tmp_path: Path) -> None:
 
 def test_not_persisting_writes_nothing(tmp_path: Path) -> None:
     database = tmp_path / "urls.db"
-    service = CrawlService(Settings(user_agent="MaxiCrawler/test", database_path=database))
+    service = CrawlService(make_settings(database_path=database))
 
     with serve(make_site()) as base:
         service.run(service.build_session(f"{base}/", same_domain=True), persist=False)
@@ -239,9 +253,7 @@ def test_not_persisting_writes_nothing(tmp_path: Path) -> None:
 
 
 def test_a_recorded_crawl_can_be_asked_for_its_urls(tmp_path: Path) -> None:
-    service = CrawlService(
-        Settings(user_agent="MaxiCrawler/test", database_path=tmp_path / "urls.db")
-    )
+    service = CrawlService(make_settings(database_path=tmp_path / "urls.db"))
 
     with serve(make_site()) as base:
         session = service.build_session(f"{base}/", depth=2, same_domain=True)
@@ -254,9 +266,7 @@ def test_a_recorded_crawl_can_be_asked_for_its_urls(tmp_path: Path) -> None:
 
 
 def test_recorded_urls_name_the_plugin_that_claimed_them(tmp_path: Path) -> None:
-    service = CrawlService(
-        Settings(user_agent="MaxiCrawler/test", database_path=tmp_path / "urls.db")
-    )
+    service = CrawlService(make_settings(database_path=tmp_path / "urls.db"))
 
     with serve(make_site()) as base:
         session = service.build_session(f"{base}/", depth=2, same_domain=True)
@@ -269,9 +279,7 @@ def test_recorded_urls_name_the_plugin_that_claimed_them(tmp_path: Path) -> None
 
 def test_a_crawl_that_did_not_persist_recorded_no_urls(tmp_path: Path) -> None:
     """Which the interface must not confuse with a crawl that found none."""
-    service = CrawlService(
-        Settings(user_agent="MaxiCrawler/test", database_path=tmp_path / "urls.db")
-    )
+    service = CrawlService(make_settings(database_path=tmp_path / "urls.db"))
 
     with serve(make_site()) as base:
         session = service.build_session(f"{base}/", depth=2, same_domain=True)
@@ -282,9 +290,7 @@ def test_a_crawl_that_did_not_persist_recorded_no_urls(tmp_path: Path) -> None:
 
 
 def test_asking_for_an_unknown_crawl_is_not_an_error(tmp_path: Path) -> None:
-    service = CrawlService(
-        Settings(user_agent="MaxiCrawler/test", database_path=tmp_path / "urls.db")
-    )
+    service = CrawlService(make_settings(database_path=tmp_path / "urls.db"))
 
     assert service.discovered_urls("no-such-crawl") == ()
     assert service.stored_crawl("no-such-crawl") is None
@@ -292,7 +298,7 @@ def test_asking_for_an_unknown_crawl_is_not_an_error(tmp_path: Path) -> None:
 
 def test_a_crawl_outlives_the_process_that_ran_it(tmp_path: Path) -> None:
     """What lets a later server show a crawl it never started."""
-    settings = Settings(user_agent="MaxiCrawler/test", database_path=tmp_path / "urls.db")
+    settings = make_settings(database_path=tmp_path / "urls.db")
 
     with serve(make_site()) as base:
         session = CrawlService(settings).build_session(f"{base}/", depth=1, same_domain=True)
@@ -306,6 +312,131 @@ def test_a_crawl_outlives_the_process_that_ran_it(tmp_path: Path) -> None:
     assert later.finished_at is not None
 
 
+# --- responsible crawling, as the service assembles it ------------------------
+
+
+def robots(document: str) -> dict[str, object]:
+    """Return the route arguments serving *document* as a robots.txt."""
+    return {"body": document.encode("utf-8"), "content_type": "text/plain"}
+
+
+def test_a_crawl_obeys_the_robots_txt_of_the_host_it_visits() -> None:
+    """The whole sprint, seen from outside: nothing here mentions robots.txt."""
+    service = make_service()
+    site = make_site()
+    site.add("/robots.txt", **robots("User-agent: *\nDisallow: /a\n"))
+
+    with serve(site) as base:
+        report = service.run(
+            service.build_session(f"{base}/", depth=2, same_domain=True), persist=False
+        )
+
+    assert "/a" not in [page.url.removeprefix(base) for page in report.pages]
+    assert "/b" in [page.url.removeprefix(base) for page in report.pages]
+    assert dict(report.statistics.skips_by_reason)[SkipReason.ROBOTS_TXT] >= 1
+
+
+def test_a_forbidden_url_is_skipped_rather_than_reported_as_a_failure() -> None:
+    service = make_service()
+    site = make_site()
+    site.add("/robots.txt", **robots("User-agent: *\nDisallow: /a\n"))
+
+    with serve(site) as base:
+        report = service.run(
+            service.build_session(f"{base}/", depth=2, same_domain=True), persist=False
+        )
+
+    assert report.failures == ()
+
+
+def test_the_rules_are_read_once_however_many_pages_are_crawled() -> None:
+    service = make_service()
+    site = make_site()
+    site.add("/robots.txt", **robots("User-agent: *\n"))
+
+    with serve(site) as base:
+        service.run(service.build_session(f"{base}/", depth=2, same_domain=True), persist=False)
+
+    assert [request.path for request in site.requests].count("/robots.txt") == 1
+
+
+def test_a_host_with_no_robots_txt_is_crawled_as_before() -> None:
+    """The common case: a 404 leaves a crawler free, and costs one request."""
+    service = make_service()
+
+    with serve(make_site()) as base:
+        report = service.run(
+            service.build_session(f"{base}/", depth=1, same_domain=True), persist=False
+        )
+
+    assert report.pages_visited == 3
+
+
+def test_ignoring_robots_is_possible_and_recorded_on_the_session() -> None:
+    service = make_service()
+    site = make_site()
+    site.add("/robots.txt", **robots("User-agent: *\nDisallow: /\n"))
+
+    with serve(site) as base:
+        session = service.build_session(f"{base}/", depth=1, same_domain=True, respect_robots=False)
+        report = service.run(session, persist=False)
+
+    assert session.options.respect_robots is False
+    assert report.pages_visited == 3
+    assert "/robots.txt" not in [request.path for request in site.requests]
+
+
+def test_a_seed_its_own_site_forbids_ends_the_crawl_by_saying_so() -> None:
+    service = make_service()
+    site = make_site()
+    site.add("/robots.txt", **robots("User-agent: *\nDisallow: /\n"))
+
+    with serve(site) as base, pytest.raises(PolicyRefusedError) as refusal:
+        service.run(service.build_session(f"{base}/"), persist=False)
+
+    assert refusal.value.rule is PolicyRule.ROBOTS
+    assert "robots.txt" in str(refusal.value)
+
+
+def test_a_crawl_records_whether_it_obeyed_robots(tmp_path: Path) -> None:
+    """A setting that has changed since cannot answer this; the row can."""
+    from maxicrawler.database import SQLiteCrawlRepository, SQLiteDatabase
+
+    database = tmp_path / "urls.db"
+    service = CrawlService(make_settings(database_path=database))
+
+    with serve(make_site()) as base:
+        session = service.build_session(f"{base}/", respect_robots=False)
+        service.run(session, persist=True)
+
+    stored = SQLiteCrawlRepository(SQLiteDatabase(database)).stored_crawl(session.session_id)
+    assert stored is not None
+    assert stored.respect_robots is False
+
+
+def test_this_machine_is_refused_by_default() -> None:
+    """The shipped behaviour, asserted without the escape every other test uses.
+
+    A URL now arrives from a browser, and a browser can be pointed at a form by
+    any page it visits.
+    """
+    service = CrawlService(Settings(user_agent="MaxiCrawler/test"))
+
+    with serve(make_site()) as base, pytest.raises(PolicyRefusedError) as refusal:
+        service.run(service.build_session(f"{base}/"), persist=False)
+
+    assert refusal.value.rule is PolicyRule.PRIVATE_NETWORK
+
+
+def test_one_address_can_be_allowed_without_opening_the_rest() -> None:
+    service = make_service(allow_private_networks=False, private_network_allowlist=("127.0.0.1",))
+
+    with serve(make_site()) as base:
+        report = service.run(service.build_session(f"{base}/"), persist=False)
+
+    assert report.pages_visited == 1
+
+
 # --- the CLI is a client of this service, not a second implementation --------
 
 
@@ -316,7 +447,7 @@ def test_the_cli_and_the_service_agree_on_the_same_crawl(tmp_path: Path) -> None
     numbers would drift apart.
     """
     config = tmp_path / "maxicrawler.toml"
-    config.write_text("[maxicrawler]\n", encoding="utf-8")
+    config.write_text("[maxicrawler]\nallow_private_networks = true\n", encoding="utf-8")
     service = make_service()
 
     with serve(make_site()) as base:

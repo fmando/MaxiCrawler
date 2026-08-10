@@ -7,7 +7,14 @@ import pytest
 
 from maxicrawler.crawler import DiscoverySummary, PluginUsage
 from maxicrawler.domain import ScanSession, Statistics
-from maxicrawler.web.report import CrawlReport, CrawlStatistics, PageOutcome, SkipReason
+from maxicrawler.web.policy import PolicyDecision, PolicyRule
+from maxicrawler.web.report import (
+    CrawlReport,
+    CrawlStatistics,
+    PageOutcome,
+    SkipReason,
+    skip_reason_for,
+)
 from maxicrawler.web.session import CrawlOptions, CrawlSession, CrawlState
 
 STARTED = datetime(2026, 8, 7, tzinfo=UTC)
@@ -168,6 +175,49 @@ def test_statistics_without_skips_report_none() -> None:
 
 def test_a_skip_reason_renders_as_readable_text() -> None:
     assert str(SkipReason.OUT_OF_SCOPE) == "out of scope"
+
+
+# --- reading a policy's answer in a report's words ----------------------------
+
+
+@pytest.mark.parametrize(
+    ("rule", "expected"),
+    [
+        (PolicyRule.SCOPE, SkipReason.OUT_OF_SCOPE),
+        (PolicyRule.ROBOTS, SkipReason.ROBOTS_TXT),
+        (PolicyRule.PRIVATE_NETWORK, SkipReason.PRIVATE_NETWORK),
+    ],
+)
+def test_every_rule_is_counted_under_its_own_reason(rule: PolicyRule, expected: SkipReason) -> None:
+    assert skip_reason_for(PolicyDecision.refuse("no", rule=rule)) is expected
+
+
+def test_out_of_scope_and_robots_are_two_different_answers() -> None:
+    """The distinction the whole enum exists for.
+
+    "I chose not to crawl there" and "the site said no" are opposite claims
+    about who decided, and a reader who cannot tell them apart cannot tell a
+    narrow crawl from a refused one.
+    """
+    scope = skip_reason_for(PolicyDecision.refuse("outside example.org"))
+    robots = skip_reason_for(PolicyDecision.refuse("disallowed", rule=PolicyRule.ROBOTS))
+
+    assert scope is not robots
+
+
+def test_no_rule_can_arrive_without_a_decision_about_counting_it() -> None:
+    """The tripwire that keeps the mapping total.
+
+    A `PolicyRule` added later fails here rather than raising a `KeyError` in
+    the middle of somebody's crawl.
+    """
+    for rule in PolicyRule:
+        assert isinstance(skip_reason_for(PolicyDecision.refuse("no", rule=rule)), SkipReason)
+
+
+def test_a_permitted_fetch_is_not_a_skip() -> None:
+    with pytest.raises(ValueError, match="not a skip"):
+        skip_reason_for(PolicyDecision.allow())
 
 
 # --- the report --------------------------------------------------------------

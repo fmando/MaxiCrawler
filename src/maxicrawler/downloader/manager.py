@@ -19,7 +19,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from maxicrawler.domain import Checksum, DownloadStatus
-from maxicrawler.downloader.errors import DownloadError
+from maxicrawler.downloader.control import DownloadControl
+from maxicrawler.downloader.errors import DownloadCancelledError, DownloadError
 from maxicrawler.downloader.models import (
     DownloadJob,
     DownloadOutcome,
@@ -44,6 +45,10 @@ from maxicrawler.providers import ProviderError, ProviderRegistry
 Clock = Callable[[], datetime]
 """Injected so timings can be asserted without freezing the real clock."""
 
+STOPPED = "stopped on request"
+"""Said about a transfer nobody wanted finished. Not a failure, and not phrased
+as one: the person reading it is the person who asked."""
+
 
 class DownloadWorker:
     """Executes one job at a time, from the queue to the library.
@@ -66,16 +71,22 @@ class DownloadWorker:
         reporter: ProgressReporter | None = None,
         clock: Clock | None = None,
         algorithm: str = DEFAULT_HASH_ALGORITHM,
+        control: DownloadControl | None = None,
     ) -> None:
         self._providers = providers
         self._library = library
         self._reporter = reporter if reporter is not None else NullProgressReporter()
         self._clock = clock if clock is not None else _utc_now
         self._algorithm = algorithm
+        self._control = control
 
     def execute(self, job: DownloadJob) -> DownloadOutcome:
         """Transfer *job* into the library and report what happened."""
         started = self._clock()
+        if self._control is not None and self._control.stop_requested:
+            # Asked to stop before this job began. Not started rather than
+            # abandoned halfway, but the same answer to whoever asked.
+            return self._finish(job, DownloadStatus.CANCELLED, started, reason=STOPPED)
         entry = self._library.entry(job.ref)
         try:
             record = entry.read()
@@ -108,9 +119,16 @@ class DownloadWorker:
                 entry,
                 algorithm=self._algorithm,
                 on_progress=lambda written: self._reporter.advanced(job, written),
+                control=self._control,
             ) as sink:
                 descriptor = provider.download(job.ref, sink)
                 content = sink.commit()
+        except DownloadCancelledError:
+            # Nothing is recorded. A cancelled transfer leaves the library
+            # exactly as it was, and a stored record saying "failed" would turn
+            # somebody's own decision into a fault they later have to explain —
+            # and would make the next run count an attempt nobody made.
+            return self._finish(job, DownloadStatus.CANCELLED, started, reason=STOPPED)
         except (ProviderError, LibraryError, DownloadError, OSError) as error:
             reason = str(error)
             self._store(
@@ -222,6 +240,7 @@ class DownloadManager:
         worker: DownloadWorker | None = None,
         reporter: ProgressReporter | None = None,
         clock: Clock | None = None,
+        control: DownloadControl | None = None,
     ) -> None:
         self._providers = providers
         self._library = library
@@ -232,10 +251,13 @@ class DownloadManager:
             if planner is not None
             else DownloadPlanner(providers, clock=clock if clock is not None else _utc_now)
         )
+        self._control = control
         self._worker = (
             worker
             if worker is not None
-            else DownloadWorker(providers, library, reporter=self._reporter, clock=clock)
+            else DownloadWorker(
+                providers, library, reporter=self._reporter, clock=clock, control=control
+            )
         )
 
     @property
@@ -261,6 +283,11 @@ class DownloadManager:
         The queue is drained by a single worker. Replacing this loop with a
         thread pool is the whole of what parallel downloading needs: the queue
         is already guarded and the worker already holds no state between jobs.
+
+        A stop is honoured between jobs *and* inside one — the worker checks
+        before it starts, the sink checks on every chunk. A link that turned
+        out to be a folder of two hundred files therefore stops at the file it
+        is on rather than after all of them.
         """
         self._library.initialize()
         queue = DownloadQueue(plan.jobs)

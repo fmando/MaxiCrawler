@@ -20,6 +20,13 @@ lets the web interface show a transfer without importing ``downloader``,
 ``providers`` or ``library`` — the boundary ``tests/test_api_boundaries.py``
 reads rather than believes.
 
+The one exception is :class:`~maxicrawler.downloader.control.DownloadControl`,
+and it is re-exported here rather than reached for. A client that offers a Stop
+button needs the handle *before* the transfer starts, so there is nothing this
+layer could hand back instead; what it can do is make sure the interface still
+imports from one place. It is a handle, not a result — nothing about how a
+download runs travels with it.
+
 **Reading the library is somebody else's job.**
 :class:`~maxicrawler.app.library.LibraryService` browses what is stored; this
 service puts things there. Two questions about one store, kept apart so that
@@ -39,6 +46,7 @@ from pathlib import Path
 from maxicrawler.config import Settings
 from maxicrawler.domain import DownloadStatus, ProviderCapability, UrlRecord
 from maxicrawler.downloader import (
+    DownloadControl,
     DownloadJob,
     DownloadManager,
     DownloadOutcome,
@@ -67,6 +75,15 @@ The same contract :class:`~maxicrawler.api.jobs.CrawlJob` listeners are under,
 and for the same reason: whatever this hands its value to, it hands it and
 returns.
 """
+
+__all__ = [
+    "NOTHING_TO_DOWNLOAD",
+    "DownloadControl",
+    "DownloadProgress",
+    "DownloadService",
+    "DownloadSummary",
+    "ProgressListener",
+]
 
 NOTHING_TO_DOWNLOAD = "the link led to nothing that can be downloaded"
 """Said when a source produced no jobs and named no reason of its own."""
@@ -176,6 +193,7 @@ class DownloadService:
         output: Path | None = None,
         reporter: ProgressReporter | None = None,
         max_entries: int | None = None,
+        control: DownloadControl | None = None,
     ) -> DownloadManager:
         """Return a download manager wired from the configuration.
 
@@ -187,9 +205,16 @@ class DownloadService:
             self._providers(max_entries=max_entries),
             self._library(output),
             reporter=reporter if reporter is not None else NullProgressReporter(),
+            control=control,
         )
 
-    def download(self, url: str, *, on_progress: ProgressListener | None = None) -> DownloadSummary:
+    def download(
+        self,
+        url: str,
+        *,
+        on_progress: ProgressListener | None = None,
+        control: DownloadControl | None = None,
+    ) -> DownloadSummary:
         """Download exactly what *url* points at, and report what happened.
 
         One link in, one account out. A dead share, a host nobody supports, a
@@ -201,13 +226,17 @@ class DownloadService:
         handle. That costs one request and is what a deliberate single download
         can afford; a run over a document full of links deliberately does not.
 
+        A *control* makes the transfer stoppable. It is honoured on every chunk,
+        so a stop takes effect within one chunk rather than at the end of the
+        file, and the library is left exactly as it was.
+
         Raises:
             ValueError: *url* is not an absolute HTTP(S) URL; see
                 :meth:`require_url`.
         """
         target = self.require_url(url)
         reporter = _ListenerReporter(on_progress)
-        manager = self.build_manager(reporter=reporter)
+        manager = self.build_manager(reporter=reporter, control=control)
         plan = manager.plan(target, inspect_files=True)
         reporter.observe(plan)
         return _summarize(manager.run(plan), url=strip_fragment(target))
@@ -383,12 +412,18 @@ def _summarize(report: DownloadReport, *, url: str) -> DownloadSummary:
 
     A link that turned out to be a folder is one request holding several
     transfers, so the counts are plural and the status is the verdict over all
-    of them: anything failed makes the request failed, everything skipped makes
-    it skipped, and the rest is a completed download.
+    of them: anything failed makes the request failed, anything stopped makes it
+    stopped, everything skipped makes it skipped, and the rest is a completed
+    download.
+
+    Stopped outranks completed but not failed. A folder whose third file broke
+    and whose fourth was cancelled did both, and the one worth telling somebody
+    about is the one they did not choose.
     """
     completed = report.completed
     skipped = report.skipped
     failed = report.failed
+    cancelled = report.cancelled
     if not report.plan.jobs:
         reason = report.unresolved[0].reason if report.unresolved else NOTHING_TO_DOWNLOAD
         return DownloadSummary(
@@ -403,6 +438,8 @@ def _summarize(report: DownloadReport, *, url: str) -> DownloadSummary:
     status = DownloadStatus.COMPLETED
     if failed:
         status = DownloadStatus.FAILED
+    elif cancelled:
+        status = DownloadStatus.CANCELLED
     elif skipped and not completed:
         status = DownloadStatus.SKIPPED
     return DownloadSummary(
@@ -426,6 +463,8 @@ def _summarize(report: DownloadReport, *, url: str) -> DownloadSummary:
 def _reason(report: DownloadReport) -> str | None:
     """Return the one line explaining a run that was not a plain success."""
     for outcome in report.failed:
+        return outcome.reason
+    for outcome in report.cancelled:
         return outcome.reason
     if report.unresolved:
         return report.unresolved[0].reason

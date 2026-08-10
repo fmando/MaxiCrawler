@@ -13,6 +13,17 @@
   <h2>
     <span class="badge {{ download.state_tone }}" id="download-state">{{ download.state_label }}</span>
     <span class="url">{{ download.label }}</span>
+
+    {% if not download.is_finished %}
+      {#
+        A plain form, like the one on a crawl, so the button works with
+        scripting switched off. This stop is nearly instant -- the transfer
+        checks on every chunk -- and nothing half-written is left behind.
+      #}
+      <form class="stop" method="post" action="/downloads/{{ download.download_id }}/stop">
+        <button type="submit">Stop</button>
+      </form>
+    {% endif %}
   </h2>
 
   <div class="body">

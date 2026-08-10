@@ -90,6 +90,28 @@ Die Weboberfläche ist ein **optionales** Extra (`pip install "maxicrawler[web]"
 Ohne sie funktioniert jeder Befehl außer `serve`, und `serve` erklärt in einem
 Satz, was fehlt.
 
+## Verantwortungsvolles Crawlen
+
+Seit Sprint 13 ist ein Crawl standardmäßig höflich, und zwar ohne dass eine der
+bestehenden Stationen davon weiß. Alles davon wird in
+`CrawlService.build_engine` zusammengesetzt — dem einzigen Ort, an dem es
+zusammengesetzt wird:
+
+```text
+CrawlEngine ── policy ──→ PrivateNetworkPolicy (rein)         beim Finden
+            └─ gate   ──→ PrivateNetworkPolicy (auflösend)    vor der Anfrage
+                          RobotsPolicy ─────────────┐
+                                                    │ delay_for
+WebDiscoveryService ── ThrottledFetcher ────────────┘
+                       └─ HostSchedule (geteilt)
+                       └─ UrllibPageFetcher ── guard pro Weiterleitung
+```
+
+Jedes Teil ist für sich wirkungslos: eine Robots-Policy, die niemand fragt, eine
+Drossel ohne Verzögerung, ein Netzwerkschutz, den niemand konsultiert. Beide
+Clients bekommen das Verhalten, weil beide durch `maxicrawler.app` gehen — und
+genau deshalb baut keiner von ihnen selbst eine Engine.
+
 ## Der erste vollständige Ablauf
 
 Seit Sprint 11 führt die Weboberfläche die ganze Kette einmal durch:
@@ -138,6 +160,20 @@ weiß.
 -   Ein Abruf ist in jeder Dimension begrenzt: Schema, Umleitungen, Content-Type,
     Antwortgröße vor **und** nach dem Entpacken.
 -   Höflichkeit ist ein Policy-Objekt, keine Bedingung in der Abrufschleife.
+-   Eine Policy, die eine Anfrage stellen kann, wird genau einmal befragt:
+    unmittelbar vor der Anfrage, die sie bewacht. Eine reine Policy wird beim
+    Finden der URL befragt, damit der Frontier sauber bleibt. Beide Tore zählen
+    über dieselbe Übersetzung, also gibt es weiterhin genau ein Vokabular für
+    „warum nicht".
+-   Warten ist keine Policy. *„Darf ich das holen?"* und *„darf ich es schon
+    holen?"* sind zwei Fragen; die zweite gehört in einen `PageFetcher`-Decorator,
+    und über ihm steht kein `sleep`.
+-   robots.txt, Scope und Netzwerkschutz entscheidet ausschließlich die Policy.
+    Weder Engine noch Fetcher erfahren, was eine robots-Regel oder eine interne
+    Adresse ist; der Fetcher bekommt für jede Weiterleitung eine Funktion, die
+    wirft, und keine Policy.
+-   robots.txt regelt das Crawlen. Kein Provider fragt sie: ein Download ist eine
+    ausdrückliche Handlung an einer benannten Ressource.
 -   Der Crawler holt genau eine Seite. Rekursion ist Sache des Aufrufers — der
     `CrawlEngine` ist eine Schleife *über* dem Crawler, nie eine Änderung darin.
 -   Der Frontier bestimmt die Reihenfolge, das VisitedSet die Identität. Nie
@@ -166,6 +202,10 @@ weiß.
 -   `maxicrawler.api` importiert weder `providers` noch `downloader` noch
     `library` und baut weder einen Crawl- noch einen Download-Objektgraphen
     selbst.
+-   Ein laufender Download wird in der Senke abgebrochen, nicht im Manager und
+    nicht im Provider: dort laufen die Bytes jedes Providers ohnehin vorbei, und
+    dort ist bereits garantiert, dass ein unfertiger Transfer nichts hinterlässt.
+    Ein abgebrochener Download schreibt kein Metadatendokument.
 -   Ein Download aus dem Browser ist ausschließlich eine absolute HTTP(S)-URL.
     Ein Pfad wäre eine Aufforderung an den Server, auf fremden Klick die eigene
     Platte zu lesen; `DownloadService.require_url` ist die einzige Stelle, die

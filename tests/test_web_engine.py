@@ -18,7 +18,7 @@ from maxicrawler.web import (
 )
 from maxicrawler.web.engine import CrawlEngine
 from maxicrawler.web.frontier import CrawlItem, FifoFrontier, visit_key
-from maxicrawler.web.policy import PolicyDecision, SameDomainPolicy
+from maxicrawler.web.policy import PolicyDecision, PolicyRule, SameDomainPolicy
 from maxicrawler.web.report import CrawlReport, SkipReason
 from maxicrawler.web.session import CrawlControl, CrawlOptions, CrawlSession, CrawlState
 
@@ -590,6 +590,133 @@ def test_an_injected_policy_is_asked_alongside_the_domain_option() -> None:
 
     assert "/a1" not in visited_paths(report, base)
     assert "/b1" in visited_paths(report, base)
+
+
+def test_a_refusal_is_counted_under_the_rule_that_refused_it() -> None:
+    """The gate translates the decision rather than assuming what said no.
+
+    Without this the report would file every refusal under "out of scope",
+    which is the one thing robots.txt must not be confused with.
+    """
+
+    class RefuseLeaves:
+        def may_fetch(self, url: str) -> PolicyDecision:
+            if url.endswith("/a1"):
+                return PolicyDecision.refuse("pretend robots", rule=PolicyRule.ROBOTS)
+            return PolicyDecision.allow()
+
+    with serve(make_site()) as base:
+        engine = make_engine(policy=RefuseLeaves())
+        report = engine.run(make_session(f"{base}/", max_depth=3))
+
+    skips = dict(report.statistics.skips_by_reason)
+    assert skips[SkipReason.ROBOTS_TXT] == 1
+    assert SkipReason.OUT_OF_SCOPE not in skips
+
+
+# --- the second gate, immediately before the request -------------------------
+
+
+class RecordingGate:
+    """A gate that refuses the paths it was given, and remembers every ask."""
+
+    def __init__(self, *refused: str) -> None:
+        self._refused = refused
+        self.asked: list[str] = []
+
+    def may_fetch(self, url: str) -> PolicyDecision:
+        self.asked.append(url)
+        if any(url.endswith(path) for path in self._refused):
+            return PolicyDecision.refuse("pretend robots", rule=PolicyRule.ROBOTS)
+        return PolicyDecision.allow()
+
+
+def test_the_gate_refuses_a_page_and_the_crawl_carries_on() -> None:
+    gate = RecordingGate("/a")
+
+    with serve(make_site()) as base:
+        report = make_engine(gate=gate).run(make_session(f"{base}/", max_depth=2))
+
+    assert "/a" not in visited_paths(report, base)
+    assert "/b" in visited_paths(report, base)
+    assert dict(report.statistics.skips_by_reason)[SkipReason.ROBOTS_TXT] == 1
+
+
+def test_the_gate_is_asked_only_about_urls_that_are_genuinely_next() -> None:
+    """The whole reason the second gate exists.
+
+    At the first gate, a policy that reads robots.txt would be asked about
+    every URL a page links to — a page linking to three hundred domains would
+    cost three hundred requests to then crawl a handful. Here it is asked once
+    per page actually taken off the frontier, which is what `max_pages` bounds.
+    """
+    gate = RecordingGate()
+
+    with serve(make_site()) as base:
+        report = make_engine(gate=gate).run(make_session(f"{base}/", max_depth=1, max_pages=2))
+
+    assert len(gate.asked) == len(report.pages) == 2
+
+
+def test_a_page_the_gate_refuses_does_not_spend_the_page_ceiling() -> None:
+    """It never became a request, and the ceiling counts requests."""
+    gate = RecordingGate("/a")
+
+    with serve(make_site()) as base:
+        report = make_engine(gate=gate).run(make_session(f"{base}/", max_depth=1, max_pages=3))
+
+    assert sorted(visited_paths(report, base)) == ["/", "/b"]
+    assert report.statistics.pages_attempted == 2
+
+
+def test_a_seed_the_gate_refuses_ends_the_crawl_with_its_rule() -> None:
+    gate = RecordingGate("/")
+
+    with serve(make_site()) as base, pytest.raises(PolicyRefusedError) as refusal:
+        make_engine(gate=gate).run(make_session(f"{base}/"))
+
+    assert refusal.value.rule is PolicyRule.ROBOTS
+    assert "disallowed by robots.txt" in str(refusal.value)
+
+
+def test_a_rule_that_says_no_during_the_fetch_is_a_skip_rather_than_a_failure() -> None:
+    """What a refused redirect looks like from up here.
+
+    The gate cannot see where a URL will end up, so a destination rule fires
+    mid-fetch. Nothing broke -- we declined -- so it is counted like any other
+    refusal instead of being reported as a page that could not be read.
+    """
+
+    class RefusingService:
+        def __init__(self, inner: WebDiscoveryService) -> None:
+            self._inner = inner
+            self.start = inner.start
+            self.finish = inner.finish
+
+        def crawl_page(self, url: str, session: object) -> object:
+            if url.endswith("/a"):
+                message = "redirected to somewhere private"
+                raise PolicyRefusedError(message, rule=PolicyRule.PRIVATE_NETWORK)
+            return self._inner.crawl_page(url, session)  # type: ignore[arg-type]
+
+    service = WebDiscoveryService(
+        DiscoveryPipeline(EventBus()),
+        fetcher=UrllibPageFetcher(user_agent="MaxiCrawler/test", timeout=5.0),
+    )
+    engine = CrawlEngine(RefusingService(service))  # type: ignore[arg-type]
+
+    with serve(make_site()) as base:
+        report = engine.run(make_session(f"{base}/", max_depth=1))
+
+    assert "/a" not in visited_paths(report, base)
+    assert report.failures == ()
+    assert dict(report.statistics.skips_by_reason)[SkipReason.PRIVATE_NETWORK] == 1
+
+
+def test_without_a_gate_nothing_is_asked_twice() -> None:
+    """The default gate permits everything, so an unwired engine is unchanged."""
+    with crawl(make_site(), max_depth=1) as (report, base):
+        assert sorted(visited_paths(report, base)) == ["/", "/a", "/b"]
 
 
 # --- what is worth following -------------------------------------------------

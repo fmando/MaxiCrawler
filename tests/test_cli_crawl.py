@@ -43,6 +43,12 @@ TREE = {
 }
 
 
+# Every invocation below passes --allow-private, because the site under test is
+# on 127.0.0.1 and the shipped default refuses to crawl this machine. The flag
+# is the escape an operator crawling their own network would use, so the suite
+# uses it rather than turning the guard off.
+
+
 def make_site(pages: dict[str, str] | None = None) -> Site:
     """Return a local site serving *pages*."""
     site = Site()
@@ -312,7 +318,7 @@ def test_one_page_is_crawled_by_default() -> None:
     site = make_site()
 
     with serve(site) as base:
-        result = runner.invoke(app, ["crawl", f"{base}/", "--no-persist"])
+        result = runner.invoke(app, ["crawl", "--allow-private", f"{base}/", "--no-persist"])
 
     assert result.exit_code == EXIT_CRAWLED
     assert "depth 0" in result.stdout
@@ -325,7 +331,16 @@ def test_a_depth_follows_links() -> None:
 
     with serve(site) as base:
         result = runner.invoke(
-            app, ["crawl", f"{base}/", "--same-domain", "--depth", "2", "--no-persist"]
+            app,
+            [
+                "crawl",
+                "--allow-private",
+                f"{base}/",
+                "--same-domain",
+                "--depth",
+                "2",
+                "--no-persist",
+            ],
         )
 
     assert result.exit_code == EXIT_CRAWLED
@@ -338,7 +353,8 @@ def test_the_short_depth_flag_works() -> None:
 
     with serve(site) as base:
         result = runner.invoke(
-            app, ["crawl", f"{base}/", "-d", "1", "--same-domain", "--no-persist"]
+            app,
+            ["crawl", "--allow-private", f"{base}/", "-d", "1", "--same-domain", "--no-persist"],
         )
 
     assert "Pages visited: 3" in result.stdout
@@ -356,7 +372,9 @@ def test_external_links_are_followed_unless_told_otherwise() -> None:
         elsewhere = f"http://localhost:{base.rsplit(':', 1)[1]}"
         site.add_html("/", f'<a href="{elsewhere}/away">away</a>')
         site.add_html("/away", "<p>elsewhere</p>")
-        result = runner.invoke(app, ["crawl", f"{base}/", "--depth", "1", "--no-persist"])
+        result = runner.invoke(
+            app, ["crawl", "--allow-private", f"{base}/", "--depth", "1", "--no-persist"]
+        )
 
     assert "out of scope" not in result.stdout
     assert "Pages visited: 2" in result.stdout
@@ -367,7 +385,16 @@ def test_same_domain_keeps_the_crawl_at_home() -> None:
 
     with serve(site) as base:
         result = runner.invoke(
-            app, ["crawl", f"{base}/", "--depth", "2", "--same-domain", "--no-persist"]
+            app,
+            [
+                "crawl",
+                "--allow-private",
+                f"{base}/",
+                "--depth",
+                "2",
+                "--same-domain",
+                "--no-persist",
+            ],
         )
 
     assert "same domain" in result.stdout
@@ -382,6 +409,7 @@ def test_the_page_ceiling_is_honoured_and_named() -> None:
             app,
             [
                 "crawl",
+                "--allow-private",
                 f"{base}/",
                 "--same-domain",
                 "--depth",
@@ -402,7 +430,17 @@ def test_a_recursive_crawl_can_report_json() -> None:
 
     with serve(site) as base:
         result = runner.invoke(
-            app, ["crawl", f"{base}/", "--same-domain", "--depth", "1", "--json", "--no-persist"]
+            app,
+            [
+                "crawl",
+                "--allow-private",
+                f"{base}/",
+                "--same-domain",
+                "--depth",
+                "1",
+                "--json",
+                "--no-persist",
+            ],
         )
         document = json.loads(result.stdout)
 
@@ -420,7 +458,17 @@ def test_the_crawl_summary_is_persisted(tmp_path: Path) -> None:
 
     with serve(site) as base:
         result = runner.invoke(
-            app, ["crawl", f"{base}/", "--same-domain", "--depth", "1", "--config", str(config)]
+            app,
+            [
+                "crawl",
+                "--allow-private",
+                f"{base}/",
+                "--same-domain",
+                "--depth",
+                "1",
+                "--config",
+                str(config),
+            ],
         )
 
     assert result.exit_code == EXIT_CRAWLED
@@ -440,7 +488,9 @@ def test_the_defaults_are_configurable(tmp_path: Path) -> None:
     site = make_site()
 
     with serve(site) as base:
-        result = runner.invoke(app, ["crawl", f"{base}/", "--config", str(config), "--no-persist"])
+        result = runner.invoke(
+            app, ["crawl", "--allow-private", f"{base}/", "--config", str(config), "--no-persist"]
+        )
 
     assert "depth 2, same domain, max 2 pages" in result.stdout
 
@@ -452,7 +502,16 @@ def test_a_flag_overrides_the_configured_default(tmp_path: Path) -> None:
 
     with serve(site) as base:
         result = runner.invoke(
-            app, ["crawl", f"{base}/", "--any-domain", "--config", str(config), "--no-persist"]
+            app,
+            [
+                "crawl",
+                "--allow-private",
+                f"{base}/",
+                "--any-domain",
+                "--config",
+                str(config),
+                "--no-persist",
+            ],
         )
 
     assert "any domain" in result.stdout
@@ -463,7 +522,16 @@ def test_one_broken_page_does_not_fail_the_command() -> None:
 
     with serve(site) as base:
         result = runner.invoke(
-            app, ["crawl", f"{base}/", "--same-domain", "--depth", "1", "--no-persist"]
+            app,
+            [
+                "crawl",
+                "--allow-private",
+                f"{base}/",
+                "--same-domain",
+                "--depth",
+                "1",
+                "--no-persist",
+            ],
         )
 
     assert result.exit_code == EXIT_CRAWLED
@@ -474,7 +542,7 @@ def test_a_missing_seed_exits_with_the_fetch_code() -> None:
     site = make_site()
 
     with serve(site) as base:
-        result = runner.invoke(app, ["crawl", f"{base}/nope", "--no-persist"])
+        result = runner.invoke(app, ["crawl", "--allow-private", f"{base}/nope", "--no-persist"])
 
     assert result.exit_code == EXIT_FETCH_FAILED
     assert "HTTP 404" in result.stderr
@@ -485,21 +553,25 @@ def test_a_seed_that_is_not_a_page_has_its_own_exit_code() -> None:
     site.add("/data.json", body=b"{}", content_type="application/json")
 
     with serve(site) as base:
-        result = runner.invoke(app, ["crawl", f"{base}/data.json", "--no-persist"])
+        result = runner.invoke(
+            app, ["crawl", "--allow-private", f"{base}/data.json", "--no-persist"]
+        )
 
     assert result.exit_code == EXIT_NOT_A_PAGE
     assert "not a page" in result.stderr
 
 
 def test_a_non_http_url_is_rejected_as_a_bad_argument() -> None:
-    result = runner.invoke(app, ["crawl", "file:///etc/passwd", "--no-persist"])
+    result = runner.invoke(app, ["crawl", "--allow-private", "file:///etc/passwd", "--no-persist"])
 
     assert result.exit_code == 2
     assert "unsupported URL scheme" in result.stderr
 
 
 def test_an_impossible_depth_is_refused() -> None:
-    result = runner.invoke(app, ["crawl", "https://example.test/", "--depth", "-1"])
+    result = runner.invoke(
+        app, ["crawl", "--allow-private", "https://example.test/", "--depth", "-1"]
+    )
 
     assert result.exit_code != 0
 
@@ -508,8 +580,10 @@ def test_prose_urls_can_be_turned_off() -> None:
     site = make_site({"/": f"<p>{MEGA_LINK}</p>"})
 
     with serve(site) as base:
-        with_prose = runner.invoke(app, ["crawl", f"{base}/", "--no-persist"])
-        without = runner.invoke(app, ["crawl", f"{base}/", "--no-prose", "--no-persist"])
+        with_prose = runner.invoke(app, ["crawl", "--allow-private", f"{base}/", "--no-persist"])
+        without = runner.invoke(
+            app, ["crawl", "--allow-private", f"{base}/", "--no-prose", "--no-persist"]
+        )
 
     assert "Links found: 1" in with_prose.stdout
     assert "Links found: 0" in without.stdout
@@ -519,7 +593,7 @@ def test_the_configured_user_agent_is_sent() -> None:
     site = make_site()
 
     with serve(site) as base:
-        runner.invoke(app, ["crawl", f"{base}/", "--no-persist"])
+        runner.invoke(app, ["crawl", "--allow-private", f"{base}/", "--no-persist"])
 
     assert "MaxiCrawler" in site.requests[0].headers["User-Agent"]
 
@@ -558,7 +632,16 @@ def test_a_file_link_is_reported_but_never_requested() -> None:
 
     with serve(site) as base:
         result = runner.invoke(
-            app, ["crawl", f"{base}/", "--depth", "1", "--same-domain", "--no-persist"]
+            app,
+            [
+                "crawl",
+                "--allow-private",
+                f"{base}/",
+                "--depth",
+                "1",
+                "--same-domain",
+                "--no-persist",
+            ],
         )
 
     assert result.exit_code == EXIT_CRAWLED
@@ -566,3 +649,54 @@ def test_a_file_link_is_reported_but_never_requested() -> None:
     assert "Pages failed" not in result.stdout
     assert "not a page link: 1" in result.stdout
     assert "/sheet.pdf" not in {request.path for request in site.requests}
+
+
+# --- responsible crawling from the command line ------------------------------
+
+
+def test_a_forbidden_page_is_reported_as_skipped_rather_than_fetched() -> None:
+    site = make_site()
+    site.add("/robots.txt", body=b"User-agent: *\nDisallow: /a\n", content_type="text/plain")
+
+    with serve(site) as base:
+        result = runner.invoke(
+            app,
+            [
+                "crawl",
+                "--allow-private",
+                f"{base}/",
+                "--depth",
+                "2",
+                "--same-domain",
+                "--no-persist",
+            ],
+        )
+
+    assert result.exit_code == EXIT_CRAWLED
+    assert "disallowed by robots.txt" in result.stdout
+
+
+def test_robots_can_be_ignored_for_one_run() -> None:
+    """The escape has to be one flag, or the safe default becomes a nuisance."""
+    site = make_site()
+    site.add("/robots.txt", body=b"User-agent: *\nDisallow: /\n", content_type="text/plain")
+
+    with serve(site) as base:
+        refused = runner.invoke(app, ["crawl", "--allow-private", f"{base}/", "--no-persist"])
+        allowed = runner.invoke(
+            app, ["crawl", "--allow-private", f"{base}/", "--ignore-robots", "--no-persist"]
+        )
+
+    assert refused.exit_code == EXIT_FETCH_FAILED
+    assert "robots.txt" in refused.stderr
+    assert allowed.exit_code == EXIT_CRAWLED
+    assert "Documents processed: 1" in allowed.stdout
+
+
+def test_this_machine_is_refused_without_the_flag() -> None:
+    """The shipped default, from the command line."""
+    with serve(make_site()) as base:
+        result = runner.invoke(app, ["crawl", f"{base}/", "--no-persist"])
+
+    assert result.exit_code == EXIT_FETCH_FAILED
+    assert "private network" in result.stderr

@@ -20,7 +20,8 @@ from types import TracebackType
 from typing import BinaryIO
 
 from maxicrawler.domain import Checksum, ContentDescriptor
-from maxicrawler.downloader.errors import DownloadError
+from maxicrawler.downloader.control import DownloadControl
+from maxicrawler.downloader.errors import DownloadCancelledError, DownloadError
 from maxicrawler.library import ContentRecord, LibraryEntry, safe_filename
 
 DEFAULT_HASH_ALGORITHM = "sha256"
@@ -48,6 +49,7 @@ class LibrarySink:
     __slots__ = (
         "_algorithm",
         "_committed",
+        "_control",
         "_descriptor",
         "_digest",
         "_entry",
@@ -64,10 +66,12 @@ class LibrarySink:
         *,
         algorithm: str = DEFAULT_HASH_ALGORITHM,
         on_progress: ProgressCallback | None = None,
+        control: DownloadControl | None = None,
     ) -> None:
         self._entry = entry
         self._algorithm = algorithm
         self._on_progress = on_progress
+        self._control = control
         self._digest = hashlib.new(algorithm)
         self._descriptor: ContentDescriptor | None = None
         self._handle: BinaryIO | None = None
@@ -118,9 +122,21 @@ class LibrarySink:
     def write(self, chunk: bytes) -> None:
         """Append *chunk*, updating the digest, the count, and the progress.
 
+        Also where a stop takes effect, and the only place it could: this is
+        the one point every provider's bytes pass through, so cancellation is
+        one check here rather than a feature each provider has to remember.
+        It is checked *before* the chunk is written, so a stopped transfer does
+        no more work than it had already begun.
+
         Raises:
+            DownloadCancelledError: somebody asked the transfer to stop. The
+                staging file is discarded by the context manager, exactly as it
+                is for a transfer that broke.
             DownloadError: nothing announced this content, or the write failed.
         """
+        if self._control is not None and self._control.stop_requested:
+            msg = f"stopped after {self._written} bytes"
+            raise DownloadCancelledError(msg)
         if self._handle is None:
             msg = "content was written before the transfer announced it"
             raise DownloadError(msg)

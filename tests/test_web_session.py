@@ -1,6 +1,7 @@
 """Tests for the crawl session, its options and its state."""
 
 from datetime import UTC, datetime
+from time import monotonic
 
 import pytest
 
@@ -172,6 +173,31 @@ def test_requesting_a_stop_twice_is_harmless() -> None:
     control.request_stop()
 
     assert control.stop_requested is True
+
+
+def test_a_wait_returns_at_once_when_a_stop_was_asked_for() -> None:
+    """What makes politeness interruptible.
+
+    A crawl waiting out a thirty-second Crawl-delay would otherwise hold a
+    shutdown open for thirty seconds.
+    """
+    control = CrawlControl()
+    control.request_stop()
+
+    started = monotonic()
+    control.wait(30.0)
+
+    assert monotonic() - started < 1.0
+
+
+def test_a_wait_without_a_stop_actually_waits() -> None:
+    """Loosely, because a platform timer may fire a little early."""
+    control = CrawlControl()
+
+    started = monotonic()
+    control.wait(0.05)
+
+    assert monotonic() - started >= 0.03
 
 
 def test_the_live_state_can_be_followed() -> None:

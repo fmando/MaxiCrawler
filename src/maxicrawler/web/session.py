@@ -86,6 +86,16 @@ class CrawlOptions:
     include_subdomains: bool = False
     """Whether ``docs.example.org`` counts as inside ``example.org``."""
 
+    respect_robots: bool = True
+    """Whether this crawl obeyed the ``robots.txt`` of the hosts it visited.
+
+    An option rather than wiring, because it belongs to the *record*: "did this
+    run obey robots.txt" is a question somebody asks a stored crawl months
+    later, and a setting that has changed since cannot answer it. The waiting a
+    crawl did is not the same kind of fact and lives on
+    :class:`RequestContext`.
+    """
+
     scan_prose: bool = True
 
     def __post_init__(self) -> None:
@@ -123,12 +133,28 @@ class RequestContext:
     headers: tuple[tuple[str, str], ...] = ()
     """Extra request headers, as ordered pairs so the context stays hashable."""
 
+    crawl_delay: float = 0.0
+    """Seconds to leave between two requests to one host.
+
+    Here rather than on :class:`CrawlOptions` because it is a property of *how*
+    requests are made, not of what the crawl covers — and because nothing that
+    serializes a report writes this class. A stored crawl records that it
+    obeyed robots.txt; how long it waited is not a fact about the site.
+    """
+
     @classmethod
-    def of(cls, *, user_agent: str, headers: Mapping[str, str] | None = None) -> "RequestContext":
+    def of(
+        cls,
+        *,
+        user_agent: str,
+        headers: Mapping[str, str] | None = None,
+        crawl_delay: float = 0.0,
+    ) -> "RequestContext":
         """Return a context carrying *headers* in a stable order."""
         return cls(
             user_agent=user_agent,
             headers=tuple(sorted((headers or {}).items())),
+            crawl_delay=crawl_delay,
         )
 
     def header_map(self) -> dict[str, str]:
@@ -197,6 +223,19 @@ class CrawlControl:
     def request_stop(self) -> None:
         """Ask the crawl to stop after the page it is working on."""
         self._stop.set()
+
+    def wait(self, seconds: float) -> None:
+        """Block for up to *seconds*, returning at once when a stop is asked for.
+
+        What makes politeness interruptible. A crawl waiting out a thirty-second
+        ``Crawl-delay`` would otherwise hold a shutdown open for thirty seconds,
+        and a Stop button that does nothing for half a minute reads as broken.
+
+        Handed to :class:`~maxicrawler.web.throttle.ThrottledFetcher` as its
+        waiter, which is the only thing that ever calls this — the engine still
+        knows nothing about time.
+        """
+        self._stop.wait(seconds)
 
     @property
     def stop_requested(self) -> bool:
