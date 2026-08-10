@@ -13,6 +13,7 @@ from maxicrawler.web.policy import (
     CompositePolicy,
     CrawlPolicy,
     PolicyDecision,
+    PolicyRule,
     SameDomainPolicy,
     registrable_host,
 )
@@ -59,6 +60,17 @@ def test_a_refusal_carries_its_reason() -> None:
 
     assert decision.allowed is False
     assert decision.reason == "disallowed by robots.txt"
+
+
+def test_a_refusal_names_the_kind_of_rule_that_refused() -> None:
+    decision = PolicyDecision.refuse("disallowed by robots.txt", rule=PolicyRule.ROBOTS)
+
+    assert decision.rule is PolicyRule.ROBOTS
+
+
+def test_a_refusal_that_classifies_itself_counts_as_scope() -> None:
+    """Every refusal is at minimum "not one of mine", so that is the default."""
+    assert PolicyDecision.refuse("nope").rule is PolicyRule.SCOPE
 
 
 def test_a_refusal_is_a_value_rather_than_an_exception() -> None:
@@ -131,6 +143,7 @@ def test_another_host_is_refused_with_a_reason() -> None:
 
     assert decision.allowed is False
     assert decision.reason == "outside example.org"
+    assert decision.rule is PolicyRule.SCOPE
 
 
 def test_a_subdomain_is_outside_the_scope_by_default() -> None:

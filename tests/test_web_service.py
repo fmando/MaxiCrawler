@@ -15,6 +15,7 @@ from maxicrawler.web import (
     LinkKind,
     PolicyDecision,
     PolicyRefusedError,
+    PolicyRule,
     UrllibPageFetcher,
     WebDiscoveryService,
 )
@@ -341,6 +342,22 @@ def test_a_refused_url_is_never_fetched() -> None:
 
         assert site.requests == []
         assert policy.asked == [f"{base}/"]
+
+
+def test_the_refusal_carries_the_rule_that_refused() -> None:
+    """So a caller turning this back into a skip need not read the message."""
+
+    class RobotsLike:
+        def may_fetch(self, url: str) -> PolicyDecision:
+            return PolicyDecision.refuse("disallowed", rule=PolicyRule.ROBOTS)
+
+    site = Site()
+    site.add_html("/", "<html></html>")
+
+    with serve(site) as base, pytest.raises(PolicyRefusedError) as refusal:
+        make_service(policy=RobotsLike()).crawl(f"{base}/", make_session())
+
+    assert refusal.value.rule is PolicyRule.ROBOTS
 
 
 # --- failures ----------------------------------------------------------------

@@ -18,7 +18,7 @@ from maxicrawler.web import (
 )
 from maxicrawler.web.engine import CrawlEngine
 from maxicrawler.web.frontier import CrawlItem, FifoFrontier, visit_key
-from maxicrawler.web.policy import PolicyDecision, SameDomainPolicy
+from maxicrawler.web.policy import PolicyDecision, PolicyRule, SameDomainPolicy
 from maxicrawler.web.report import CrawlReport, SkipReason
 from maxicrawler.web.session import CrawlControl, CrawlOptions, CrawlSession, CrawlState
 
@@ -590,6 +590,28 @@ def test_an_injected_policy_is_asked_alongside_the_domain_option() -> None:
 
     assert "/a1" not in visited_paths(report, base)
     assert "/b1" in visited_paths(report, base)
+
+
+def test_a_refusal_is_counted_under_the_rule_that_refused_it() -> None:
+    """The gate translates the decision rather than assuming what said no.
+
+    Without this the report would file every refusal under "out of scope",
+    which is the one thing robots.txt must not be confused with.
+    """
+
+    class RefuseLeaves:
+        def may_fetch(self, url: str) -> PolicyDecision:
+            if url.endswith("/a1"):
+                return PolicyDecision.refuse("pretend robots", rule=PolicyRule.ROBOTS)
+            return PolicyDecision.allow()
+
+    with serve(make_site()) as base:
+        engine = make_engine(policy=RefuseLeaves())
+        report = engine.run(make_session(f"{base}/", max_depth=3))
+
+    skips = dict(report.statistics.skips_by_reason)
+    assert skips[SkipReason.ROBOTS_TXT] == 1
+    assert SkipReason.OUT_OF_SCOPE not in skips
 
 
 # --- what is worth following -------------------------------------------------

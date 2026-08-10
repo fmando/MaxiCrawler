@@ -17,12 +17,14 @@ is one call inside the loop and one table, with the value already in hand.
 """
 
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
 from maxicrawler.crawler import DiscoverySummary
 from maxicrawler.web.models import LinkKind
+from maxicrawler.web.policy import PolicyDecision, PolicyRule
 from maxicrawler.web.session import CrawlSession, CrawlState
 
 
@@ -38,7 +40,19 @@ class SkipReason(StrEnum):
     """Beyond ``--depth``. Discovered and classified, simply not followed."""
 
     OUT_OF_SCOPE = "out of scope"
-    """Refused by a policy — a different domain, and later robots.txt."""
+    """Refused by a scope rule — a different domain than this crawl covers."""
+
+    ROBOTS_TXT = "disallowed by robots.txt"
+    """Refused by the host's own ``/robots.txt``.
+
+    Kept apart from :attr:`OUT_OF_SCOPE` because the two say opposite things
+    about who decided. *"Outside my scope"* is a choice the operator made;
+    *"disallowed by robots.txt"* is one the site made, and a reader who cannot
+    tell them apart cannot tell a narrow crawl from a refused one.
+    """
+
+    PRIVATE_NETWORK = "private network"
+    """Points at this machine, this network, or a cloud metadata service."""
 
     ALREADY_SEEN = "already seen"
     """Queued or fetched earlier in this crawl."""
@@ -53,6 +67,38 @@ class SkipReason(StrEnum):
 
     UNUSABLE = "unusable"
     """Not a URL this crawler can canonicalize, so not one it can track."""
+
+
+_SKIP_REASONS: Mapping[PolicyRule, SkipReason] = {
+    PolicyRule.SCOPE: SkipReason.OUT_OF_SCOPE,
+    PolicyRule.ROBOTS: SkipReason.ROBOTS_TXT,
+    PolicyRule.PRIVATE_NETWORK: SkipReason.PRIVATE_NETWORK,
+}
+"""How a policy's vocabulary is read in a report's.
+
+The two enums are kept apart on purpose. A policy answers *"may I fetch
+this?"* and knows nothing about reports; a report counts what happened and
+must not grow a member every time somebody writes a policy. This mapping is
+the one place the two meet, and it is total over
+:class:`~maxicrawler.web.policy.PolicyRule` — which
+``test_web_report.py`` asserts, so a new rule cannot arrive without a decision
+about how it is counted.
+"""
+
+
+def skip_reason_for(decision: PolicyDecision) -> SkipReason:
+    """Return how a report counts *decision*.
+
+    Only refusals are counted, so a permitting decision is a caller's mistake
+    rather than a value with a sensible answer; it is reported as such.
+
+    Raises:
+        ValueError: *decision* permits the fetch.
+    """
+    if decision.allowed:
+        msg = "a permitted fetch is not a skip"
+        raise ValueError(msg)
+    return _SKIP_REASONS[decision.rule]
 
 
 @dataclass(frozen=True, slots=True)

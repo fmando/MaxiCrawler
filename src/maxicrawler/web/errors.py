@@ -10,6 +10,8 @@ Every message carries a URL reduced by
 reach a log record through a failed fetch.
 """
 
+from maxicrawler.web.policy import PolicyRule
+
 
 class CrawlError(RuntimeError):
     """Base class for every failure of the web layer."""
@@ -21,7 +23,15 @@ class PolicyRefusedError(CrawlError):
     The caller named this URL explicitly, so refusing to fetch it is a failure
     of the request. A recursive crawl catches this per URL and records a
     skipped page instead of stopping.
+
+    The rule travels with the error so that a caller which turns one back into
+    a skip does not have to read the message to find out what refused.
     """
+
+    def __init__(self, message: str, *, rule: PolicyRule = PolicyRule.SCOPE) -> None:
+        super().__init__(message)
+        self.rule = rule
+        """Which kind of rule refused the URL."""
 
 
 class FetchError(CrawlError):

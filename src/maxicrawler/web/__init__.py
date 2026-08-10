@@ -38,7 +38,7 @@ from maxicrawler.web.models import (
     RawLink,
 )
 from maxicrawler.web.parser import HtmlLinkParser, HtmlParser
-from maxicrawler.web.policy import AllowAllPolicy, CrawlPolicy, PolicyDecision
+from maxicrawler.web.policy import AllowAllPolicy, CrawlPolicy, PolicyDecision, PolicyRule
 from maxicrawler.web.service import WebDiscoveryService
 
 __all__ = [
@@ -61,6 +61,7 @@ __all__ = [
     "ParsedHtml",
     "PolicyDecision",
     "PolicyRefusedError",
+    "PolicyRule",
     "RawLink",
     "ResponseTooLargeError",
     "TooManyRedirectsError",

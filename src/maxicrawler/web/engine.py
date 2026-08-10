@@ -47,7 +47,13 @@ from maxicrawler.web.frontier import (
 )
 from maxicrawler.web.models import CrawlResult, LinkKind
 from maxicrawler.web.policy import AllowAllPolicy, CompositePolicy, CrawlPolicy, SameDomainPolicy
-from maxicrawler.web.report import CrawlReport, CrawlStatistics, PageOutcome, SkipReason
+from maxicrawler.web.report import (
+    CrawlReport,
+    CrawlStatistics,
+    PageOutcome,
+    SkipReason,
+    skip_reason_for,
+)
 from maxicrawler.web.repository import CrawlRepository, NullCrawlRepository
 from maxicrawler.web.resolve import looks_like_a_page
 from maxicrawler.web.service import WebDiscoveryService
@@ -367,12 +373,17 @@ class CrawlEngine:
         The counters therefore count occurrences rather than distinct URLs: a
         link to the same off-site page from forty pages is forty skips, which
         is the honest answer to "how much did this crawl turn away".
+
+        What a refusal is counted as comes from the decision itself rather than
+        from this line, so a policy added later is counted under its own name
+        without the gate learning what it does.
         """
         if item.depth > self._max_depth:
             self._skips[SkipReason.TOO_DEEP] += 1
             return
-        if not self._scope.may_fetch(item.url).allowed:
-            self._skips[SkipReason.OUT_OF_SCOPE] += 1
+        decision = self._scope.may_fetch(item.url)
+        if not decision.allowed:
+            self._skips[skip_reason_for(decision)] += 1
             return
         try:
             key = visit_key(item.url)

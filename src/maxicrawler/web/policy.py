@@ -31,12 +31,41 @@ turns a refusal of the URL it was explicitly asked for into
 :class:`~maxicrawler.web.errors.PolicyRefusedError`, because there refusing is
 a failure of the request; a crawl loop catches that per URL rather than letting
 it end the run.
+
+A refusal carries two descriptions of itself: ``reason`` is a phrase for a
+person, and :class:`PolicyRule` is the same fact for a program. A report groups
+its skips by the second, so *"outside my scope"* and *"forbidden by
+robots.txt"* stay two different answers however either of them is worded.
 """
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit
+
+
+class PolicyRule(StrEnum):
+    """Which kind of rule turned a URL away.
+
+    Deliberately coarse. This is not a list of policies — anybody may write one
+    — but a list of the answers a *reader* of a report can act on, and there
+    are three: it is not mine to crawl, its owner said no, or it points inside
+    this network.
+    """
+
+    SCOPE = "scope"
+    """Not a URL this crawl covers. The bucket for any policy that names none.
+
+    Every refusal is at minimum this, which is why it is the default: a policy
+    that says no without classifying itself has still said *"not one of mine"*.
+    """
+
+    ROBOTS = "robots"
+    """Forbidden by the ``/robots.txt`` of the host that would answer."""
+
+    PRIVATE_NETWORK = "private network"
+    """Points at this machine, this network, or a cloud metadata service."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,15 +76,22 @@ class PolicyDecision:
     reason: str | None = None
     """A short phrase naming the rule, for a report or a log line."""
 
+    rule: PolicyRule = PolicyRule.SCOPE
+    """Which kind of rule refused, for a counter rather than a reader.
+
+    Meaningless on a decision that permits, and ignored there. Refusals are
+    what anything counts.
+    """
+
     @classmethod
     def allow(cls) -> "PolicyDecision":
         """Return the decision to permit a fetch."""
         return cls(allowed=True)
 
     @classmethod
-    def refuse(cls, reason: str) -> "PolicyDecision":
+    def refuse(cls, reason: str, *, rule: PolicyRule = PolicyRule.SCOPE) -> "PolicyDecision":
         """Return the decision to refuse a fetch, naming the rule."""
-        return cls(allowed=False, reason=reason)
+        return cls(allowed=False, reason=reason, rule=rule)
 
     def __bool__(self) -> bool:
         """Return whether the fetch is permitted."""
