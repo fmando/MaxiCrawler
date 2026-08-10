@@ -1,5 +1,6 @@
 """Typer command-line interface for MaxiCrawler."""
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -143,6 +144,24 @@ def crawl(
     max_pages: Annotated[
         int | None, typer.Option("--max-pages", help="Stop after this many pages.")
     ] = None,
+    respect_robots: Annotated[
+        bool | None,
+        typer.Option(
+            "--respect-robots/--ignore-robots",
+            help="Obey each host's robots.txt, or crawl regardless of it.",
+        ),
+    ] = None,
+    delay: Annotated[
+        float | None,
+        typer.Option("--delay", help="Seconds to leave between requests to one host."),
+    ] = None,
+    allow_private: Annotated[
+        bool,
+        typer.Option(
+            "--allow-private",
+            help="Permit loopback and private addresses, such as your own intranet.",
+        ),
+    ] = False,
     config_path: Annotated[
         Path, typer.Option("--config", help="TOML configuration file to use.")
     ] = DEFAULT_CONFIG_PATH,
@@ -173,14 +192,30 @@ def crawl(
     so a page that builds its links in the browser will appear to have fewer of
     them than it shows a reader.
 
-    robots.txt is not consulted yet. What you point this at is your
-    responsibility.
+    Each host's robots.txt is obeyed, and a URL it forbids is reported as
+    skipped rather than fetched. --ignore-robots turns that off for one run,
+    which is a decision to make deliberately: what you point this at is your
+    responsibility either way.
+
+    A host asking for a Crawl-delay is waited for. Nothing else is: --delay
+    adds a wait between requests to one host when you want to be gentler than
+    anybody asked.
+
+    Addresses inside this machine or this network are refused, because a
+    crawler is a thing that fetches URLs somebody else may have written.
+    --allow-private lifts that for crawling your own intranet; a cloud metadata
+    service stays refused regardless.
 
     The exit code is 0 when the crawl ran to an end or to a limit it was given,
-    5 when the starting page could not be retrieved, 6 when it was not a page,
-    and 7 when the crawl was interrupted.
+    5 when the starting page could not be retrieved or was refused, 6 when it
+    was not a page, and 7 when the crawl was interrupted.
     """
-    service = CrawlService(Settings.from_toml(config_path))
+    settings = Settings.from_toml(config_path)
+    if delay is not None:
+        settings = replace(settings, crawl_delay=delay)
+    if allow_private:
+        settings = replace(settings, allow_private_networks=True)
+    service = CrawlService(settings)
     try:
         session = service.build_session(
             url,
@@ -188,6 +223,7 @@ def crawl(
             max_pages=max_pages,
             same_domain=same_domain,
             include_subdomains=include_subdomains,
+            respect_robots=respect_robots,
             scan_prose=prose,
         )
     except ValueError as error:

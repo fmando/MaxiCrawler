@@ -47,6 +47,10 @@ def client(
         user_agent="MaxiCrawler/test",
         database_path=tmp_path / "urls.db",
         library_path=tmp_path / "library",
+        # The site these crawls reach is on loopback, which the shipped default
+        # refuses; see tests/test_api_pages.py::test_a_private_address_is_refused
+        # for the default's own behaviour.
+        allow_private_networks=True,
         **({} if max_view_bytes is None else {"max_view_bytes": max_view_bytes}),
     )
     service = CrawlService(settings)
@@ -390,6 +394,7 @@ def live_client(tmp_path: Path) -> Iterator[TestClient]:
             user_agent="MaxiCrawler/test",
             database_path=tmp_path / "urls.db",
             network_timeout=5.0,
+            allow_private_networks=True,
         )
     )
     jobs = CrawlJobs(service, persist=False)
@@ -758,6 +763,7 @@ def recording_client(tmp_path: Path) -> Iterator[TestClient]:
             database_path=tmp_path / "urls.db",
             library_path=tmp_path / "library",
             network_timeout=5.0,
+            allow_private_networks=True,
         )
     )
     jobs = CrawlJobs(service, persist=True)

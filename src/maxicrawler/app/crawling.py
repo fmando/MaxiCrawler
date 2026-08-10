@@ -18,6 +18,13 @@ API is what makes that hard to do by accident.
 the engine publishes ``PageCrawled``; a caller that wants to watch a crawl needs
 both on the same bus. The CLI passes none and sees nothing, which costs it
 nothing.
+
+**This is where responsible crawling is assembled**, and the only place. Each
+piece is inert on its own — a robots policy nobody asks, a throttle with no
+delay, a network guard nobody consults — and :meth:`CrawlService.build_engine`
+is what makes them a crawl that obeys robots.txt, waits when a host asks it to,
+and will not walk into the machine it is running on. Both clients get that by
+going through here, which is why neither of them may build an engine itself.
 """
 
 from datetime import UTC, datetime
@@ -40,14 +47,19 @@ from maxicrawler.events import EventBus
 from maxicrawler.utils import require_http_scheme
 from maxicrawler.web import HtmlLinkParser, UrllibPageFetcher, WebDiscoveryService
 from maxicrawler.web.engine import CrawlEngine
+from maxicrawler.web.fetcher import RedirectGuard
+from maxicrawler.web.policy import CompositePolicy, CrawlPolicy
+from maxicrawler.web.private import PrivateNetworkPolicy, redirect_guard
 from maxicrawler.web.report import CrawlReport
 from maxicrawler.web.repository import CrawlRepository, NullCrawlRepository
+from maxicrawler.web.robots import MAX_ROBOTS_BYTES, ROBOTS_MEDIA_TYPES, RobotsPolicy
 from maxicrawler.web.session import (
     CrawlControl,
     CrawlOptions,
     CrawlSession,
     RequestContext,
 )
+from maxicrawler.web.throttle import DelaySource, HostSchedule, ThrottledFetcher, Waiter
 
 
 class CrawlService:
@@ -69,6 +81,7 @@ class CrawlService:
         max_pages: int | None = None,
         same_domain: bool | None = None,
         include_subdomains: bool = False,
+        respect_robots: bool | None = None,
         scan_prose: bool = True,
         session_id: str | None = None,
     ) -> CrawlSession:
@@ -91,6 +104,7 @@ class CrawlService:
             max_pages=settings.crawl_max_pages if max_pages is None else max_pages,
             same_domain=settings.crawl_same_domain if same_domain is None else same_domain,
             include_subdomains=include_subdomains,
+            respect_robots=settings.respect_robots if respect_robots is None else respect_robots,
             scan_prose=scan_prose,
         )
         return CrawlSession(
@@ -98,7 +112,9 @@ class CrawlService:
             seed_url=url,
             started_at=datetime.now(UTC),
             options=options,
-            context=RequestContext(user_agent=settings.user_agent),
+            context=RequestContext(
+                user_agent=settings.user_agent, crawl_delay=settings.crawl_delay
+            ),
         )
 
     def build_engine(
@@ -113,25 +129,127 @@ class CrawlService:
 
         Exposed beside :meth:`run` because a client that wants to hold the
         control — a Stop button, a test — needs the engine before it starts.
+
+        The whole of this sprint's behaviour is assembled here, in an order
+        that is not arbitrary:
+
+        1.  one :class:`~maxicrawler.web.throttle.HostSchedule`, shared by every
+            fetcher below, so a crawl's politeness is not divided by the number
+            of fetchers it happens to be built from;
+        2.  the private-network guard, in two forms — a pure one for the first
+            gate and a resolving one for the second and for every redirect hop;
+        3.  the robots policy over a fetcher of its own, because ``robots.txt``
+            is ``text/plain`` under a limit of its own and a page is not;
+        4.  the page fetcher, throttled, asking the robots policy how long this
+            host wants to be left alone.
+
+        The waiter is the crawl's own control when it has one, so a stop during
+        a delay returns at once rather than holding a shutdown open.
         """
         bus = event_bus if event_bus is not None else EventBus()
+        settings = self._settings
+        schedule = HostSchedule()
+        waiter = control.wait if control is not None else None
+        guard = redirect_guard(self._private_policy(resolve=True))
+        robots = self._robots_policy(session, schedule=schedule, waiter=waiter, guard=guard)
         service = WebDiscoveryService(
             DiscoveryPipeline(bus),
-            fetcher=UrllibPageFetcher(
-                user_agent=session.context.user_agent,
-                timeout=self._settings.network_timeout,
-                max_response_bytes=self._settings.max_page_bytes,
-                max_redirects=self._settings.max_redirects,
+            fetcher=ThrottledFetcher(
+                UrllibPageFetcher(
+                    user_agent=session.context.user_agent,
+                    timeout=settings.network_timeout,
+                    max_response_bytes=settings.max_page_bytes,
+                    max_redirects=settings.max_redirects,
+                    guard=guard,
+                ),
+                schedule=schedule,
+                minimum=session.context.crawl_delay,
+                delay_for=self._delay_source(robots),
+                waiter=waiter,
             ),
-            parser=HtmlLinkParser(max_links=self._settings.max_links),
+            parser=HtmlLinkParser(max_links=settings.max_links),
             repository=self._discovery_repository(persist=persist),
             scan_prose=session.options.scan_prose,
         )
         return CrawlEngine(
             service,
+            policy=self._private_policy(resolve=False),
+            gate=self._gate(robots),
             control=control,
             event_bus=bus,
             repository=self._crawl_repository(persist=persist),
+        )
+
+    def _gate(self, robots: RobotsPolicy | None) -> CrawlPolicy:
+        """Return what is asked immediately before each request.
+
+        The private-network rule first: it answers from a cache or a resolver
+        and is the one refusal that must not depend on a stranger's server
+        answering. robots.txt second, so a URL already refused never costs the
+        request that would have read its ``/robots.txt``.
+        """
+        policies: list[CrawlPolicy] = [self._private_policy(resolve=True)]
+        if robots is not None:
+            policies.append(robots)
+        return CompositePolicy(policies)
+
+    def _robots_policy(
+        self,
+        session: CrawlSession,
+        *,
+        schedule: HostSchedule,
+        waiter: Waiter | None,
+        guard: RedirectGuard,
+    ) -> RobotsPolicy | None:
+        """Return the robots policy for *session*, or ``None`` when it opted out.
+
+        Its fetcher shares the schedule but has no delay source of its own —
+        the delay for a host is stated in the very file being fetched, so
+        asking for it here would be a loop. Sharing the schedule is what keeps
+        the request polite anyway.
+        """
+        if not session.options.respect_robots:
+            return None
+        settings = self._settings
+        fetcher = ThrottledFetcher(
+            UrllibPageFetcher(
+                user_agent=session.context.user_agent,
+                timeout=settings.robots_timeout,
+                max_response_bytes=MAX_ROBOTS_BYTES,
+                max_redirects=settings.max_redirects,
+                accept=ROBOTS_MEDIA_TYPES,
+                guard=guard,
+            ),
+            schedule=schedule,
+            minimum=session.context.crawl_delay,
+            waiter=waiter,
+        )
+        return RobotsPolicy(
+            fetcher,
+            user_agent=settings.robots_user_agent or session.context.user_agent,
+            deny_on_error=settings.robots_deny_on_error,
+            max_delay=settings.max_crawl_delay,
+        )
+
+    def _delay_source(self, robots: RobotsPolicy | None) -> DelaySource | None:
+        """Return where a host's own ``Crawl-delay`` is read from, if anywhere."""
+        if robots is None or not self._settings.respect_crawl_delay:
+            return None
+        return robots.delay_for
+
+    def _private_policy(self, *, resolve: bool) -> PrivateNetworkPolicy:
+        """Return the network guard, resolving names or reading them only.
+
+        Built fresh rather than shared, because the two forms answer different
+        questions and a cache of one is not a cache of the other. Built at all
+        even when private addresses are allowed: a cloud metadata service stays
+        refused either way.
+        """
+        settings = self._settings
+        return PrivateNetworkPolicy(
+            allow=settings.private_network_allowlist,
+            allow_private=settings.allow_private_networks,
+            resolve=resolve,
         )
 
     def run(

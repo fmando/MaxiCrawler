@@ -68,6 +68,7 @@ from maxicrawler.web.policy import (
     CompositePolicy,
     CrawlPolicy,
     PolicyDecision,
+    PolicyRule,
     SameDomainPolicy,
 )
 from maxicrawler.web.report import (
@@ -134,6 +135,7 @@ class CrawlEngine:
         self._event_bus = event_bus
         self._scope: CrawlPolicy = self._policy
         self._skips: Counter[SkipReason] = Counter()
+        self._refusal: PolicyDecision | None = None
         self._kinds: Counter[LinkKind] = Counter()
         self._pages: list[PageOutcome] = []
         self._fetched: set[str] = set()
@@ -247,6 +249,7 @@ class CrawlEngine:
         """
         self._skips = Counter()
         self._kinds = Counter()
+        self._refusal = None
         self._pages = []
         self._attempts = 0
         self._deepest = 0
@@ -277,7 +280,11 @@ class CrawlEngine:
             return
         reason = next(iter(self._skips), SkipReason.UNUSABLE)
         msg = f"nothing to crawl: the seed was {reason}"
-        raise PolicyRefusedError(msg)
+        # The rule travels with the error, not only the sentence: a caller
+        # deciding what to show a person should not have to read English to
+        # find out whether this was scope, robots.txt, or an address.
+        rule = self._refusal.rule if self._refusal is not None else PolicyRule.SCOPE
+        raise PolicyRefusedError(msg, rule=rule)
 
     def _drain(self, session: CrawlSession) -> CrawlState:
         """Fetch pages until something stops the crawl, and say what did."""
@@ -455,6 +462,7 @@ class CrawlEngine:
             return
         decision = self._scope.may_fetch(item.url)
         if not decision.allowed:
+            self._refusal = decision
             self._skips[skip_reason_for(decision)] += 1
             return
         try:

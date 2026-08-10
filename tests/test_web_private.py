@@ -213,6 +213,20 @@ def test_private_addresses_can_be_allowed_wholesale() -> None:
     assert refuses(policy, "http://127.0.0.1:8000/a") is False
 
 
+def test_allowing_loopback_allows_it_under_both_of_its_names() -> None:
+    """`localhost` is loopback written out.
+
+    Refusing the name while permitting the address would make one machine
+    reachable under one spelling and not the other, which is a rule nobody
+    could predict.
+    """
+    policy = make_policy(allow_private=True)
+
+    assert refuses(policy, "http://localhost:8000/a") is False
+    assert refuses(policy, "http://wiki.internal/a") is False
+    assert refuses(policy, "http://metadata.google.internal/a") is True
+
+
 def test_one_address_can_be_allowed_without_opening_the_rest() -> None:
     """The homelab case: crawl my own wiki, nothing else inside."""
     policy = make_policy(allow=["192.168.1.20"])

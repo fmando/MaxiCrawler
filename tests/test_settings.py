@@ -165,3 +165,83 @@ def test_crawl_settings_round_trip_through_toml(tmp_path: Path) -> None:
     path.write_text(original.to_toml(), encoding="utf-8")
 
     assert Settings.from_toml(path) == original
+
+
+# --- responsible crawling ----------------------------------------------------
+
+
+def test_the_shipped_defaults_are_the_safe_ones() -> None:
+    """The settings this sprint is about, asserted where somebody will look."""
+    settings = Settings()
+
+    assert settings.respect_robots is True
+    assert settings.allow_private_networks is False
+    assert settings.private_network_allowlist == ()
+    assert settings.robots_deny_on_error is True
+    assert settings.respect_crawl_delay is True
+
+
+def test_no_delay_is_added_that_nobody_asked_for() -> None:
+    """A host that wants to be crawled slowly says so; we do not guess for it."""
+    assert Settings().crawl_delay == 0.0
+    assert Settings().max_crawl_delay == 30.0
+
+
+def test_responsible_crawling_settings_load_from_toml(tmp_path: Path) -> None:
+    path = tmp_path / "settings.toml"
+    path.write_text(
+        "[maxicrawler]\n"
+        "respect_robots = false\n"
+        "crawl_delay = 1.5\n"
+        "allow_private_networks = true\n"
+        'private_network_allowlist = ["192.168.1.20", "10.0.0.0/8"]\n',
+        encoding="utf-8",
+    )
+
+    settings = Settings.from_toml(path)
+
+    assert settings.respect_robots is False
+    assert settings.crawl_delay == 1.5
+    assert settings.allow_private_networks is True
+    assert settings.private_network_allowlist == ("192.168.1.20", "10.0.0.0/8")
+
+
+def test_responsible_crawling_settings_round_trip_through_toml(tmp_path: Path) -> None:
+    path = tmp_path / "settings.toml"
+    original = Settings(
+        respect_robots=False,
+        robots_user_agent="Somebody",
+        robots_timeout=4.0,
+        robots_deny_on_error=False,
+        crawl_delay=2.0,
+        respect_crawl_delay=False,
+        max_crawl_delay=10.0,
+        allow_private_networks=True,
+        private_network_allowlist=("wiki.local", "10.0.0.0/8"),
+    )
+    path.write_text(original.to_toml(), encoding="utf-8")
+
+    assert Settings.from_toml(path) == original
+
+
+def test_an_allowlist_that_is_not_a_list_of_strings_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "settings.toml"
+    path.write_text("[maxicrawler]\nprivate_network_allowlist = 5\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be a list of strings"):
+        Settings.from_toml(path)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"robots_timeout": 0.0}, "robots_timeout must be positive"),
+        ({"crawl_delay": -1.0}, "crawl_delay must not be negative"),
+        ({"max_crawl_delay": -1.0}, "max_crawl_delay must not be negative"),
+    ],
+)
+def test_responsible_crawling_settings_reject_impossible_values(
+    kwargs: dict[str, float], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        Settings(**kwargs)  # type: ignore[arg-type]

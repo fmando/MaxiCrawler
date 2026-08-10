@@ -237,7 +237,11 @@ class PrivateNetworkPolicy:
         if literal is not None:
             return self._address_verdict(literal, named=host)
         if _named_internally(host):
-            return f"{host} names this machine or this network"
+            # Judged like the address it stands for: `localhost` is loopback
+            # written out, so an operator who allowed loopback has allowed it.
+            # Anything else would make the same machine reachable under one
+            # spelling and not the other.
+            return None if self._allow_private else f"{host} names this machine or this network"
         return self._resolved_verdict(host)
 
     def _resolved_verdict(self, host: str) -> str | None:
