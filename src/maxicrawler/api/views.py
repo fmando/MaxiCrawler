@@ -152,10 +152,17 @@ def describe_scope(options: CrawlOptions) -> str:
 
 
 def describe_options(options: CrawlOptions) -> str:
-    """Return the one line that says what a crawl was told to do."""
+    """Return the one line that says what a crawl was told to do.
+
+    robots.txt is stated either way rather than only when it was ignored.
+    "Did this crawl obey robots.txt" is a question asked of a run that finished
+    months ago, and silence would answer it only for somebody who already knew
+    the default — which is exactly the person who would not be asking.
+    """
     return (
         f"depth {options.max_depth} · {describe_scope(options)} · "
-        f"max {format_number(options.max_pages)} pages"
+        f"max {format_number(options.max_pages)} pages · "
+        f"robots.txt {'obeyed' if options.respect_robots else 'ignored'}"
     )
 
 
@@ -625,6 +632,7 @@ def _crawl_row(crawl: StoredCrawl, *, is_live: bool) -> dict[str, Any]:
         max_pages=max(1, crawl.max_pages),
         same_domain=crawl.same_domain,
         include_subdomains=crawl.include_subdomains,
+        respect_robots=crawl.respect_robots,
     )
     unfinished = crawl.finished_at is None
     abandoned = unfinished and not is_live

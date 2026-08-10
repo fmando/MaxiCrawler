@@ -1504,8 +1504,12 @@ requests before crawling fifty pages.
 
 Turning it off is one flag — `--ignore-robots`, a checkbox on the crawl form, or
 `respect_robots = false`. A safe default nobody can find is a default people work
-around instead of with. And a stored crawl remembers which it was, because a
-setting that has changed since cannot answer that later.
+around instead of with. And every crawl says which it was — `depth 2 · same
+domain · max 50 pages · robots.txt obeyed` — from the stored column rather than
+from today's configuration, because a setting that has changed since cannot
+answer that later. Either way, never by silence: a line that spoke up only when
+robots.txt was ignored would answer the question only for somebody who already
+knew the default.
 
 **Downloads are not affected.** No provider consults robots.txt: a download is an
 explicit act on a resource you named, and file hosts disallow crawlers as a
