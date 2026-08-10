@@ -3,10 +3,13 @@
 import pytest
 from doubles import make_ref
 
+from maxicrawler.domain import ResourceKind, ResourceRef
 from maxicrawler.library import (
     FALLBACK_FILENAME,
     MAX_FILENAME_LENGTH,
+    MAX_PATH_COMPONENT_LENGTH,
     LibraryLayoutError,
+    is_path_component,
     provider_directory,
     resource_key,
     safe_filename,
@@ -131,3 +134,59 @@ def test_a_control_character_never_reaches_a_filename() -> None:
 
     assert "\x00" not in result
     assert "\n" not in result
+
+
+# --- recognising a component that came back from outside ----------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "mega",
+        "gofile",
+        "aabbccdd-2770d86471",
+        "2770d86471",
+        "a",
+        "a-b-c",
+        "0123456789abcdef",
+    ],
+)
+def test_what_this_module_produces_is_recognised(value: str) -> None:
+    assert is_path_component(value) is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        ".",
+        "..",
+        "a/b",
+        "a\b",
+        "-leading",
+        "Mega",
+        "AABBCCDD",
+        "with space",
+        "with.dot",
+        "with_underscore",
+        "naïve",
+        "a:b",
+        "a*b",
+        "%2e%2e",
+        "\x00",
+        "a" * (MAX_PATH_COMPONENT_LENGTH + 1),
+    ],
+)
+def test_anything_else_is_not(value: str) -> None:
+    assert is_path_component(value) is False
+
+
+def test_every_key_this_module_mints_is_recognised() -> None:
+    """The two directions have to agree, or a written entry cannot be read back."""
+    for resource in ("AaBbCcDd", "!!!", "a" * 200, "0", "Ünicode"):
+        ref = ResourceRef(
+            provider="mega", resource_id=resource, kind=ResourceKind.FILE, url="https://x/"
+        )
+        assert is_path_component(resource_key(ref)) is True
+    for provider in ("mega", "GoFile", "some.provider", "a b"):
+        assert is_path_component(provider_directory(provider)) is True

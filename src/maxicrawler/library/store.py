@@ -43,7 +43,12 @@ from pathlib import Path
 from maxicrawler import __version__
 from maxicrawler.domain import ResourceRef
 from maxicrawler.library.errors import LibraryError, LibraryRecordError
-from maxicrawler.library.naming import provider_directory, resource_key, safe_filename
+from maxicrawler.library.naming import (
+    is_path_component,
+    provider_directory,
+    resource_key,
+    safe_filename,
+)
 from maxicrawler.library.records import (
     CONTENT_DIRECTORY,
     METADATA_FILENAME,
@@ -277,6 +282,41 @@ class Library:
         key = resource_key(ref)
         return LibraryEntry(self._root / provider / key, provider=ref.provider, key=key)
 
+    def entry_at(self, provider: str, key: str) -> LibraryEntry | None:
+        """Return the stored entry called *provider*/*key*, if there is one.
+
+        The lookup :meth:`entry` cannot do. A reference is what a download has;
+        a pair of directory names is what a *reader* has — a link on a page, a
+        row of a listing, an argument to a command — and turning that back into
+        an entry needs no reference at all, because the layout is the index.
+
+        Both names are treated as hostile, because in the case this exists for
+        they came from a URL. Three things have to hold, and each rules out a
+        different way of leaving the library:
+
+        * both are components this module could have produced
+          (:func:`~maxicrawler.library.naming.is_path_component`), which is what
+          ``..`` and every separator fail;
+        * the joined path really is inside the root once resolved, which is what
+          a symbolic link pointing outward fails;
+        * the directory exists, because an entry that was never written is not
+          an entry.
+
+        ``None`` for all three, deliberately: a caller answering a request has
+        exactly one thing to say about a key that is malformed and about one
+        that is merely absent, and telling them apart would only tell whoever
+        asked which of the two they had guessed.
+
+        The returned entry carries the *directory* name as its provider, as
+        :meth:`entries` does. What a person should be shown is in the record.
+        """
+        if not (is_path_component(provider) and is_path_component(key)):
+            return None
+        path = self._root / provider / key
+        if not _is_inside(self._root, path) or not path.is_dir():
+            return None
+        return LibraryEntry(path, provider=provider, key=key)
+
     def providers(self) -> tuple[str, ...]:
         """Return the provider directories the library holds, sorted."""
         if not self._root.is_dir():
@@ -307,6 +347,20 @@ class Library:
     def __repr__(self) -> str:
         """Return a representation naming the root directory."""
         return f"{type(self).__name__}(root={self._root!s})"
+
+
+def _is_inside(root: Path, path: Path) -> bool:
+    """Return whether *path* really lies within *root*.
+
+    Resolved rather than compared as text, so a symbolic link that points out of
+    the library is caught: the string still reads as a child, and the file it
+    would open does not. ``strict=False`` because the answer must not depend on
+    the path existing — a caller asks this *before* it goes looking.
+    """
+    try:
+        return path.resolve(strict=False).is_relative_to(root.resolve(strict=False))
+    except OSError:
+        return False
 
 
 def _replace_atomically(destination: Path, payload: str) -> None:
