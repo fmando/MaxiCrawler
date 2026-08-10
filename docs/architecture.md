@@ -844,20 +844,23 @@ is not mistaken for one a reader can see. `crawl --no-prose` turns it off.
 class PolicyDecision:
     allowed: bool
     reason: str | None = None
+    rule: PolicyRule = PolicyRule.SCOPE
 
 
 class CrawlPolicy(Protocol):
     def may_fetch(self, url: str) -> PolicyDecision: ...
 ```
 
-That is the whole seam, and it is about twenty lines. What plugs into it:
+That is the whole seam, and it is about twenty lines. What plugged into it in
+Sprint 13, without a line changing in the engine or the fetcher:
 
 - **`RobotsPolicy`** — reads `/robots.txt` through the *same* `PageFetcher` the
-  crawl already uses, so no second I/O seam is needed, parses it with
-  `urllib.robotparser`, and caches per host.
-- **`ScopePolicy`** — same host, path prefix, maximum depth.
-- **`PrivateNetworkPolicy`** — the SSRF guard, required before any web
-  interface accepts a URL from someone other than the operator.
+  crawl already uses, so no second I/O seam was needed, and caches per origin.
+  The matching is Protego's rather than `urllib.robotparser`'s, which compares
+  paths with `startswith` and would silently under-obey (ADR-029).
+- **`SameDomainPolicy`** — same host, optionally its subdomains.
+- **`PrivateNetworkPolicy`** — the SSRF guard, in a pure form and a resolving
+  one, plus the per-hop redirect guard that is where SSRF actually lives.
 - **`CompositePolicy`** — the first refusal wins.
 
 A refusal is a value, so a recursive crawl records *"skipped: disallowed by
@@ -865,8 +868,15 @@ robots.txt"* and carries on. The service raises `PolicyRefusedError` only for
 the URL it was explicitly asked for, where refusing *is* a failure of the
 request; a crawl loop catches that per URL.
 
-robots.txt is deliberately not implemented. Fetching one page named by its
-operator is what a browser does when the same person types the same address.
+The one thing the seam did *not* answer by itself is **where** a policy is
+asked. A policy that can make a request is asked immediately before the request
+it guards; a pure one is asked when the URL is found. Asking robots.txt at the
+second point would tie the number of `/robots.txt` requests to the number of
+hosts a page mentions rather than to anything an operator set (ADR-030).
+
+`reason` is a phrase for a person and `rule` is the same fact for a counter, so
+a report can keep *"outside my scope"* and *"the site said no"* apart without
+parsing English.
 
 ### How this extends to recursion
 
@@ -1158,9 +1168,16 @@ secret, and both modules' syntax trees are checked for any read of the context.
 
 ### The `ThrottledFetcher` extension point
 
-Deliberately not implemented in this sprint. Politeness, rate limits, robots.txt
-and scheduling belong together and are one subject; splitting one of them off
-early would settle the shape of the other three by accident.
+Not implemented in this sprint, and filled in Sprint 13 exactly as sketched
+below. Politeness, rate limits, robots.txt and scheduling belong together and
+are one subject; splitting one of them off early would have settled the shape of
+the other three by accident.
+
+What the finished version added to the sketch is a *shared* `HostSchedule`, and
+it exists to break a loop: `RobotsPolicy` needs a fetcher to read robots.txt,
+and a throttle needs `RobotsPolicy` to learn a host's `Crawl-delay`. Both
+fetchers book slots in one schedule; the page fetcher asks robots for its delay,
+and the robots fetcher asks nobody.
 
 The seam is already there and needs nothing new:
 

@@ -188,6 +188,14 @@ it was explicitly asked for, where refusing is a failure of the request.
 robots.txt is deliberately not implemented yet. Fetching one page named by its
 operator is what a browser does when the same person types the same address.
 
+**Superseded in part by ADR-029 (Sprint 13).** robots.txt is implemented, on by
+default, and parsed by Protego rather than by `urllib.robotparser` — which
+compares paths with `startswith` and would silently under-obey. The seam
+described here held: `RobotsPolicy` is a `CrawlPolicy`, reads through the same
+`PageFetcher`, and neither the engine nor the fetcher learned what a robots rule
+is. What changed is *which gate it is asked at* (ADR-030) and that the reason it
+gives is a value a report counts rather than a sentence a reader parses.
+
 ## ADR-017: One page per call; recursion is a caller
 
 `WebDiscoveryService.crawl()` takes one URL, returns one immutable
@@ -547,3 +555,196 @@ A failed download is a row rather than a silence, because "where did my failed
 download go" is exactly the question somebody brings to a library. It has no
 payload, so it offers no file — and a record claiming a payload that is not on
 disk says so, rather than offering bytes that are gone.
+
+## ADR-029: robots.txt is obeyed by default, and parsed by Protego
+
+Two decisions, taken together because neither is worth much alone.
+
+**On by default.** ADR-016 argued the opposite, and its reasoning has expired
+rather than been overruled: fetching *one page named by its operator* is what a
+browser does when the same person types the same address. Since Sprint 9 a crawl
+follows links, and since Sprint 11 the URL arrives from a browser rather than
+from the person who started the process. Something that fetches many pages
+unattended is a bot however it was started, and robots.txt is the convention
+bots are held to.
+
+The cost is real and worth naming. With `--depth 0` — still the default — a
+crawl *is* one page a person named, and MaxiCrawler will now refuse where a
+browser would not. The workflow this project exists for feels it most: forums
+and link lists, exactly the pages share links sit on, are often disallowed
+wholesale.
+
+So the escape is deliberately cheap and visible: `--ignore-robots` on the
+command line, a checkbox on the crawl form, `respect_robots` in the
+configuration. A safe default nobody can find is a default people work around
+instead of with. And it is never silent — a refused URL is counted under
+`SkipReason.ROBOTS_TXT`, which exists precisely so that *"outside my scope"* and
+*"the site said no"* cannot be read as the same sentence.
+
+There is no exemption for the seed. "robots.txt applies, except at depth 0"
+makes one rule depend on another option, and rules like that become bugs.
+
+**robots.txt governs crawling only.** No provider consults it. A download is an
+explicit act on a resource a person named, and file hosts disallow crawlers as a
+matter of course; applying it there would break the second half of the chain to
+no one's benefit.
+
+**Protego rather than a parser of ours, and rather than the standard library.**
+RFC 9309 requires wildcards, an end-of-match anchor, longest-match precedence
+with `Allow` breaking ties, and group selection by product token.
+`urllib.robotparser` predates all of it and compares paths with `startswith`, so
+`Disallow: /*.pdf$` matches nothing there — we would fetch what a site forbade
+while believing we obeyed. Under-obeying quietly is worse than not obeying at
+all.
+
+Protego was evaluated rather than assumed: 26 checks over the six behaviours we
+depend on, of which 25 passed. It is BSD-3, pure Python with no dependencies of
+its own, ships `py.typed` (so `mypy --strict` needs no override, unlike
+`brotli`), and is maintained by the Scrapy project. It parses a string and opens
+no socket, which a test asserts — fetching stays ours.
+
+It is a *core* dependency rather than an extra, because `respect_robots`
+defaults to true and a safe default that silently lapses when an extra is
+missing is worse than a dependency.
+
+The 26th check is ours to fix and is fixed: Protego does not strip a UTF-8
+byte-order mark, so a robots.txt beginning with one loses its first group and a
+file forbidding everything permits everything. RFC 9309 says the document is
+UTF-8 whatever the server announced and a BOM must be ignored, so
+`decode_robots` owns that. `tests/test_web_robots.py` states what would have to
+stay true if the library were ever swapped.
+
+Status handling is the RFC's, and is the one place a failure becomes a
+permission:
+
+| Answer | Treated as |
+| --- | --- |
+| 2xx | the rules it states |
+| 4xx, including 401 and 403 | "unavailable" — no restrictions |
+| unreadable: not text, too large, a chain that never resolved | no restrictions |
+| 5xx, a timeout, a refused connection | "unreachable" — complete disallow |
+
+The last is the only case where something other than a rule stops a crawl, which
+is why `robots_deny_on_error` can invert it. Not knowing what a site permits is
+not permission.
+
+## ADR-030: Two gates, and the difference between them is cost
+
+The engine had one gate, at the moment a URL was found. That is the right place
+for a rule that answers from the URL itself and the wrong place for one that has
+to make a request to answer.
+
+Asking robots.txt there would tie the number of `/robots.txt` requests to the
+number of *discovered* hosts rather than to anything the operator set. One page
+linking to three hundred domains would cost three hundred requests before fifty
+pages were crawled: the frontier is bounded by depth and the page ceiling, and
+the set of hosts a page mentions is bounded by nobody.
+
+So there are two, and one rule decides which a policy belongs to:
+
+> A policy that can make a request is asked once, immediately before the request
+> it guards. A policy that cannot is asked when the URL is found, so the
+> frontier stays clean.
+
+Both count every refusal through the same `skip_reason_for`, so there is still
+exactly one vocabulary for "why not". A refusal at the second gate does not
+spend the page ceiling: it never became a request, and the ceiling counts
+requests.
+
+The alternative — reusing the unused policy seam on `WebDiscoveryService` —
+works, and was rejected because it makes skip counting a matter of catching
+exceptions and splits the translation across two files.
+
+Politeness is *not* a third gate. "May I fetch this?" and "may I fetch it yet?"
+are different questions, and a policy that answered "not yet" would have to be
+asked again in a loop that something would then have to own. Waiting belongs
+where the request is made: `ThrottledFetcher` wraps a `PageFetcher`, the engine
+still knows nothing about time, and there is no `sleep` above that file.
+
+The politeness state is a separate object because of a loop that would otherwise
+close: `RobotsPolicy` needs a fetcher to read robots.txt, and a throttle needs
+`RobotsPolicy` to learn a host's `Crawl-delay`. Both fetchers share one
+`HostSchedule`; the page fetcher asks robots for its delay and the robots fetcher
+asks nobody, so its request is spaced like any other without the file having to
+describe its own retrieval.
+
+`crawl_delay` defaults to **0.0**. A host that wants to be crawled slowly says so
+in its robots.txt and is obeyed up to `max_crawl_delay`; a delay nobody asked for
+is a cost with no beneficiary. The clamp is not optional — one hostile line
+saying `Crawl-delay: 86400` would otherwise freeze a crawl.
+
+## ADR-031: The private-network guard, and what it cannot do
+
+Until Sprint 11 the only person who could name a URL was the person running the
+program. A web interface changes that: a URL arrives from a browser, and a
+browser can be pointed at a form by any page it visits. `http://localhost:9200/`
+stops being an odd thing to type and starts being a request that arrives on its
+own.
+
+All of it is a `CrawlPolicy`. Neither the engine nor the fetcher learns what an
+internal address is.
+
+Two checks, because they cost differently. The **literal** check reads the URL
+and is pure, so it runs at the first gate and keeps a page full of links to this
+machine out of the frontier. The **resolved** check asks the resolver, which is
+what catches `metadata.google.internal`, an intranet name, and the services that
+answer `127.0.0.1` for anything; it runs at the second gate.
+
+Both had to agree with the socket rather than with `ipaddress`. `127.1`,
+`0x7f.0.0.1` and `2130706433` are rejected by `ipaddress` as malformed and
+accepted by the C resolver as loopback, so a guard trusting only the strict
+reading would call them host names, resolve nothing, permit the fetch — and the
+connection would go to loopback anyway. Both readings are tried.
+
+**The redirect is where SSRF actually lives.** A public URL answering
+`302 Location: http://169.254.169.254/` walks straight past a check made once at
+the start, so the fetcher calls a guard on every hop. It takes a plain callable
+that raises, so `maxicrawler.web.fetcher` still imports no policy.
+
+Allowing private addresses does **not** allow a metadata service. Somebody who
+opens their intranet to a crawler has not volunteered their cloud credentials,
+and the two are one setting only by accident of both being "not the internet". A
+named entry in `private_network_allowlist` still beats everything, which is what
+makes crawling one machine on a home network possible without opening the rest.
+
+**What this does not close: DNS rebinding.** Between our lookup and `urllib`'s
+there is a second lookup, and a name that answers differently each time can pass
+the first and be used by the second. Closing it means pinning the address we
+checked onto the connection actually opened, which is a change to how sockets
+are made rather than to a policy. This raises the cost of reaching an internal
+address; it does not make it impossible, and saying so is worth more than a
+guard that claims otherwise.
+
+## ADR-032: A download is stopped in the sink
+
+A crawl has had a stop button since Sprint 9: `CrawlControl` is an `Event` the
+engine checks between pages. A transfer had no such seam, so "stop" meant "wait
+for the file", and `serve` shutting down held on until it was done.
+
+`DownloadControl` is the same object for the other half of the chain — two
+background things in one server should not have two designs (ADR-024) — and
+where it is checked is the whole decision.
+
+Not in the manager: that is between jobs, and would only stop the *next* file.
+Not in the provider: every provider would implement cancellation and one of them
+would forget. It is checked in `LibrarySink.write`, before the chunk is written.
+That is the one place every provider's bytes already pass through, and the place
+that already guarantees an unfinished transfer leaves nothing behind (ADR-012).
+So a cancelled download is not a special path: it raises where a broken
+connection raises, the staging file is discarded exactly as it always was, and
+the library is left as it was.
+
+**A cancelled transfer writes no metadata record.** A record saying "failed"
+would turn somebody's own decision into a fault they later have to explain, and
+would count an attempt nobody made, which the next run would report as a retry.
+`DownloadStatus.CANCELLED` therefore lives only in an outcome being shown right
+now and never in a stored document — so nothing this release writes is
+unreadable by an earlier one, which `_read_enum` would otherwise refuse.
+
+Nowhere a person reads it is a stopped download spelled as a failure. They
+pressed the button.
+
+`DownloadControl` reaches `maxicrawler.api` through `maxicrawler.app`, not from
+the download layer, because the interface may not import `downloader` (ADR-022)
+and should not start now. It is a handle rather than a result: nothing about how
+a download runs travels with it.
