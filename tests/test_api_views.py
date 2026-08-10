@@ -3,6 +3,7 @@
 Pure functions, so none of this needs HTTP, a database or a crawl.
 """
 
+from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -40,10 +41,12 @@ from maxicrawler.app import (
     LibraryPage,
     LibraryQuery,
     LibrarySort,
+    LinkItem,
+    LinkPage,
+    LinkQuery,
 )
 from maxicrawler.crawler import DiscoverySummary, PluginUsage
-from maxicrawler.database import StoredUrl
-from maxicrawler.domain import DownloadStatus, ScanSession, Statistics, UrlRecord
+from maxicrawler.domain import DownloadStatus, ScanSession, Statistics
 from maxicrawler.web.models import LinkKind
 from maxicrawler.web.report import CrawlReport, CrawlStatistics, PageOutcome, SkipReason
 from maxicrawler.web.session import CrawlOptions, CrawlSession, CrawlState
@@ -443,19 +446,49 @@ def test_a_page_table_that_shows_everything_says_nothing_about_hiding() -> None:
 # --- the link table ----------------------------------------------------------
 
 
-def make_stored_url(url: str, plugin: str | None, category: str | None = "share") -> StoredUrl:
-    """Return a discovered URL as the database holds it."""
-    return StoredUrl(
-        record=UrlRecord(raw_url=url, normalized_url=url, source_url="https://example.test/"),
-        plugin_name=plugin,
+def make_link(
+    url: str, plugin: str | None = "generic", category: str | None = "share", *, position: int = 0
+) -> LinkItem:
+    """Return one discovered URL as the service hands it over."""
+    return LinkItem(
+        url=url,
+        raw_url=url,
+        source_url="https://example.test/",
+        plugin=plugin,
         category=category,
+        position=position,
+    )
+
+
+def make_link_page(
+    items: Sequence[LinkItem] = (),
+    *,
+    total: int | None = None,
+    discovered: int = 0,
+    downloadable: Iterable[str] = (),
+) -> LinkPage:
+    """Return a page of links the way the service would have built one.
+
+    *total* defaults to what is shown, so a test that is not about paging says
+    nothing about it. Ordering, filtering and paging are the service's subject
+    and are tested in `test_app_discovery.py`; this file is about wording.
+    """
+    return LinkPage(
+        items=tuple(items),
+        query=LinkQuery(),
+        total=len(items) if total is None else total,
+        recorded=len(items),
+        discovered=discovered,
+        page=1,
+        pages=1,
+        downloadable=frozenset(downloadable),
     )
 
 
 def test_recorded_urls_become_rows() -> None:
-    stored = make_stored_url("https://mega.nz/file/AaBbCcDd", "mega")
+    page = make_link_page([make_link("https://mega.nz/file/AaBbCcDd", "mega")])
 
-    (row,) = link_rows([stored])
+    (row,) = link_rows(page)
 
     assert row["url"] == "https://mega.nz/file/AaBbCcDd"
     assert row["plugin"] == "mega"
@@ -465,67 +498,51 @@ def test_recorded_urls_become_rows() -> None:
 
 
 def test_a_link_the_generic_plugin_claimed_is_not_notable() -> None:
-    (row,) = link_rows([make_stored_url("https://example.test/a", "generic")])
+    (row,) = link_rows(make_link_page([make_link("https://example.test/a")]))
 
     assert row["is_notable"] is False
 
 
-def test_a_link_no_plugin_claimed_says_so() -> None:
-    (row,) = link_rows([make_stored_url("https://example.test/a", None, None)])
+def test_a_link_no_plugin_claimed_is_given_a_word_here() -> None:
+    """The service leaves it as nothing; what to call nothing is a wording choice."""
+    (row,) = link_rows(make_link_page([make_link("https://example.test/a", None, None)]))
 
     assert row["plugin"] == "unresolved"
+    assert row["category"] == "—"
     assert row["is_notable"] is False
 
 
 def test_a_normalized_link_keeps_what_was_written() -> None:
-    stored = StoredUrl(
-        record=UrlRecord(
-            raw_url="https://Example.test/A?b=1#frag", normalized_url="https://example.test/A?b=1"
-        ),
-        plugin_name="generic",
+    item = LinkItem(
+        url="https://example.test/A?b=1",
+        raw_url="https://Example.test/A?b=1#frag",
+        source_url=None,
+        plugin="generic",
         category=None,
+        position=0,
     )
 
-    (row,) = link_rows([stored])
+    (row,) = link_rows(make_link_page([item]))
 
     assert row["was_normalized"] is True
     assert row["raw_url"] == "https://Example.test/A?b=1#frag"
 
 
-def test_host_plugins_come_before_the_fallback() -> None:
-    """A table cut off at two hundred rows must not consist of generic links."""
-    urls = [make_stored_url(f"https://example.test/{index}", "generic") for index in range(5)]
-    urls.append(make_stored_url("https://mega.nz/file/AaBbCcDd", "mega"))
-    urls.append(make_stored_url("https://example.test/x", None, None))
-
-    rows = link_rows(urls)
-
-    assert rows[0]["plugin"] == "mega"
-    assert rows[-1]["plugin"] == "unresolved"
-
-
-def test_discovery_order_survives_inside_a_group() -> None:
-    urls = [make_stored_url(f"https://example.test/{index}", "generic") for index in range(4)]
-
-    rows = link_rows(urls)
-
-    assert [row["url"] for row in rows] == [f"https://example.test/{index}" for index in range(4)]
-
-
 def test_the_link_table_says_how_many_it_left_out() -> None:
-    urls = [make_stored_url(f"https://example.test/{index}", "generic") for index in range(9)]
+    items = [make_link(f"https://example.test/{index}", position=index) for index in range(4)]
 
-    table = link_table(urls, discovered=9, limit=4)
+    table = link_table(make_link_page(items, total=9, discovered=9))
 
     assert len(table["rows"]) == 4
     assert table["total"] == "9"
     assert table["hidden"] == "5"
+    assert table["has_hidden"] is True
     assert table["was_recorded"] is True
 
 
 def test_a_crawl_that_recorded_nothing_is_not_a_crawl_that_found_nothing() -> None:
     """The difference the page has to state rather than show an empty table for."""
-    table = link_table((), discovered=2919)
+    table = link_table(make_link_page(discovered=2919))
 
     assert table["rows"] == ()
     assert table["was_recorded"] is False
@@ -533,7 +550,7 @@ def test_a_crawl_that_recorded_nothing_is_not_a_crawl_that_found_nothing() -> No
 
 
 def test_a_crawl_that_genuinely_found_nothing_says_that_instead() -> None:
-    table = link_table((), discovered=0)
+    table = link_table(make_link_page(discovered=0))
 
     assert table["rows"] == ()
     assert table["was_recorded"] is True
@@ -541,9 +558,9 @@ def test_a_crawl_that_genuinely_found_nothing_says_that_instead() -> None:
 
 def test_only_a_link_a_provider_could_fetch_offers_a_download() -> None:
     mega = "https://mega.nz/file/AaBbCcDd"
-    urls = [make_stored_url(mega, "mega"), make_stored_url("https://example.test/a", "generic")]
+    items = [make_link(mega, "mega"), make_link("https://example.test/a", position=1)]
 
-    table = link_table(urls, discovered=2, downloadable=frozenset({mega}))
+    table = link_table(make_link_page(items, downloadable=[mega]))
 
     assert [row["can_download"] for row in table["rows"]] == [True, False]
     assert table["has_downloads"] is True
@@ -551,9 +568,7 @@ def test_only_a_link_a_provider_could_fetch_offers_a_download() -> None:
 
 def test_a_table_with_nothing_to_fetch_grows_no_column() -> None:
     """A column of empty cells is worse than no column."""
-    urls = [make_stored_url("https://example.test/a", "generic")]
-
-    table = link_table(urls, discovered=1)
+    table = link_table(make_link_page([make_link("https://example.test/a")]))
 
     assert table["has_downloads"] is False
     assert table["rows"][0]["can_download"] is False

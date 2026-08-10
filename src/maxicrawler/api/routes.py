@@ -31,10 +31,13 @@ from maxicrawler.api.downloads import DownloadRun, DownloadRuns
 from maxicrawler.api.errors import DownloadBusyError
 from maxicrawler.api.jobs import DEFAULT_RETAINED_JOBS, CrawlJob, CrawlJobs
 from maxicrawler.app import (
+    DEFAULT_LINKS_PER_PAGE,
     DEFAULT_PER_PAGE,
+    DiscoveryService,
     LibraryQuery,
     LibraryService,
     LibrarySort,
+    LinkQuery,
     StoredPayload,
     crawl_document,
 )
@@ -81,6 +84,12 @@ def downloads_of(request: Request) -> DownloadRuns:
 def library_of(request: Request) -> LibraryService:
     """Return the service this application reads the library through."""
     service: LibraryService = request.app.state.library
+    return service
+
+
+def discovery_of(request: Request) -> DiscoveryService:
+    """Return the service this application reads crawl findings through."""
+    service: DiscoveryService = request.app.state.discovery
     return service
 
 
@@ -585,18 +594,17 @@ def _recorded_crawl(request: Request) -> Response:
 def _link_table(request: Request, session_id: str, *, discovered: int) -> dict[str, Any]:
     """Return the discovered-link table, with a Download beside what can be.
 
-    Which links those are is asked once for the whole table and answered from
-    the URL alone — a plugin classifies it, a provider claims it, and the
-    provider says whether it was composed with everything a transfer needs. No
-    request is made, so a report of two hundred links costs nothing to render.
+    The whole question — which URLs, in which order, and which of them this
+    installation could fetch — is one call on
+    :class:`~maxicrawler.app.DiscoveryService`. Whether a link can be downloaded
+    is answered from the URL alone: a plugin classifies it, a provider claims it,
+    and the provider says whether it was composed with everything a transfer
+    needs. No request is made, so a page of links costs nothing to render.
     """
-    stored = jobs_of(request).service.discovered_urls(session_id)
     return views.link_table(
-        stored,
-        discovered=discovered,
-        downloadable=downloads_of(request).service.downloadable(
-            item.record.normalized_url for item in stored
-        ),
+        discovery_of(request).browse(
+            session_id, LinkQuery(per_page=DEFAULT_LINKS_PER_PAGE), discovered=discovered
+        )
     )
 
 

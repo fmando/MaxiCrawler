@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from maxicrawler.api.errors import MISSING_EXTRA, WebDependencyError
-from maxicrawler.app import CrawlService, DownloadService, LibraryService
+from maxicrawler.app import CrawlService, DiscoveryService, DownloadService, LibraryService
 from maxicrawler.config import DEFAULT_CONFIG_PATH, Settings
 
 try:
@@ -46,6 +46,7 @@ def create_app(
     jobs: CrawlJobs | None = None,
     downloads: DownloadRuns | None = None,
     library: LibraryService | None = None,
+    discovery: DiscoveryService | None = None,
     config_path: Path | None = None,
 ) -> Starlette:
     """Return the MaxiCrawler web application.
@@ -73,6 +74,15 @@ def create_app(
         else DownloadRuns(DownloadService(crawl_service.settings))
     )
     shelf = library if library is not None else LibraryService(crawl_service.settings)
+    # The download service answers "could this be fetched?" from a provider
+    # registry it builds once and caches. Handing that same instance over rather
+    # than a second one is why the resolver is injected: two registries would be
+    # two sets of providers to keep in step, for one identical answer.
+    findings = (
+        discovery
+        if discovery is not None
+        else DiscoveryService(crawl_service.settings, downloadable=transfers.service.downloadable)
+    )
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
@@ -158,6 +168,7 @@ def create_app(
     application.state.jobs = registry
     application.state.downloads = transfers
     application.state.library = shelf
+    application.state.discovery = findings
     application.state.config_path = source
     return application
 

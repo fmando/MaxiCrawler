@@ -64,9 +64,10 @@ gehen durch `maxicrawler.app` — den Composition Root, die einzige Schicht, die
 gleichzeitig kennen darf:
 
 ```text
-maxicrawler.cli ─┐                      ┌─ CrawlService    → web / crawler / database
-                 ├─→ maxicrawler.app ─→ ├─ DownloadService → providers / downloader / library
-maxicrawler.api ─┘                      └─ LibraryService  → library
+                                        ┌─ CrawlService     → web / crawler / database
+maxicrawler.cli ─┐                      ├─ DiscoveryService → database
+                 ├─→ maxicrawler.app ─→ ├─ DownloadService  → providers / downloader / library
+maxicrawler.api ─┘                      └─ LibraryService   → library
 ```
 
 Die CLI bleibt vollständig erhalten und ist der Client für Automatisierung,
@@ -85,6 +86,15 @@ und eine gespeicherte Datei ausliefern, ohne `downloader`, `providers` oder
 `DownloadService` schreibt in die Library, `LibraryService` liest sie. Zwei
 Fragen an denselben Speicher, getrennt gehalten, damit keine der beiden das
 Vokabular der anderen bekommt (ADR-028).
+
+Dieselbe Trennung gilt seit Sprint 15 für die Discovery: `CrawlService`
+schreibt, was ein Crawl gefunden hat, und `DiscoveryService` liest es zurück —
+gesucht, gefiltert, sortiert und geblättert. Ein Report ist damit keine Ansicht
+mehr, sondern eine Abfrage: `LinkQuery` hinein, `LinkPage` heraus. Ob ein Link
+heruntergeladen werden kann, ist die eine Frage, die keine Datenbankspalte
+beantwortet; sie kommt als Funktion herein, damit dieser Service weder Plugins
+noch Provider kennen muss und eine spätere Frage derselben Form — *„liegt das
+schon in der Library?"* — denselben Weg nimmt.
 
 Die Weboberfläche ist ein **optionales** Extra (`pip install "maxicrawler[web]"`).
 Ohne sie funktioniert jeder Befehl außer `serve`, und `serve` erklärt in einem

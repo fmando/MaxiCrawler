@@ -31,11 +31,13 @@ from maxicrawler.app import (
     LibraryPage,
     LibraryQuery,
     LibrarySort,
+    LinkItem,
+    LinkPage,
     StoredPayload,
 )
 from maxicrawler.config import Settings
 from maxicrawler.crawler import PluginUsage
-from maxicrawler.database import StoredCrawl, StoredUrl
+from maxicrawler.database import StoredCrawl
 from maxicrawler.domain import DownloadStatus
 from maxicrawler.plugins.generic import GENERIC_PLUGIN_NAME
 from maxicrawler.utils import format_size
@@ -54,14 +56,6 @@ killed does not get to update a row on its way out.
 
 MAX_LISTED_PAGES = 200
 """How many pages a report lists before saying how many it left out."""
-
-MAX_LISTED_LINKS = 200
-"""How many discovered URLs a report lists before saying the same.
-
-A crawl of fifty pages routinely finds thousands. A table that long is not a
-report, and the JSON document beside it is the right answer for anyone who
-wants all of them.
-"""
 
 STATE_LABELS: dict[CrawlState, str] = {
     CrawlState.PENDING: "queued",
@@ -570,36 +564,23 @@ def page_table(report: CrawlReport, *, limit: int = MAX_LISTED_PAGES) -> dict[st
     }
 
 
-def link_table(
-    urls: Iterable[StoredUrl],
-    *,
-    discovered: int,
-    limit: int = MAX_LISTED_LINKS,
-    downloadable: Container[str] = (),
-) -> dict[str, Any]:
-    """Return the link table for the URLs one crawl recorded.
+def link_table(page: LinkPage) -> dict[str, Any]:
+    """Return the link table for one page of what a crawl recorded.
 
-    *discovered* is what the report counted, which is not always what the
-    database holds: a crawl run without persistence records nothing at all. The
-    two numbers are kept apart so the page can say "not recorded" rather than
-    showing an empty table that reads as "nothing found".
-
-    *downloadable* names the URLs some provider here could fetch, which is what
-    decides whether a row offers a Download button. Deciding it once for the
-    whole table rather than per row is why it arrives as a set: the answer comes
-    from a plugin and a declared capability, and asking it two hundred times
-    would be two hundred identical resolutions.
+    Everything that decides *which* URLs these are — the filtering, the order,
+    the page — was decided by
+    :class:`~maxicrawler.app.discovery.DiscoveryService` before this was called.
+    What is left here is wording and formatting, which is the whole reason this
+    module exists.
     """
-    recorded = tuple(urls)
-    total = len(recorded)
-    rows = link_rows(recorded, limit=limit, downloadable=downloadable)
+    rows = link_rows(page)
     return {
         "rows": rows,
-        "total": format_number(total),
-        "hidden": format_number(max(0, total - limit)),
-        "has_hidden": total > limit,
-        "discovered": format_number(discovered),
-        "was_recorded": total > 0 or discovered == 0,
+        "total": format_number(page.total),
+        "hidden": format_number(page.hidden),
+        "has_hidden": page.hidden > 0,
+        "discovered": format_number(page.discovered),
+        "was_recorded": page.was_recorded,
         # A column of empty cells is worse than no column: the table only grows
         # an action when at least one row actually has one.
         "has_downloads": any(row["can_download"] for row in rows),
@@ -850,47 +831,34 @@ def _page_row(page: PageOutcome) -> dict[str, Any]:
     }
 
 
-def link_rows(
-    urls: Iterable[StoredUrl], *, limit: int | None = None, downloadable: Container[str] = ()
-) -> tuple[dict[str, Any], ...]:
-    """Return one row per recorded URL, the interesting plugins first.
+def link_rows(page: LinkPage) -> tuple[dict[str, Any], ...]:
+    """Return one row per URL on *page*, in the order the service put them in."""
+    return tuple(_link_row(item, downloadable=page.downloadable) for item in page.items)
 
-    Same ordering as :func:`plugin_shares`, for the same reason. Discovery
-    order would be the honest default, but a page of share links produces
-    thousands of generic URLs and a handful of Mega ones, and a table cut off
-    at two hundred rows would then contain none of the links this project
-    exists to find. Within each group the discovery order is kept.
+
+def _link_row(item: LinkItem, *, downloadable: Container[str] = ()) -> dict[str, Any]:
+    """Return one recorded URL as a table row.
+
+    ``plugin`` and ``category`` are where a URL nothing claimed gets its
+    wording. The service leaves both as ``None``, because what to call an
+    unanswered question is a decision for whoever is showing it — a terminal
+    and a table legitimately word it differently.
     """
-    ordered = sorted(enumerate(urls), key=lambda entry: (_link_priority(entry[1]), entry[0]))
-    chosen = ordered if limit is None else ordered[:limit]
-    return tuple(_link_row(stored, downloadable=downloadable) for _, stored in chosen)
-
-
-def _link_row(stored: StoredUrl, *, downloadable: Container[str] = ()) -> dict[str, Any]:
-    """Return one recorded URL as a table row."""
-    record = stored.record
     return {
-        "url": record.normalized_url,
-        "raw_url": record.raw_url,
-        "was_normalized": record.raw_url != record.normalized_url,
-        "source_url": record.source_url,
-        "plugin": stored.plugin_name or "unresolved",
-        "category": stored.category or "—",
+        "url": item.url,
+        "raw_url": item.raw_url,
+        "was_normalized": item.was_normalized,
+        "source_url": item.source_url,
+        "plugin": item.plugin or "unresolved",
+        "category": item.category or "—",
         # True when a host-specific plugin claimed it rather than the fallback,
         # which is what the table gives its one piece of emphasis to.
-        "is_notable": _link_priority(stored) == 0,
+        "is_notable": item.is_notable,
         # A link this installation could actually fetch. Not the same question
         # as "is it notable": a host-specific plugin can classify a link whose
         # provider cannot transfer anything.
-        "can_download": record.normalized_url in downloadable,
+        "can_download": item.url in downloadable,
     }
-
-
-def _link_priority(stored: StoredUrl) -> int:
-    """Return which group a recorded URL sorts into: host, generic, unresolved."""
-    if stored.plugin_name is None:
-        return 2
-    return 1 if stored.plugin_name == GENERIC_PLUGIN_NAME else 0
 
 
 def _skip_rows(skips: Iterable[tuple[SkipReason, int]]) -> tuple[dict[str, Any], ...]:
