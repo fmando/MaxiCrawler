@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from maxicrawler.api.errors import MISSING_EXTRA, WebDependencyError
-from maxicrawler.app import CrawlService, DownloadService
+from maxicrawler.app import CrawlService, DownloadService, LibraryService
 from maxicrawler.config import DEFAULT_CONFIG_PATH, Settings
 
 try:
@@ -45,6 +45,7 @@ def create_app(
     settings: Settings | None = None,
     jobs: CrawlJobs | None = None,
     downloads: DownloadRuns | None = None,
+    library: LibraryService | None = None,
     config_path: Path | None = None,
 ) -> Starlette:
     """Return the MaxiCrawler web application.
@@ -71,6 +72,7 @@ def create_app(
         if downloads is not None
         else DownloadRuns(DownloadService(crawl_service.settings))
     )
+    shelf = library if library is not None else LibraryService(crawl_service.settings)
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
@@ -131,6 +133,7 @@ def create_app(
     application.state.crawl_service = crawl_service
     application.state.jobs = registry
     application.state.downloads = transfers
+    application.state.library = shelf
     application.state.config_path = source
     return application
 

@@ -287,8 +287,12 @@ def _library_row(item: LibraryItem) -> dict[str, Any]:
         "downloaded_at": (
             "—" if item.downloaded_at is None else format_timestamp(item.downloaded_at)
         ),
-        "path": item.path.as_posix(),
+        "path": "—" if item.path is None else item.path.as_posix(),
         "source_url": item.source_url,
+        "status": str(item.status),
+        "state_label": STATUS_LABELS[item.status],
+        "state_tone": STATUS_TONES[item.status],
+        "url": f"/library/{item.directory}/{item.key}",
     }
 
 

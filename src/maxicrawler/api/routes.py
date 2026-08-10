@@ -24,7 +24,7 @@ from maxicrawler.api import stream, views
 from maxicrawler.api.downloads import DownloadRun, DownloadRuns
 from maxicrawler.api.errors import DownloadBusyError
 from maxicrawler.api.jobs import DEFAULT_RETAINED_JOBS, CrawlJob, CrawlJobs
-from maxicrawler.app import crawl_document
+from maxicrawler.app import LibraryService, crawl_document
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 """Where the pages live. Beside the code, so an installed wheel carries them."""
@@ -61,6 +61,12 @@ def downloads_of(request: Request) -> DownloadRuns:
     """Return the registry this application is running downloads through."""
     registry: DownloadRuns = request.app.state.downloads
     return registry
+
+
+def library_of(request: Request) -> LibraryService:
+    """Return the service this application reads the library through."""
+    service: LibraryService = request.app.state.library
+    return service
 
 
 def _download(request: Request) -> DownloadRun:
@@ -319,13 +325,13 @@ async def library(request: Request) -> Response:
     page can list files while ``api`` imports neither ``library`` nor
     ``downloader`` nor ``providers``.
     """
-    downloads = downloads_of(request)
+    service = library_of(request)
     return page(
         request,
         "library.html",
         {
-            "library": views.library_table(downloads.service.stored_downloads()),
-            "library_path": downloads.service.library_root.as_posix(),
+            "library": views.library_table(service.browse().items),
+            "library_path": service.library_root.as_posix(),
         },
         section="library",
     )
