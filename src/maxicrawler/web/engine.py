@@ -9,10 +9,27 @@ lines, because the pieces it composes were built to be composed.
 
 Three properties are worth naming before reading the code.
 
-**There is one gate.** :meth:`CrawlEngine._consider` is the only place a URL is
-turned away, and every turn-away is counted with its reason. A consequence
-worth having: the frontier only ever holds URLs that will actually be fetched,
-which is what bounds its size without needing a cap.
+**There are two gates, and the difference between them is cost.**
+:meth:`CrawlEngine._consider` runs when a URL is *found* and asks only policies
+that answer from the URL itself. :meth:`CrawlEngine._admit` runs when a URL is
+*popped*, immediately before the request, and is where a policy that has to
+make a request of its own belongs — reading ``/robots.txt``, resolving a host.
+
+The rule that decides which gate a policy goes to:
+
+    A policy that can make a request is asked once, immediately before the
+    request it guards. A policy that cannot is asked when the URL is found, so
+    the frontier stays clean.
+
+Asking robots.txt at the first gate would tie the number of ``/robots.txt``
+requests to the number of *discovered* hosts rather than to anything the
+operator set: one page linking to three hundred domains would cost three
+hundred requests to then crawl fifty pages. At the second gate it is asked only
+about URLs that are genuinely next.
+
+Both gates count every turn-away with its reason, through the same
+:func:`~maxicrawler.web.report.skip_reason_for`, so there is still exactly one
+vocabulary for "why not".
 
 **One dead page never stops a run.** A failure on any page becomes a
 :class:`~maxicrawler.web.report.PageOutcome` and the loop continues, the same
@@ -78,6 +95,10 @@ class CrawlEngine:
     Every collaborator is injected and every one of them is a protocol, so a
     priority frontier, a persistent visited set, or a policy that reads
     ``robots.txt`` each replace one argument and change nothing here.
+
+    Two of those arguments are policies, and which one a policy belongs in is
+    decided by whether it can make a request: *policy* is asked when a URL is
+    found, *gate* immediately before it is fetched. See the module docstring.
     """
 
     def __init__(
@@ -87,6 +108,7 @@ class CrawlEngine:
         frontier: Frontier | None = None,
         visited: VisitedSet | None = None,
         policy: CrawlPolicy | None = None,
+        gate: CrawlPolicy | None = None,
         control: CrawlControl | None = None,
         event_bus: EventBus | None = None,
         repository: CrawlRepository | None = None,
@@ -96,6 +118,7 @@ class CrawlEngine:
         self._frontier = frontier if frontier is not None else FifoFrontier()
         self._visited = visited if visited is not None else InMemoryVisitedSet()
         self._policy = policy if policy is not None else AllowAllPolicy()
+        self._gate = gate if gate is not None else AllowAllPolicy()
         self._control = control if control is not None else CrawlControl()
         self._event_bus = event_bus
         self._scope: CrawlPolicy = self._policy
@@ -265,7 +288,35 @@ class CrawlEngine:
                 # catch that, because the redirect was not known yet.
                 self._skips[SkipReason.ALREADY_SEEN] += 1
                 continue
+            if not self._admit(item):
+                continue
             self._visit(item, session)
+
+    def _admit(self, item: CrawlItem) -> bool:
+        """Ask the costly policies, immediately before the request they cost.
+
+        Checked here rather than at :meth:`_consider` so that a policy which
+        makes a request of its own is asked about URLs that are genuinely next,
+        and about no others.
+
+        Refused *before* the attempt is counted, so a URL that robots.txt
+        forbids does not consume a page of the ceiling. It never became a
+        request, and the ceiling counts requests.
+
+        Raises:
+            PolicyRefusedError: the **seed** was refused. Nothing has been read,
+                so there is no report to hand back and the caller is told by an
+                exception — the same rule a seed that cannot be fetched follows.
+        """
+        decision = self._gate.may_fetch(item.url)
+        if decision.allowed:
+            return True
+        reason = skip_reason_for(decision)
+        if not self._pages:
+            msg = f"nothing to crawl: the seed was {reason}"
+            raise PolicyRefusedError(msg, rule=decision.rule)
+        self._skips[reason] += 1
+        return False
 
     def _visit(self, item: CrawlItem, session: CrawlSession) -> None:
         """Fetch one page, record what happened, and queue what it linked to."""
@@ -365,10 +416,11 @@ class CrawlEngine:
     def _consider(self, item: CrawlItem) -> None:
         """Queue *item*, or count why it will never be fetched.
 
-        The single gate. Depth is checked first because it costs nothing and
-        rejects the most; scope next; identity last — so a URL refused for
-        being out of scope is *not* also remembered as seen, and a later crawl
-        under a wider scope still finds it.
+        The first gate, and the only one a URL passes before it is queued.
+        Depth is checked first because it costs nothing and rejects the most;
+        scope next; identity last — so a URL refused for being out of scope is
+        *not* also remembered as seen, and a later crawl under a wider scope
+        still finds it.
 
         The counters therefore count occurrences rather than distinct URLs: a
         link to the same off-site page from forty pages is forty skips, which

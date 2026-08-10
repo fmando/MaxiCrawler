@@ -614,6 +614,77 @@ def test_a_refusal_is_counted_under_the_rule_that_refused_it() -> None:
     assert SkipReason.OUT_OF_SCOPE not in skips
 
 
+# --- the second gate, immediately before the request -------------------------
+
+
+class RecordingGate:
+    """A gate that refuses the paths it was given, and remembers every ask."""
+
+    def __init__(self, *refused: str) -> None:
+        self._refused = refused
+        self.asked: list[str] = []
+
+    def may_fetch(self, url: str) -> PolicyDecision:
+        self.asked.append(url)
+        if any(url.endswith(path) for path in self._refused):
+            return PolicyDecision.refuse("pretend robots", rule=PolicyRule.ROBOTS)
+        return PolicyDecision.allow()
+
+
+def test_the_gate_refuses_a_page_and_the_crawl_carries_on() -> None:
+    gate = RecordingGate("/a")
+
+    with serve(make_site()) as base:
+        report = make_engine(gate=gate).run(make_session(f"{base}/", max_depth=2))
+
+    assert "/a" not in visited_paths(report, base)
+    assert "/b" in visited_paths(report, base)
+    assert dict(report.statistics.skips_by_reason)[SkipReason.ROBOTS_TXT] == 1
+
+
+def test_the_gate_is_asked_only_about_urls_that_are_genuinely_next() -> None:
+    """The whole reason the second gate exists.
+
+    At the first gate, a policy that reads robots.txt would be asked about
+    every URL a page links to — a page linking to three hundred domains would
+    cost three hundred requests to then crawl a handful. Here it is asked once
+    per page actually taken off the frontier, which is what `max_pages` bounds.
+    """
+    gate = RecordingGate()
+
+    with serve(make_site()) as base:
+        report = make_engine(gate=gate).run(make_session(f"{base}/", max_depth=1, max_pages=2))
+
+    assert len(gate.asked) == len(report.pages) == 2
+
+
+def test_a_page_the_gate_refuses_does_not_spend_the_page_ceiling() -> None:
+    """It never became a request, and the ceiling counts requests."""
+    gate = RecordingGate("/a")
+
+    with serve(make_site()) as base:
+        report = make_engine(gate=gate).run(make_session(f"{base}/", max_depth=1, max_pages=3))
+
+    assert sorted(visited_paths(report, base)) == ["/", "/b"]
+    assert report.statistics.pages_attempted == 2
+
+
+def test_a_seed_the_gate_refuses_ends_the_crawl_with_its_rule() -> None:
+    gate = RecordingGate("/")
+
+    with serve(make_site()) as base, pytest.raises(PolicyRefusedError) as refusal:
+        make_engine(gate=gate).run(make_session(f"{base}/"))
+
+    assert refusal.value.rule is PolicyRule.ROBOTS
+    assert "disallowed by robots.txt" in str(refusal.value)
+
+
+def test_without_a_gate_nothing_is_asked_twice() -> None:
+    """The default gate permits everything, so an unwired engine is unchanged."""
+    with crawl(make_site(), max_depth=1) as (report, base):
+        assert sorted(visited_paths(report, base)) == ["/", "/a", "/b"]
+
+
 # --- what is worth following -------------------------------------------------
 
 
