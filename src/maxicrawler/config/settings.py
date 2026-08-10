@@ -35,6 +35,14 @@ class Settings:
     max_links: int = 10_000
     """How many links one page may contribute before the rest are dropped."""
 
+    max_view_bytes: int = 32 * 1024 * 1024
+    """Largest stored file the web interface will show inline.
+
+    A browser handed a 400 MB text file stops answering, so above this a page
+    offers the download instead of the file. It bounds what is *displayed*;
+    nothing about what may be stored.
+    """
+
     crawl_depth: int = 0
     """Default link distance a crawl follows; zero fetches the seed alone."""
 
@@ -77,6 +85,9 @@ class Settings:
         if self.max_links < 1:
             msg = "max_links must be at least 1"
             raise ValueError(msg)
+        if self.max_view_bytes < 1:
+            msg = "max_view_bytes must be at least 1"
+            raise ValueError(msg)
         if self.crawl_depth < 0:
             msg = "crawl_depth must not be negative"
             raise ValueError(msg)
@@ -111,6 +122,7 @@ class Settings:
             max_page_bytes=_int_value(app_config, "max_page_bytes", defaults.max_page_bytes),
             max_redirects=_int_value(app_config, "max_redirects", defaults.max_redirects),
             max_links=_int_value(app_config, "max_links", defaults.max_links),
+            max_view_bytes=_int_value(app_config, "max_view_bytes", defaults.max_view_bytes),
             crawl_depth=_int_value(app_config, "crawl_depth", defaults.crawl_depth),
             crawl_max_pages=_int_value(app_config, "crawl_max_pages", defaults.crawl_max_pages),
             crawl_same_domain=_bool_value(
@@ -132,6 +144,7 @@ class Settings:
             f"max_page_bytes = {self.max_page_bytes}\n"
             f"max_redirects = {self.max_redirects}\n"
             f"max_links = {self.max_links}\n"
+            f"max_view_bytes = {self.max_view_bytes}\n"
             f"crawl_depth = {self.crawl_depth}\n"
             f"crawl_max_pages = {self.crawl_max_pages}\n"
             f"crawl_same_domain = {str(self.crawl_same_domain).lower()}\n"

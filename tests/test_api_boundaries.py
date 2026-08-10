@@ -209,6 +209,34 @@ def test_the_interface_reaches_downloads_through_the_service() -> None:
     assert "maxicrawler.app.DownloadSummary" in imported
 
 
+def test_the_interface_reaches_the_library_through_the_service() -> None:
+    """The same, for the half of the sprint that reads rather than writes.
+
+    A page that searches, sorts and serves stored files is where reaching for
+    ``maxicrawler.library`` would have been quickest, so this is the assertion
+    Sprint 12 was most likely to break.
+    """
+    imported = imports_of(PACKAGE / "api" / "routes.py")
+
+    assert "maxicrawler.app.LibraryService" in imported
+    assert "maxicrawler.app.LibraryQuery" in imported
+
+
+def test_the_interface_decides_nothing_about_media_itself() -> None:
+    """What a browser may be shown is one table, and it is not in this layer.
+
+    ``mimetypes`` in particular: it reads the Windows registry, so a content
+    type that came from it would differ between machines — and a content type is
+    what decides whether a browser executes something.
+    """
+    found = offenders("api", ("mimetypes",))
+
+    assert found == {}
+    assert "maxicrawler.app.viewing.DOWNLOAD_CONTENT_TYPE" in imports_of(
+        PACKAGE / "api" / "routes.py"
+    )
+
+
 def test_the_interface_holds_no_copy_of_the_command_line() -> None:
     """Not importing it is the weaker half; the stronger half is a review.
 

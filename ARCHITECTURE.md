@@ -65,8 +65,8 @@ gleichzeitig kennen darf:
 
 ```text
 maxicrawler.cli ─┐                      ┌─ CrawlService    → web / crawler / database
-                 ├─→ maxicrawler.app ─→ ┤
-maxicrawler.api ─┘                      └─ DownloadService → providers / downloader / library
+                 ├─→ maxicrawler.app ─→ ├─ DownloadService → providers / downloader / library
+maxicrawler.api ─┘                      └─ LibraryService  → library
 ```
 
 Die CLI bleibt vollständig erhalten und ist der Client für Automatisierung,
@@ -77,9 +77,14 @@ Objektgraphen; jeder Crawl, den sie startet, wird von `CrawlService` gebaut, und
 jeder Download von `DownloadService`.
 
 Ein Service gibt nach oben nur einfache Werte heraus — `DownloadProgress`,
-`DownloadSummary`, `LibraryItem`. Deshalb kann die Weboberfläche einen Transfer
-anzeigen und die Library auflisten, ohne `downloader`, `providers` oder
+`DownloadSummary`, `LibraryItem`, `LibraryPage`, `StoredPayload`, `MediaVerdict`.
+Deshalb kann die Weboberfläche einen Transfer anzeigen, die Library durchsuchen
+und eine gespeicherte Datei ausliefern, ohne `downloader`, `providers` oder
 `library` zu importieren.
+
+`DownloadService` schreibt in die Library, `LibraryService` liest sie. Zwei
+Fragen an denselben Speicher, getrennt gehalten, damit keine der beiden das
+Vokabular der anderen bekommt (ADR-028).
 
 Die Weboberfläche ist ein **optionales** Extra (`pip install "maxicrawler[web]"`).
 Ohne sie funktioniert jeder Befehl außer `serve`, und `serve` erklärt in einem
@@ -92,6 +97,11 @@ Seit Sprint 11 führt die Weboberfläche die ganze Kette einmal durch:
 ```text
 Crawl → Report → Download → Library
 ```
+
+Seit Sprint 12 endet der Weg nicht in einer Tabelle: die Library wird durchsucht,
+gefiltert, sortiert und geblättert, jede Datei hat eine Seite, und der Browser
+zeigt an, was er anzeigen kann. MaxiCrawler rendert dabei nichts selbst — es
+nennt einen Content-Type und übergibt die Bytes (ADR-027).
 
 Bewusst genau ein Download zur Zeit, ohne Warteschlange, ohne Stapel und ohne
 Scheduler. Was dafür nötig war, ist ein Service über dem Download Manager —
@@ -160,6 +170,16 @@ weiß.
     Ein Pfad wäre eine Aufforderung an den Server, auf fremden Klick die eigene
     Platte zu lesen; `DownloadService.require_url` ist die einzige Stelle, die
     das entscheidet.
+-   Ein Eintragsschlüssel aus einer URL wird geprüft, bevor er ein Pfadsegment
+    wird: `Library.entry_at` akzeptiert nur Komponenten, die dieses Projekt selbst
+    erzeugt haben könnte, und weist alles ab, was die Wurzel verlässt — auch über
+    einen Symlink.
+-   MaxiCrawler rendert keine fremden Dateien. Was ein Browser angezeigt bekommen
+    darf, steht in einer Tabelle in `maxicrawler.app.viewing`; `mimetypes` wird
+    nie befragt, weil es unter Windows die Registry liest.
+-   Was Skript ausführen kann — HTML und SVG — wird nur mit
+    `Content-Security-Policy: sandbox` ausgeliefert. Ohne das hätte eine
+    heruntergeladene Seite jede Befugnis dieser Oberfläche.
 -   Kein Kernpaket importiert `maxicrawler.api`. Einzige Ausnahme ist
     `maxicrawler.cli`, weil dort `serve` liegt, und dort auch nur `api.errors`.
 -   Diese Grenzen werden gelesen, nicht geglaubt: `tests/test_api_boundaries.py`

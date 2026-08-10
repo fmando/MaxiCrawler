@@ -453,3 +453,97 @@ between pages; a transfer has no such seam, so a server asked to stop leaves a
 running transfer alone. That is safe rather than merely tolerable: content
 becomes visible only once it is whole (ADR-012), so an abandoned transfer leaves
 no half file in the library.
+
+## ADR-027: Serving stored files from the same origin, safely
+
+The library shows what it holds: a PDF, an image, a text file, a stored HTML
+page. MaxiCrawler renders none of them. It states a content type, hands the bytes
+over, and lets the browser do what browsers are good at — no PDF renderer, no
+Markdown converter, no image decoder, and nothing to keep up to date.
+
+That leaves one real problem. **Two of those types are executable code.** A
+downloaded HTML page or SVG, served inline from `http://127.0.0.1:8000/`, runs in
+*this application's origin*, and there is no authentication in front of it
+(ADR-025). Such a page could read the settings page, start a crawl, start a
+download — anything a person with the tab open could do.
+
+The answer is `Content-Security-Policy: sandbox`, which makes the browser treat
+the response as its own opaque origin, plus the `sandbox` attribute on the frame
+that shows it. Verified rather than assumed: from the page around it, the framed
+document is unreachable.
+
+**It is applied to HTML and SVG only, and that split is a measurement.** The
+first version sent the policy on every inline answer, on the reasonable ground
+that "which types are dangerous" is a question answered wrongly once and then
+kept. Chrome then refuses to render a PDF: `ERR_BLOCKED_BY_CLIENT`, because the
+directive blocks the plugin its viewer is, and the frame attribute blocks it
+again. A PDF, an image and plain text cannot execute script in our origin — a
+PDF's own script runs inside the browser's viewer, not in the page that framed
+it — so the policy would have cost the whole feature and bought nothing.
+
+Four smaller decisions follow from the same reasoning:
+
+- **An allow-list, never `mimetypes`.** That module reads the Windows registry:
+  the type of a `.webp` differs between a developer's machine and the CI meant to
+  check it, and this install has no entry for it at all. A content type decides
+  whether a browser executes something, which makes "it depends on the machine"
+  the wrong property for it to have.
+- **SVG is an `<img>`, never a frame.** An image element runs no script even
+  when the file behind it contains some.
+- **Markdown is `text/plain`.** No browser renders Markdown, `text/markdown`
+  makes Chrome download it, and converting it would mean rendering it ourselves.
+  Showing the source is the only reading of "let the browser display it" that is
+  also "do not convert it".
+- **Downloading states no type at all.** `…/file` is always
+  `application/octet-stream` and always an attachment, so no browser gets to
+  decide to render what it receives. Only `…/view` names a type, and only after
+  the table allowed it.
+
+A path arrives in a URL, so it is not trusted. `Library.entry_at` accepts only
+components this project could have minted, resolves the result, and refuses
+anything that leaves the root — which a symbolic link inside the library would.
+A file above `max_view_bytes` (32 MiB) is offered rather than shown, because a
+browser handed a 400 MB text file stops answering.
+
+There is no "open in the file manager" button, and there cannot be one that
+works: a `file://` link from an `http://` page is blocked by every browser, and
+having the server run `explorer` on an HTTP request would mean a web page
+launching a local program. The path is shown in a field that selects on click,
+with a copy button that appears only when scripting can make it work.
+
+## ADR-028: Reading the library is its own service
+
+`DownloadService` writes into the library; `LibraryService` reads it. Two
+questions about one store, and keeping them apart is what stopped the first from
+growing a second vocabulary — searching, sorting, paging and content types have
+nothing to do with how a transfer is executed.
+
+Both live in `maxicrawler.app`, so the browser and a future `library list`
+command cannot disagree about what "sorted by name" means. That is the same
+argument ADR-022 made for crawling and ADR-026 for downloading, applied a third
+time; the web layer still imports neither `library` nor `downloader` nor
+`providers`, and `tests/test_api_boundaries.py` reads the import graph to say so.
+
+**The file system stays the index.** A query reads one small document per stored
+resource and no database (ADR-010). The cost is measured rather than assumed: on
+the machine this was written on, two thousand entries take about 0.3 seconds warm
+and roughly sixteen the first time, while the virus scanner has its turn. Paging
+does not help, because searching and sorting need every record. An index kept as
+a *cache*, invalidated by modification time, would — and ADR-010 already permits
+one on exactly those terms. It is not built, because a library of a few dozen
+entries does not notice and a cache nobody needs goes stale.
+
+Three properties of the listing are worth stating, because each is a wrong answer
+if reversed:
+
+- Records are read, then filtered, then sorted, then cut to a page. Sorting after
+  paging would order a page instead of the library.
+- Every ordering ends in the entry's own identity, so two files with the same name
+  cannot swap places between two requests.
+- A value nobody recorded sorts last in *either* direction. "Unknown" is not a
+  small size, and a descending list would otherwise open with it.
+
+A failed download is a row rather than a silence, because "where did my failed
+download go" is exactly the question somebody brings to a library. It has no
+payload, so it offers no file — and a record claiming a payload that is not on
+disk says so, rather than offering bytes that are gone.

@@ -9,6 +9,12 @@
 {% extends "base.html" %}
 {% block title %}{{ crawl.seed_url }} · MaxiCrawler{% endblock %}
 
+{% block crumbs %}
+<nav class="crumbs">
+  <a href="/crawls">Crawls</a> <span class="muted">/</span> <span class="url">{{ crawl.seed_url }}</span>
+</nav>
+{% endblock %}
+
 {% block content %}
 <section class="panel">
   <h2>

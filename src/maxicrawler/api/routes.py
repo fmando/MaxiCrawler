@@ -16,7 +16,13 @@ from urllib.parse import parse_qs
 
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
-from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
+from starlette.responses import (
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from starlette.templating import Jinja2Templates
 
 from maxicrawler import __version__
@@ -24,7 +30,16 @@ from maxicrawler.api import stream, views
 from maxicrawler.api.downloads import DownloadRun, DownloadRuns
 from maxicrawler.api.errors import DownloadBusyError
 from maxicrawler.api.jobs import DEFAULT_RETAINED_JOBS, CrawlJob, CrawlJobs
-from maxicrawler.app import crawl_document
+from maxicrawler.app import (
+    DEFAULT_PER_PAGE,
+    LibraryQuery,
+    LibraryService,
+    LibrarySort,
+    StoredPayload,
+    crawl_document,
+)
+from maxicrawler.app.viewing import DOWNLOAD_CONTENT_TYPE
+from maxicrawler.domain import DownloadStatus
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 """Where the pages live. Beside the code, so an installed wheel carries them."""
@@ -61,6 +76,23 @@ def downloads_of(request: Request) -> DownloadRuns:
     """Return the registry this application is running downloads through."""
     registry: DownloadRuns = request.app.state.downloads
     return registry
+
+
+def library_of(request: Request) -> LibraryService:
+    """Return the service this application reads the library through."""
+    service: LibraryService = request.app.state.library
+    return service
+
+
+def _running(request: Request) -> dict[str, Any] | None:
+    """Return the transfer running right now, for the pages that mention it.
+
+    One line on the dashboard and above the library, so navigating away from a
+    download does not mean losing it. ``None`` when nothing is running, which is
+    most of the time.
+    """
+    run = downloads_of(request).active()
+    return None if run is None else views.download_view(run.snapshot())
 
 
 def _download(request: Request) -> DownloadRun:
@@ -312,23 +344,176 @@ async def crawls(request: Request) -> Response:
 
 
 async def library(request: Request) -> Response:
-    """Show what has been downloaded.
+    """Show what has been downloaded, as the query string asks for it.
 
-    Read through :class:`~maxicrawler.app.DownloadService`, not by opening the
+    Read through :class:`~maxicrawler.app.LibraryService`, not by opening the
     library here. That is the same rule crawling follows, and the reason this
-    page can list files while ``api`` imports neither ``library`` nor
-    ``downloader`` nor ``providers``.
+    page can search, sort and page real files while ``api`` imports neither
+    ``library`` nor ``downloader`` nor ``providers``.
+
+    Every parameter is read leniently. A search, a sort and a page number arrive
+    from a form, a bookmark or a typed URL, and a listing in the default order is
+    a better answer to a stale link than a refusal.
     """
-    downloads = downloads_of(request)
+    service = library_of(request)
     return page(
         request,
         "library.html",
         {
-            "library": views.library_table(downloads.service.stored_downloads()),
-            "library_path": downloads.service.library_root.as_posix(),
+            "library": views.library_view(service.browse(_query(request))),
+            "library_path": service.library_root.as_posix(),
+            "running": _running(request),
         },
         section="library",
     )
+
+
+async def library_item(request: Request) -> Response:
+    """Show everything one stored file is known to be.
+
+    Raises:
+        HTTPException: nothing here is addressed by those two names — which
+            covers a key that could not be a directory name, a directory that is
+            not there, and metadata that cannot be read. One answer for all
+            three, because telling them apart would only tell whoever asked
+            which of them they had guessed.
+    """
+    service = library_of(request)
+    item = service.item(request.path_params["provider"], request.path_params["key"])
+    if item is None:
+        raise HTTPException(status_code=404, detail="no such file")
+    payload = service.payload(item.directory, item.key)
+    return page(
+        request,
+        "library_item.html",
+        {"item": views.item_view(item, payload)},
+        section="library",
+    )
+
+
+async def library_file(request: Request) -> Response:
+    """Answer with the stored bytes, as a download.
+
+    Always an attachment and always ``application/octet-stream``: this route
+    states no type, so no browser gets to decide to render what it receives.
+    Showing a file is a different route, with a different answer to that
+    question.
+    """
+    payload = _payload(request)
+    return FileResponse(
+        payload.path,
+        filename=payload.filename,
+        media_type=DOWNLOAD_CONTENT_TYPE,
+        content_disposition_type="attachment",
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
+
+
+VIEW_HEADERS = {
+    # A `.txt` must not be re-interpreted as HTML by a browser that thinks it
+    # knows better, and no URL of ours travels outward in a referrer. Both are
+    # true of every type, so both are unconditional.
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+"""What every inline answer carries."""
+
+SANDBOX_POLICY = "sandbox; default-src 'none'; frame-ancestors 'self'"
+"""What an inline answer that could execute script carries as well.
+
+``sandbox`` is the directive that matters: the browser treats the response as its
+own opaque origin, so a stored HTML page or SVG cannot reach the interface that
+served it. Without it, showing somebody's downloaded HTML inline would hand that
+HTML every power this unauthenticated interface has — reading the settings page,
+starting a crawl, starting a download.
+
+It is **not** sent for the other types, and that is a finding rather than an
+omission: Chrome refuses to render a PDF under it (``ERR_BLOCKED_BY_CLIENT``),
+because the directive blocks the plugin its viewer is. A PDF, an image and plain
+text cannot execute script in our origin in the first place — a PDF's own script
+runs inside the browser's viewer, not in the page that framed it — so the policy
+would cost the whole feature and buy nothing. See ADR-027.
+"""
+
+
+async def library_view(request: Request) -> Response:
+    """Answer with the stored bytes for a browser to display.
+
+    The only route that states what a file *is*, and it does so only for the
+    types :mod:`maxicrawler.app.viewing` allows — MaxiCrawler renders nothing
+    itself, converts nothing, and interprets nothing.
+
+    Raises:
+        HTTPException: there is no such file, or nothing here can show it. The
+            second is 415 with the reason: the resource exists, and what is
+            missing is a representation a browser could be handed.
+    """
+    payload = _payload(request)
+    media = payload.media
+    if not media.can_display:
+        raise HTTPException(status_code=415, detail=media.reason or "cannot be displayed")
+    headers = dict(VIEW_HEADERS)
+    if media.is_script_capable:
+        headers["Content-Security-Policy"] = SANDBOX_POLICY
+    return FileResponse(
+        payload.path,
+        filename=payload.filename,
+        media_type=media.content_type,
+        content_disposition_type="inline",
+        headers=headers,
+    )
+
+
+def _payload(request: Request) -> StoredPayload:
+    """Return the file this request addresses.
+
+    Raises:
+        HTTPException: there is no such entry, or the record claims a file that
+            is not on disk. The second is the reason this asks the service
+            rather than joining a path: a library is repairable, and a response
+            promising bytes that are gone would not be.
+    """
+    payload = library_of(request).payload(
+        request.path_params["provider"], request.path_params["key"]
+    )
+    if payload is None:
+        raise HTTPException(status_code=404, detail="no such file")
+    return payload
+
+
+def _query(request: Request) -> LibraryQuery:
+    """Return the library query this request asks for."""
+    values = request.query_params
+    return LibraryQuery(
+        search=values.get("q", "").strip(),
+        provider=values.get("provider") or None,
+        status=_status(values.get("status")),
+        sort=LibrarySort.parse(values.get("sort"), default=LibraryQuery().sort),
+        descending=values.get("dir", "desc") != "asc",
+        page=_positive(values.get("page"), default=1),
+        per_page=_positive(values.get("per_page"), default=DEFAULT_PER_PAGE),
+    )
+
+
+def _status(value: str | None) -> DownloadStatus | None:
+    """Return the status *value* names, or ``None`` for anything else.
+
+    A status nobody recognises filters nothing rather than refusing the page,
+    which is the same leniency the sort order is read with.
+    """
+    try:
+        return DownloadStatus(value or "")
+    except ValueError:
+        return None
+
+
+def _positive(value: str | None, *, default: int) -> int:
+    """Return a positive whole number, or *default* for anything else."""
+    try:
+        number = int(value or "")
+    except ValueError:
+        return default
+    return number if number > 0 else default
 
 
 async def settings(request: Request) -> Response:
@@ -445,6 +630,7 @@ def _dashboard(
         {
             "crawls": views.crawl_rows(jobs.service.stored_crawls(limit=20), live=_live(jobs)),
             "form": {**(form_values or _default_form(jobs)), "action": "/crawls", "error": error},
+            "running": _running(request),
         },
         section="dashboard",
     )

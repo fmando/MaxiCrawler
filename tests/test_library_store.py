@@ -254,6 +254,85 @@ def test_listing_an_empty_library_yields_nothing(tmp_path: Path) -> None:
     assert list(library.entries("mega")) == []
 
 
+# --- finding an entry from a pair of names -----------------------------------
+
+
+def test_an_entry_can_be_found_again_by_provider_and_key(tmp_path: Path) -> None:
+    """What a link on a page has, rather than what a download has."""
+    library = make_library(tmp_path)
+    ref = make_ref("AaBbCcDd")
+    written = library.entry(ref)
+    written.write(new_record(ref, written.key, status=DownloadStatus.COMPLETED))
+
+    found = library.entry_at("mega", written.key)
+
+    assert found is not None
+    assert found.path == written.path
+    assert found.key == written.key
+    assert found.read() is not None
+
+
+def test_an_entry_that_was_never_written_is_not_found(tmp_path: Path) -> None:
+    library = make_library(tmp_path)
+
+    assert library.entry_at("mega", "aabbccdd-0123456789") is None
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "..",
+        ".",
+        "../../etc",
+        "..\\..\\windows",
+        "a/b",
+        "a\\b",
+        "AaBbCcDd",  # upper case: two spellings, one directory, on Windows
+        "-leading",
+        "with space",
+        "with.dot",
+        "naïve",
+        "",
+        "a" * 65,
+        "\x00",
+        "%2e%2e",
+    ],
+)
+def test_a_key_that_is_not_a_component_is_refused(tmp_path: Path, key: str) -> None:
+    """Refused for what it is, before anything is joined onto a path."""
+    library = make_library(tmp_path)
+
+    assert library.entry_at("mega", key) is None
+    assert library.entry_at(key, "aabbccdd-0123456789") is None
+
+
+def test_a_traversing_pair_cannot_reach_a_file_outside_the_library(tmp_path: Path) -> None:
+    library = make_library(tmp_path)
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / METADATA_FILENAME).write_text("{}", encoding="utf-8")
+
+    assert library.entry_at("..", "secret") is None
+    assert library.entry_at("mega", "../../secret") is None
+
+
+@pytest.mark.skipif(not hasattr(Path, "symlink_to"), reason="the platform has no symbolic links")
+def test_a_symbolic_link_pointing_out_of_the_library_is_refused(tmp_path: Path) -> None:
+    """The string still reads as a child; the file it would open does not."""
+    library = make_library(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / METADATA_FILENAME).write_text("{}", encoding="utf-8")
+    provider = library.root / "mega"
+    provider.mkdir(parents=True, exist_ok=True)
+    try:
+        (provider / "escaped").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this platform does not allow creating symbolic links here")
+
+    assert library.entry_at("mega", "escaped") is None
+
+
 def test_a_library_that_cannot_be_created_reports_a_library_error(tmp_path: Path) -> None:
     blocker = tmp_path / "library"
     blocker.write_text("not a directory", encoding="utf-8")

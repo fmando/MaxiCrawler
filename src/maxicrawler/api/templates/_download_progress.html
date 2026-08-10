@@ -37,4 +37,19 @@
     <dt>Elapsed</dt>
     <dd class="num" id="download-elapsed">{{ download.elapsed }}</dd>
   </div>
+  {#
+    Both absent until they mean something: a rate divided out of the first fifty
+    milliseconds is a number no line sustains, and an estimate built on it would
+    be wrong twice.
+  #}
+  <div>
+    <dt>Speed</dt>
+    <dd class="num" id="download-rate">{{ download.rate or "—" }}</dd>
+  </div>
+  {% if not download.is_finished %}
+    <div>
+      <dt>Remaining</dt>
+      <dd class="num" id="download-remaining">{{ download.remaining or "—" }}</dd>
+    </div>
+  {% endif %}
 </dl>

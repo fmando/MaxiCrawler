@@ -1,11 +1,13 @@
 """Tests for the layout, the navigation and the dashboard."""
 
+import json
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from html import unescape
 from pathlib import Path
+from threading import Event
 from time import monotonic, sleep
 
 import pytest
@@ -18,12 +20,12 @@ from maxicrawler.api import create_app
 from maxicrawler.api.downloads import DownloadRuns
 from maxicrawler.api.jobs import CrawlJobs
 from maxicrawler.api.routes import SECTIONS, STATIC_DIRECTORY, TEMPLATES
-from maxicrawler.app import CrawlService, DownloadService, crawl_document
+from maxicrawler.app import CrawlService, DownloadService, LibraryService, crawl_document
 from maxicrawler.config import Settings
 from maxicrawler.database import SQLiteCrawlRepository, SQLiteDatabase
-from maxicrawler.domain import ProviderCapability
+from maxicrawler.domain import ContentDescriptor, ProviderCapability, ResourceRef
 from maxicrawler.library import Library
-from maxicrawler.providers import ProviderRegistry
+from maxicrawler.providers import DownloadSink, ProviderRegistry
 from maxicrawler.web.report import CrawlReport, CrawlStatistics
 from maxicrawler.web.session import CrawlOptions, CrawlSession, CrawlState
 
@@ -33,7 +35,9 @@ MEGA_URL = f"https://mega.nz/file/AaBbCcDd#{MEGA_KEY}"
 
 
 @contextmanager
-def client(tmp_path: Path, *, provider: StubProvider | None = None) -> Iterator[TestClient]:
+def client(
+    tmp_path: Path, *, provider: StubProvider | None = None, max_view_bytes: int | None = None
+) -> Iterator[TestClient]:
     """Yield a client over an application with a throwaway database and library.
 
     Both storage locations are below *tmp_path*, so no test can read or write
@@ -43,6 +47,7 @@ def client(tmp_path: Path, *, provider: StubProvider | None = None) -> Iterator[
         user_agent="MaxiCrawler/test",
         database_path=tmp_path / "urls.db",
         library_path=tmp_path / "library",
+        **({} if max_view_bytes is None else {"max_view_bytes": max_view_bytes}),
     )
     service = CrawlService(settings)
     jobs = CrawlJobs(service, persist=False)
@@ -53,7 +58,12 @@ def client(tmp_path: Path, *, provider: StubProvider | None = None) -> Iterator[
             library=Library(settings.library_path),
         )
     )
-    application = create_app(service=service, jobs=jobs, downloads=downloads)
+    application = create_app(
+        service=service,
+        jobs=jobs,
+        downloads=downloads,
+        library=LibraryService(settings, library=Library(settings.library_path)),
+    )
     try:
         with TestClient(application) as test_client:
             yield test_client
@@ -79,6 +89,29 @@ def finished_download(test_client: TestClient, url: str = MEGA_URL) -> str:
             return body
         sleep(0.01)
     raise AssertionError("the download did not finish within 10s")
+
+
+class BlockingProvider(StubProvider):
+    """A stub whose transfer waits until a test lets it finish."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "mega",
+            url_prefix="https://mega.nz/",
+            capabilities=frozenset({ProviderCapability.INSPECT, ProviderCapability.DOWNLOAD}),
+            payload=b"stub payload",
+        )
+        self.transferring = Event()
+        self.release = Event()
+
+    def download(self, ref: ResourceRef, sink: DownloadSink) -> ContentDescriptor:
+        descriptor = ContentDescriptor(name="stub.bin", size=12)
+        sink.begin(descriptor)
+        sink.write(b"stub ")
+        self.transferring.set()
+        self.release.wait(timeout=10)
+        sink.write(b"payload")
+        return descriptor
 
 
 def make_provider() -> StubProvider:
@@ -250,6 +283,65 @@ def test_the_library_page_carries_the_whole_layout(tmp_path: Path) -> None:
 
     assert "MaxiCrawler" in body
     assert ">Dashboard</a>" in body
+
+
+def test_the_library_can_be_searched(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+
+        found = test_client.get("/library?q=stub").text
+        missed = test_client.get("/library?q=nowhere").text
+
+    assert "stub.bin" in found
+    assert "stub.bin" not in missed
+    assert "Nothing matches that" in missed
+
+
+def test_the_library_can_be_filtered_by_provider_and_status(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+
+        kept = test_client.get("/library?provider=mega&status=completed").text
+        dropped = test_client.get("/library?provider=nobody").text
+
+    assert "stub.bin" in kept
+    assert "stub.bin" not in dropped
+
+
+def test_the_library_can_be_sorted_by_a_link(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+        body = test_client.get("/library").text
+
+        assert 'href="/library?sort=name&amp;dir=asc"' in body
+        assert test_client.get("/library?sort=name&dir=asc").status_code == 200
+
+
+def test_a_nonsense_query_string_still_answers(tmp_path: Path) -> None:
+    """A stale bookmark is ordinary; a refusal would not be."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+
+        response = test_client.get("/library?sort=colour&dir=sideways&page=-4&status=maybe")
+
+    assert response.status_code == 200
+    assert "stub.bin" in response.text
+
+
+def test_the_library_pages_and_says_where_it_is(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+        body = test_client.get("/library?per_page=1").text
+
+    assert "page 1 of 1" in body
+
+
+def test_a_row_links_to_the_file_it_describes(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+        body = test_client.get("/library").text
+
+    assert re.search(r'href="/library/mega/[a-z0-9-]+"', body)
 
 
 def test_the_library_lists_what_was_downloaded(tmp_path: Path) -> None:
@@ -1166,3 +1258,362 @@ def test_no_page_loads_anything_from_another_host(tmp_path: Path, path: str) -> 
     for attribute in ("src=", "href="):
         for match in re.findall(rf'{attribute}"([^"]+)"', body):
             assert not match.startswith(("http://", "https://", "//")), match
+
+
+# --- one stored file ---------------------------------------------------------
+
+
+def stored_item(test_client: TestClient) -> str:
+    """Download something and return the path of its library page."""
+    body = finished_download(test_client)
+    match = re.search(r'href="(/library/[a-z0-9-]+/[a-z0-9-]+)"', body)
+    assert match, "a finished download should link to its own page"
+    return match.group(1)
+
+
+def test_a_finished_download_links_straight_to_its_file(tmp_path: Path) -> None:
+    """Landing in a list to search through would be the lesser answer."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        body = finished_download(test_client)
+
+    assert "Show the file" in body
+    assert re.search(r'href="/library/mega/[a-z0-9-]+"', body)
+
+
+def test_the_detail_page_states_what_is_known_about_the_file(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        body = test_client.get(stored_item(test_client)).text
+
+    assert "stub.bin" in body
+    assert ">mega</td>" in body
+    assert "12 B" in body
+    assert "https://mega.nz/file/AaBbCcDd" in body
+    assert "SHA-256" in body
+    assert "completed" in body
+
+
+def test_the_detail_page_shows_the_path_in_a_field_it_can_be_copied_from(
+    tmp_path: Path,
+) -> None:
+    """A `file://` link would be blocked; the server launching Explorer is worse."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        where = stored_item(test_client)
+        body = unescape(test_client.get(where).text)
+        listing = unescape(test_client.get("/library").text)
+
+    assert 'class="path"' in body
+    assert "readonly" in body
+    assert 'data-copy=".path"' in body
+    assert "file://" not in body
+    # Native separators, and the same spelling in the table as in the field: a
+    # path somebody pastes into a file manager has one right form per platform.
+    stored = next((tmp_path / "library").rglob("stub.bin"))
+    assert str(stored) in body
+    assert str(stored) in listing
+
+
+def test_the_detail_page_never_shows_a_key(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        body = test_client.get(stored_item(test_client)).text
+
+    assert MEGA_KEY not in body
+
+
+def test_the_detail_page_offers_the_bytes(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        where = stored_item(test_client)
+        body = test_client.get(where).text
+
+        assert f'href="{where}/file"' in body
+        response = test_client.get(f"{where}/file")
+
+    assert response.status_code == 200
+    assert response.content == b"stub payload"
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert "attachment" in response.headers["content-disposition"]
+    assert "stub.bin" in response.headers["content-disposition"]
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_a_download_route_never_invites_a_browser_to_render(tmp_path: Path) -> None:
+    """Whatever the file is, this route says nothing that could be rendered."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        response = test_client.get(f"{stored_item(test_client)}/file")
+
+    assert "html" not in response.headers["content-type"]
+    assert "inline" not in response.headers["content-disposition"]
+
+
+def test_a_file_whose_payload_vanished_is_not_offered(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        where = stored_item(test_client)
+        for payload in (tmp_path / "library").rglob("stub.bin"):
+            payload.unlink()
+
+        body = test_client.get(where).text
+        response = test_client.get(f"{where}/file")
+
+    assert response.status_code == 404
+    assert "moved or" in body
+    assert "Download</a>" not in body
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        "/library/mega/nothing",
+        "/library/nobody/aabbccdd-0000000000",
+        "/library/../../secret",
+        "/library/mega/..%2f..%2fsecret",
+        "/library/MEGA/AABBCCDD",
+    ],
+)
+def test_a_file_that_cannot_be_addressed_is_not_found(tmp_path: Path, where: str) -> None:
+    """One answer for a malformed name and an absent one, deliberately."""
+    with client(tmp_path) as test_client:
+        assert test_client.get(where).status_code == 404
+        assert test_client.get(f"{where}/file").status_code == 404
+
+
+def test_the_detail_page_carries_a_way_back(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        body = test_client.get(stored_item(test_client)).text
+
+    assert 'class="crumbs"' in body
+    assert 'href="/library"' in body
+
+
+def test_the_copy_script_is_served(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        response = test_client.get("/static/copy.js")
+
+    assert response.status_code == 200
+    assert "clipboard" in response.text
+
+
+# --- showing a file in the browser -------------------------------------------
+
+
+def store(tmp_path: Path, filename: str, payload: bytes = b"hello") -> str:
+    """Write one finished library entry by hand and return its page path."""
+    from maxicrawler.domain import DownloadStatus, ResourceKind, ResourceRef
+    from maxicrawler.library import new_record
+
+    library = Library(tmp_path / "library")
+    library.initialize()
+    ref = ResourceRef(
+        provider="mega",
+        resource_id="AaBbCcDd",
+        kind=ResourceKind.FILE,
+        url="https://mega.nz/file/AaBbCcDd",
+    )
+    entry = library.entry(ref)
+    stored = entry.content_path(filename)
+    stored.parent.mkdir(parents=True, exist_ok=True)
+    stored.write_bytes(payload)
+    document = new_record(
+        ref, entry.key, status=DownloadStatus.COMPLETED, name=filename
+    ).to_document()
+    document["downloaded_at"] = STARTED.isoformat()
+    document["content"] = {
+        "filename": filename,
+        "path": f"content/{filename}",
+        "size": len(payload),
+        "checksums": [{"algorithm": "sha256", "value": "abc"}],
+    }
+    entry.path.mkdir(parents=True, exist_ok=True)
+    entry.metadata_path.write_text(json.dumps(document), encoding="utf-8")
+    return f"/library/mega/{entry.key}"
+
+
+@pytest.mark.parametrize(
+    ("filename", "content_type", "element"),
+    [
+        ("notes.txt", "text/plain; charset=utf-8", "<iframe"),
+        ("readme.md", "text/plain; charset=utf-8", "<iframe"),
+        ("Jump.pdf", "application/pdf", "<iframe"),
+        ("photo.png", "image/png", "<img"),
+        ("drawing.svg", "image/svg+xml", "<img"),
+        ("page.html", "text/html; charset=utf-8", "<iframe"),
+    ],
+)
+def test_a_file_the_browser_can_show_is_shown(
+    tmp_path: Path, filename: str, content_type: str, element: str
+) -> None:
+    where = store(tmp_path, filename)
+
+    with client(tmp_path) as test_client:
+        body = test_client.get(where).text
+        response = test_client.get(f"{where}/view")
+
+    assert f'{element} src="{where}/view"' in body
+    assert response.status_code == 200
+    assert response.headers["content-type"] == content_type
+    assert "inline" in response.headers["content-disposition"]
+
+
+@pytest.mark.parametrize("filename", ["page.html", "drawing.svg"])
+def test_what_could_execute_script_is_sandboxed(tmp_path: Path, filename: str) -> None:
+    """The one assertion that keeps a stored page out of our own origin."""
+    where = store(tmp_path, filename, b"<script>fetch('/settings')</script>")
+
+    with client(tmp_path) as test_client:
+        response = test_client.get(f"{where}/view")
+
+    policy = response.headers["content-security-policy"]
+    assert "sandbox" in policy
+    assert "default-src 'none'" in policy
+
+
+@pytest.mark.parametrize("filename", ["notes.txt", "Jump.pdf", "photo.png", "page.html"])
+def test_every_inline_answer_refuses_to_be_re_sniffed(tmp_path: Path, filename: str) -> None:
+    where = store(tmp_path, filename)
+
+    with client(tmp_path) as test_client:
+        response = test_client.get(f"{where}/view")
+
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
+
+
+@pytest.mark.parametrize("filename", ["Jump.pdf", "photo.png", "notes.txt"])
+def test_what_cannot_execute_script_is_not_sandboxed(tmp_path: Path, filename: str) -> None:
+    """Measured, not assumed: Chrome refuses to render a PDF under that policy.
+
+    `ERR_BLOCKED_BY_CLIENT`, because the directive blocks the plugin its viewer
+    is. These three cannot reach our origin anyway — a PDF's own script runs in
+    the browser's viewer, not in the page that framed it — so the policy would
+    have cost the whole feature and bought nothing.
+    """
+    where = store(tmp_path, filename)
+
+    with client(tmp_path) as test_client:
+        response = test_client.get(f"{where}/view")
+
+    assert "content-security-policy" not in response.headers
+
+
+def test_a_frame_holding_script_capable_content_is_sandboxed_as_well(tmp_path: Path) -> None:
+    where = store(tmp_path, "page.html")
+
+    with client(tmp_path) as test_client:
+        body = test_client.get(where).text
+
+    assert "<iframe" in body
+    assert "sandbox" in body.split("<iframe", 1)[1].split(">", 1)[0]
+
+
+def test_a_pdf_frame_carries_no_sandbox_attribute(tmp_path: Path) -> None:
+    """The attribute blocks Chrome's PDF viewer exactly as the header does."""
+    where = store(tmp_path, "Jump.pdf")
+
+    with client(tmp_path) as test_client:
+        body = test_client.get(where).text
+
+    assert "<iframe" in body
+    assert "sandbox" not in body.split("<iframe", 1)[1].split(">", 1)[0]
+
+
+def test_an_svg_is_never_framed(tmp_path: Path) -> None:
+    """An `<img>` runs no script even when the file behind it contains some."""
+    where = store(tmp_path, "drawing.svg", b'<svg xmlns="http://www.w3.org/2000/svg"/>')
+
+    with client(tmp_path) as test_client:
+        body = test_client.get(where).text
+
+    assert f'<img src="{where}/view"' in body
+    assert "<iframe" not in body
+
+
+def test_a_type_nothing_can_show_says_so_and_offers_the_download(tmp_path: Path) -> None:
+    where = store(tmp_path, "ubuntu.iso")
+
+    with client(tmp_path) as test_client:
+        body = test_client.get(where).text
+        response = test_client.get(f"{where}/view")
+
+    assert "can show" in body
+    assert f'href="{where}/file"' in body
+    assert "<iframe" not in body
+    assert response.status_code == 415
+
+
+def test_a_file_above_the_limit_is_offered_rather_than_shown(tmp_path: Path) -> None:
+    where = store(tmp_path, "Jump.pdf", b"x" * 200)
+
+    with client(tmp_path, max_view_bytes=100) as test_client:
+        body = unescape(test_client.get(where).text)
+        response = test_client.get(f"{where}/view")
+
+    assert "above the viewer's" in body
+    assert f'href="{where}/file"' in body
+    assert response.status_code == 415
+
+
+def test_a_viewer_answer_supports_a_range_request(tmp_path: Path) -> None:
+    """What a PDF viewer uses to seek instead of fetching the whole file."""
+    where = store(tmp_path, "Jump.pdf", b"0123456789")
+
+    with client(tmp_path) as test_client:
+        response = test_client.get(f"{where}/view", headers={"Range": "bytes=2-5"})
+
+    assert response.status_code == 206
+    assert response.content == b"2345"
+
+
+def test_the_viewer_refuses_what_it_cannot_address(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        assert test_client.get("/library/mega/nothing/view").status_code == 404
+        assert test_client.get("/library/../../secret/view").status_code == 404
+
+
+# --- comfort around the edges -------------------------------------------------
+
+
+def test_a_running_download_is_visible_from_elsewhere(tmp_path: Path) -> None:
+    """Navigating away from a transfer should not mean losing it."""
+    provider = BlockingProvider()
+    with client(tmp_path, provider=provider) as test_client:
+        response = test_client.post("/downloads", data={"url": MEGA_URL}, follow_redirects=False)
+        assert provider.transferring.wait(timeout=10)
+        try:
+            dashboard = test_client.get("/").text
+            library = test_client.get("/library").text
+        finally:
+            provider.release.set()
+        test_client.get(response.headers["location"])
+
+    for body in (dashboard, library):
+        assert 'class="running"' in body
+        assert "Watch it" in body
+
+
+def test_nothing_is_announced_when_nothing_is_running(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        assert 'class="running"' not in test_client.get("/").text
+        assert 'class="running"' not in test_client.get("/library").text
+
+
+def test_a_crawl_page_says_where_it_sits(tmp_path: Path) -> None:
+    record_crawl(
+        tmp_path,
+        seed="https://example.test/",
+        state=CrawlState.COMPLETED,
+        pages=3,
+        session_id="c1",
+    )
+
+    with client(tmp_path) as test_client:
+        body = test_client.get("/crawls/c1").text
+
+    assert 'class="crumbs"' in body
+    assert 'href="/crawls"' in body
+
+
+def test_a_running_download_page_shows_speed_and_what_is_left(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        body = finished_download(test_client)
+
+    assert "Speed" in body
+    # A finished transfer has nothing left to estimate, so that row is gone.
+    assert "Remaining" not in body

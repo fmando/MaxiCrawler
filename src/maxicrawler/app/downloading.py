@@ -14,11 +14,16 @@ Three properties are worth stating before the code.
 that hands it a registry, a library and a reporter. If a decision looks like it
 belongs to *how* downloads run, it belongs down there instead.
 
-**A client never sees a download-layer type.** :class:`DownloadProgress`,
-:class:`DownloadSummary` and :class:`LibraryItem` are the whole vocabulary a
-caller needs, which is what lets the web interface show a transfer without
-importing ``downloader``, ``providers`` or ``library`` — the boundary
-``tests/test_api_boundaries.py`` reads rather than believes.
+**A client never sees a download-layer type.** :class:`DownloadProgress` and
+:class:`DownloadSummary` are the whole vocabulary a caller needs, which is what
+lets the web interface show a transfer without importing ``downloader``,
+``providers`` or ``library`` — the boundary ``tests/test_api_boundaries.py``
+reads rather than believes.
+
+**Reading the library is somebody else's job.**
+:class:`~maxicrawler.app.library.LibraryService` browses what is stored; this
+service puts things there. Two questions about one store, kept apart so that
+neither grows the other's vocabulary.
 
 **A browser may name a URL, never a path.**
 :meth:`DownloadService.download` refuses anything that is not an absolute
@@ -29,7 +34,6 @@ server read its own disk on somebody else's click.
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 
 from maxicrawler.config import Settings
@@ -45,7 +49,7 @@ from maxicrawler.downloader import (
     ResourceIdentity,
     looks_like_url,
 )
-from maxicrawler.library import Library, LibraryEntry, LibraryError, ResourceRecord
+from maxicrawler.library import Library, provider_directory, resource_key
 from maxicrawler.plugins import PluginResolver, create_default_registry
 from maxicrawler.providers import (
     ProviderRegistry,
@@ -122,6 +126,15 @@ class DownloadSummary:
     path: Path | None = None
     """Where the payload landed, when exactly one resource was transferred."""
 
+    directory: str | None = None
+    key: str | None = None
+    """How the library addresses the one resource this fetched, if it was one.
+
+    Derived from the reference by the same two pure functions that decided the
+    directory names in the first place, so a finished download can link straight
+    to its own page in the library rather than to a list to search through.
+    """
+
     reason: str | None = None
     library_root: Path | None = None
 
@@ -129,24 +142,6 @@ class DownloadSummary:
     def succeeded(self) -> bool:
         """Return whether the library holds what was asked for."""
         return self.status.is_success
-
-
-@dataclass(frozen=True, slots=True)
-class LibraryItem:
-    """One stored resource, as a client lists it.
-
-    Read from the entry's own metadata document rather than from an index,
-    because the file system is the library's source of truth (ADR-010) and a
-    listing that disagreed with it would be worse than no listing.
-    """
-
-    provider: str
-    name: str
-    key: str
-    size: int | None
-    downloaded_at: datetime | None
-    path: Path
-    source_url: str
 
 
 class DownloadService:
@@ -257,22 +252,6 @@ class DownloadService:
     def can_download(self, url: str) -> bool:
         """Return whether *url* is a link this installation could fetch."""
         return self._can_download(url, self._providers())
-
-    def stored_downloads(self, limit: int | None = None) -> tuple[LibraryItem, ...]:
-        """Return what the library holds, most recently downloaded first.
-
-        Every entry describes itself, so this reads one small document per
-        stored resource and no index. An entry whose metadata cannot be read is
-        skipped rather than raised: one damaged directory must not be able to
-        empty the page that would show the other nine hundred.
-
-        Entries without a stored payload — a recorded failure, an interrupted
-        attempt — are not items. What they are is visible on the download that
-        produced them, which is where a reason belongs.
-        """
-        items = [item for entry in self._library().entries() if (item := _item(entry)) is not None]
-        items.sort(key=_recency, reverse=True)
-        return tuple(items if limit is None else items[:limit])
 
     def _can_download(self, url: str, registry: ProviderRegistry) -> bool:
         """Return whether *registry* holds a provider that could fetch *url*."""
@@ -437,6 +416,8 @@ def _summarize(report: DownloadReport, *, url: str) -> DownloadSummary:
         files_skipped=len(skipped),
         files_failed=len(failed),
         path=None if single is None else single.path,
+        directory=None if single is None else provider_directory(single.job.ref.provider),
+        key=None if single is None else resource_key(single.job.ref),
         reason=_reason(report),
         library_root=report.library_root,
     )
@@ -451,43 +432,3 @@ def _reason(report: DownloadReport) -> str | None:
     for outcome in report.skipped:
         return outcome.reason
     return None
-
-
-def _item(entry: LibraryEntry) -> LibraryItem | None:
-    """Return *entry* as a listed item, or ``None`` when it holds no payload."""
-    try:
-        record = entry.read()
-    except LibraryError:
-        return None
-    if record is None or not record.is_complete or record.content is None:
-        return None
-    return LibraryItem(
-        provider=record.provider,
-        name=_name(record, entry),
-        key=entry.key,
-        size=record.content.size,
-        downloaded_at=record.downloaded_at,
-        path=entry.path / record.content.path,
-        source_url=record.source_url,
-    )
-
-
-def _name(record: ResourceRecord, entry: LibraryEntry) -> str:
-    """Return what to call this resource.
-
-    The recorded name, then the stored filename, then the entry key. A share
-    published without its key has no readable name at all, and the key is at
-    least the thing the directory is called.
-    """
-    if record.name:
-        return record.name
-    if record.content is not None and record.content.filename:
-        return record.content.filename
-    return entry.key
-
-
-def _recency(item: LibraryItem) -> datetime:
-    """Return what to sort a listing by, putting undated entries last."""
-    return (
-        item.downloaded_at if item.downloaded_at is not None else datetime.min.replace(tzinfo=UTC)
-    )

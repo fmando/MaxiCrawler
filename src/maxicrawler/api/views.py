@@ -20,10 +20,19 @@ from collections.abc import Container, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlencode
 
 from maxicrawler.api.downloads import DownloadSnapshot
 from maxicrawler.api.jobs import JobSnapshot
-from maxicrawler.app import LibraryItem
+from maxicrawler.app import (
+    DownloadProgress,
+    DownloadSummary,
+    LibraryItem,
+    LibraryPage,
+    LibraryQuery,
+    LibrarySort,
+    StoredPayload,
+)
 from maxicrawler.config import Settings
 from maxicrawler.crawler import PluginUsage
 from maxicrawler.database import StoredCrawl, StoredUrl
@@ -256,26 +265,213 @@ def download_view(snapshot: DownloadSnapshot) -> dict[str, Any]:
         "files_finished": format_number(progress.files_finished),
         "has_many_files": progress.files_total > 1,
         "elapsed": format_duration(snapshot.elapsed_seconds),
+        "rate": _rate(progress.bytes_written, snapshot.elapsed_seconds),
+        "remaining": _remaining(progress, snapshot),
         "is_finished": snapshot.is_finished,
         "succeeded": snapshot.summary is not None and snapshot.summary.succeeded,
         "reason": snapshot.reason,
         "error": snapshot.error,
         "path": None if snapshot.path is None else snapshot.path.as_posix(),
+        # Straight to the file rather than to a list to search through. Absent
+        # when the request turned out to hold several files, which is when the
+        # library itself is the right place to land.
+        "item_url": _item_url(snapshot.summary),
     }
 
 
-def library_table(
-    items: Iterable[LibraryItem], *, limit: int = MAX_LISTED_DOWNLOADS
-) -> dict[str, Any]:
-    """Return the table of everything downloaded, and what it left out."""
-    stored = tuple(items)
-    total = len(stored)
+MINIMUM_TIMED_SECONDS = 0.5
+"""How long a transfer must have run before its speed means anything.
+
+Two chunks in the first fifty milliseconds divide out to a rate no line is going
+to sustain, and a page that opened by claiming 400 MB/s would be lying twice —
+once about the speed and once about the time remaining.
+"""
+
+
+def _rate(written: int, elapsed: float) -> str | None:
+    """Return how fast a transfer is moving, or ``None`` while that is guesswork."""
+    if written <= 0 or elapsed < MINIMUM_TIMED_SECONDS:
+        return None
+    return f"{format_size(int(written / elapsed))}/s"
+
+
+def _remaining(progress: DownloadProgress, snapshot: DownloadSnapshot) -> str | None:
+    """Return how much longer this will take, when that can be said at all.
+
+    Needs three things nobody is owed: a total, a rate, and a transfer that has
+    not finished. The estimate is the crudest possible — bytes left over bytes
+    per second so far — and is offered as an estimate rather than dressed up,
+    because a download over a link nobody controls is not predictable.
+    """
+    total = progress.total_bytes
+    written = progress.bytes_written
+    if snapshot.is_finished or total is None or written <= 0:
+        return None
+    if snapshot.elapsed_seconds < MINIMUM_TIMED_SECONDS or written >= total:
+        return None
+    return format_duration((total - written) / (written / snapshot.elapsed_seconds))
+
+
+def _can_display(payload: StoredPayload | None) -> bool:
+    """Return whether there is a file here that a browser may be shown."""
+    return payload is not None and payload.media.can_display
+
+
+def _item_url(summary: DownloadSummary | None) -> str | None:
+    """Return the library page of the one file a download fetched, if it was one."""
+    if summary is None or summary.directory is None or summary.key is None:
+        return None
+    return f"/library/{summary.directory}/{summary.key}"
+
+
+def library_view(page: LibraryPage) -> dict[str, Any]:
+    """Return what the library page shows, links included.
+
+    The sort links and the paging links are built here rather than in the
+    template, because each of them is *this* query with one thing changed — and
+    a template assembling query strings is a template deciding something.
+    """
+    query = page.query
     return {
-        "rows": tuple(_library_row(item) for item in stored[:limit]),
-        "total": format_number(total),
-        "hidden": format_number(max(0, total - limit)),
-        "has_hidden": total > limit,
+        "rows": tuple(_library_row(item) for item in page.items),
+        "columns": tuple(_column(label, sort, query) for label, sort in COLUMNS),
+        "total": format_number(page.total),
+        "stored": format_number(page.stored),
+        "shown": f"{format_number(page.first)}–{format_number(page.last)}",
+        "has_rows": bool(page.items),
+        "is_filtered": query.is_filtered,
+        "search": query.search,
+        "provider": query.provider or "",
+        "status": "" if query.status is None else str(query.status),
+        # Carried through the filter form as hidden fields, so searching keeps
+        # the order you had chosen instead of silently resetting it.
+        "sort_value": str(query.sort),
+        "direction": "desc" if query.descending else "asc",
+        "providers": page.providers,
+        "statuses": tuple(
+            {"value": str(status), "label": STATUS_LABELS[status]} for status in page.statuses
+        ),
+        "page": format_number(page.page),
+        "pages": format_number(page.pages),
+        "previous_url": _library_url(query, page=page.page - 1) if page.has_previous else None,
+        "next_url": _library_url(query, page=page.page + 1) if page.has_next else None,
+        "reset_url": _library_url(LibraryQuery()),
     }
+
+
+def item_view(item: LibraryItem, payload: StoredPayload | None) -> dict[str, Any]:
+    """Return what one stored file's page shows.
+
+    *payload* is what the service found on disk, and is ``None`` for two very
+    different situations that the page has to tell apart: a download that failed
+    and never wrote a file, and a record claiming a file that has since been
+    deleted or moved. The first is a reason; the second is a repair.
+    """
+    base = f"/library/{item.directory}/{item.key}"
+    return {
+        "name": item.name,
+        "provider": item.provider,
+        "directory": item.directory,
+        "key": item.key,
+        "status": str(item.status),
+        "state_label": STATUS_LABELS[item.status],
+        "state_tone": STATUS_TONES[item.status],
+        "size": format_size(item.size),
+        "filename": item.filename,
+        "downloaded_at": (
+            None if item.downloaded_at is None else format_timestamp(item.downloaded_at)
+        ),
+        "discovered_at": (
+            None if item.discovered_at is None else format_timestamp(item.discovered_at)
+        ),
+        "source_url": item.source_url,
+        "path": None if item.path is None else str(item.path),
+        "checksum": item.checksum,
+        "attempts": format_number(item.attempts),
+        "error": item.error,
+        "library_url": "/library",
+        "file_url": f"{base}/file" if payload is not None else None,
+        "is_stored": payload is not None,
+        # How, and whether, the page embeds the file itself. `display` is the
+        # element to use rather than a type to branch on, so the template asks
+        # no questions about media at all.
+        "view_url": f"{base}/view" if _can_display(payload) else None,
+        "display": None if payload is None else str(payload.media.display),
+        "view_reason": None if payload is None else payload.media.reason,
+        # Whether the frame showing it needs the `sandbox` attribute. True for
+        # the types that could execute script; false for a PDF, which Chrome
+        # refuses to render inside a sandboxed frame at all, and which cannot
+        # reach our origin anyway.
+        "sandboxed": payload is not None and payload.media.is_script_capable,
+        # The record says there is a file and there is not: worth its own
+        # sentence, because the answer is to download it again rather than to
+        # wonder what the page means.
+        "payload_missing": payload is None and item.is_stored,
+    }
+
+
+COLUMNS: tuple[tuple[str, LibrarySort], ...] = (
+    ("Provider", LibrarySort.PROVIDER),
+    ("Name", LibrarySort.NAME),
+    ("Size", LibrarySort.SIZE),
+    ("Downloaded", LibrarySort.DOWNLOADED),
+    ("Status", LibrarySort.STATUS),
+)
+"""The sortable columns, in the order they are read."""
+
+SORT_MARKS = {True: "▾", False: "▴"}
+"""What marks the column a listing is ordered by, and which way."""
+
+
+def _column(label: str, sort: LibrarySort, query: LibraryQuery) -> dict[str, Any]:
+    """Return one column heading, and the link that reorders by it.
+
+    Clicking the active column reverses it; clicking another one starts at the
+    direction that column is most often wanted in — largest file and newest
+    download first, names from A. Guessing right saves a second click and
+    guessing wrong costs one, so the guess is worth making.
+    """
+    active = query.sort is sort
+    descending = not query.descending if active else sort in _DESCENDING_FIRST
+    return {
+        "label": label,
+        "url": _library_url(query, sort=sort, descending=descending, page=1),
+        "active": active,
+        "mark": SORT_MARKS[query.descending] if active else "",
+    }
+
+
+_DESCENDING_FIRST = frozenset({LibrarySort.SIZE, LibrarySort.DOWNLOADED})
+"""Columns whose first click means "biggest first" rather than "smallest"."""
+
+
+def _library_url(query: LibraryQuery, **changes: Any) -> str:
+    """Return the library URL for *query* with *changes* applied.
+
+    Only what differs from the default is written into the query string, so an
+    unfiltered listing is plain ``/library`` and a bookmarked one carries exactly
+    what it needs.
+    """
+    values = {
+        "q": changes.get("search", query.search),
+        "provider": changes.get("provider", query.provider) or "",
+        "status": _status_value(changes.get("status", query.status)),
+        "sort": str(changes.get("sort", query.sort)),
+        "dir": "desc" if changes.get("descending", query.descending) else "asc",
+        "page": str(changes.get("page", query.page)),
+    }
+    default = LibraryQuery()
+    if values["sort"] == str(default.sort) and values["dir"] == "desc":
+        del values["sort"], values["dir"]
+    if values.get("page") == "1":
+        del values["page"]
+    written = {name: value for name, value in values.items() if value}
+    return f"/library?{urlencode(written)}" if written else "/library"
+
+
+def _status_value(status: DownloadStatus | None) -> str:
+    """Return a status as a query string writes it, or nothing."""
+    return "" if status is None else str(status)
 
 
 def _library_row(item: LibraryItem) -> dict[str, Any]:
@@ -287,8 +483,16 @@ def _library_row(item: LibraryItem) -> dict[str, Any]:
         "downloaded_at": (
             "—" if item.downloaded_at is None else format_timestamp(item.downloaded_at)
         ),
-        "path": item.path.as_posix(),
+        # Native separators, unlike the configured paths on the settings page.
+        # A configured value is written into a TOML file, which spells them one
+        # way on every platform; this is a location somebody pastes into their
+        # file manager, and there it has to be spelled the way the platform does.
+        "path": "—" if item.path is None else str(item.path),
         "source_url": item.source_url,
+        "status": str(item.status),
+        "state_label": STATUS_LABELS[item.status],
+        "state_tone": STATUS_TONES[item.status],
+        "url": f"/library/{item.directory}/{item.key}",
     }
 
 
@@ -480,6 +684,11 @@ def settings_view(settings: Settings) -> tuple[dict[str, Any], ...]:
                     "library_path",
                     settings.library_path.as_posix(),
                     "Where downloads are stored, one directory per resource.",
+                ),
+                _setting(
+                    "max_view_bytes",
+                    format_bytes(settings.max_view_bytes),
+                    "Largest stored file the browser is offered inline.",
                 ),
                 _setting("log_level", settings.log_level, ""),
                 _setting("max_entries", format_number(settings.max_entries), ""),

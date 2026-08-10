@@ -28,6 +28,8 @@
     write("download-transferred", download.transferred);
     write("download-bytes", download.bytes_written);
     write("download-elapsed", download.elapsed);
+    write("download-rate", download.rate || "—");
+    write("download-remaining", download.remaining || "—");
     write("download-files", download.files_finished);
     write("download-state", download.state_label);
 

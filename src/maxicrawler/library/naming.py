@@ -46,6 +46,25 @@ FALLBACK_FILENAME = "content.bin"
 _SLUG_ALLOWED = re.compile(r"[^a-z0-9]+")
 """Everything a slug is reduced to lower-case alphanumerics from."""
 
+_PATH_COMPONENT = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+"""What this module is willing to recognise as one of its own components.
+
+Deliberately narrower than what a file system would accept. Everything
+:func:`provider_directory` and :func:`resource_key` produce matches it, and
+almost nothing else does: no dot, so ``.`` and ``..`` are out; no separator, so
+nothing traverses; no upper case, so two spellings cannot address one directory
+on a case-insensitive volume; nothing outside ASCII, so no lookalike character
+can stand in for another.
+"""
+
+MAX_PATH_COMPONENT_LENGTH = 64
+"""Longest component this module recognises.
+
+A provider directory is at most 24 characters and a resource key at most 35, so
+the limit is slack rather than a constraint — it is here to bound what an
+untrusted caller can hand over at all.
+"""
+
 _FILENAME_FORBIDDEN = re.compile(r'[\x00-\x1f<>:"/\\|?*]')
 """Control characters and the characters Windows reserves in a file name."""
 
@@ -96,6 +115,21 @@ def provider_directory(name: str) -> str:
         msg = f"provider name yields no usable directory: {name!r}"
         raise LibraryLayoutError(msg)
     return slug
+
+
+def is_path_component(value: str) -> bool:
+    """Return whether *value* is a component this module could have produced.
+
+    The inverse direction of the rest of this module. :func:`resource_key` and
+    :func:`provider_directory` turn something untrusted into a path component;
+    this decides whether an incoming string is one — which is the question a
+    caller has when a component arrives from outside, in a URL for instance.
+
+    Answering it by pattern rather than by inspecting the file system is the
+    point: a component is rejected because of what it *is*, before anything is
+    joined onto a path, and the answer cannot depend on what happens to exist.
+    """
+    return len(value) <= MAX_PATH_COMPONENT_LENGTH and _PATH_COMPONENT.match(value) is not None
 
 
 def safe_filename(name: str | None, *, fallback: str = FALLBACK_FILENAME) -> str:

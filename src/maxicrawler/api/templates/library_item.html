@@ -1,0 +1,113 @@
+{#
+  Everything one stored file is known to be.
+
+  Read from that entry's own metadata document, so this page says what is on
+  disk rather than what a database remembers being put there.
+
+  There is no "open in the file manager" button, and there cannot be one: a
+  `file://` link from an `http://` page is blocked by every browser, and having
+  the server start Explorer on an HTTP request would mean a web page can launch
+  a local program. The path is shown instead, in a field you can select, with a
+  copy button for whoever has scripting on.
+#}
+{% extends "base.html" %}
+{% block title %}{{ item.name }} · MaxiCrawler{% endblock %}
+
+{% block crumbs %}
+<nav class="crumbs">
+  <a href="/library">Library</a> <span class="muted">/</span> <span>{{ item.name }}</span>
+</nav>
+{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <h2>
+    <span class="badge {{ item.state_tone }}">{{ item.state_label }}</span>
+    <span class="url">{{ item.name }}</span>
+    {% if item.file_url %}<a class="aside" href="{{ item.file_url }}">Download</a>{% endif %}
+  </h2>
+
+  <div class="body">
+    {% if item.payload_missing %}
+      <p class="error">
+        The record says a file is stored here and there is none. It was moved or
+        deleted outside MaxiCrawler; downloading the link again would restore it.
+      </p>
+    {% elif item.error %}
+      <p class="error">{{ item.error }}</p>
+    {% endif %}
+
+    <table class="grid tight">
+      <tbody>
+        <tr><td>Provider</td><td>{{ item.provider }}</td></tr>
+        <tr><td>Size</td><td class="num">{{ item.size }}</td></tr>
+        <tr>
+          <td>Downloaded</td>
+          <td class="num">{{ item.downloaded_at or "—" }}</td>
+        </tr>
+        {% if item.discovered_at %}
+          <tr><td>Found</td><td class="num">{{ item.discovered_at }}</td></tr>
+        {% endif %}
+        <tr><td>Original URL</td><td class="url">{{ item.source_url }}</td></tr>
+        {% if item.filename %}
+          <tr><td>File</td><td class="url">{{ item.filename }}</td></tr>
+        {% endif %}
+        {% if item.checksum %}
+          <tr><td>SHA-256</td><td class="url small">{{ item.checksum }}</td></tr>
+        {% endif %}
+        {% if item.attempts != "0" %}
+          <tr><td>Attempts</td><td class="num">{{ item.attempts }}</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+
+    {#
+      The file itself, shown by the browser rather than by us.
+
+      A frame holding something that could execute script is sandboxed as well
+      as the response being sandboxed by its own header -- a stored HTML page
+      must not reach the interface that framed it, and saying so twice costs
+      nothing. A PDF is framed *without* the attribute, because Chrome will not
+      render its viewer inside a sandboxed frame, and a PDF cannot reach our
+      origin in the first place.
+
+      An SVG arrives as an `<img>`, never as a frame, because an image element
+      runs no script even when the file behind it contains some.
+    #}
+    {% if item.view_url %}
+      <div class="viewer">
+        {% if item.display == "image" %}
+          <img src="{{ item.view_url }}" alt="{{ item.name }}">
+        {% else %}
+          <iframe src="{{ item.view_url }}"{% if item.sandboxed %} sandbox{% endif %}
+                  title="{{ item.name }}"></iframe>
+        {% endif %}
+      </div>
+      <p class="muted small">
+        <a href="{{ item.view_url }}">Open on its own</a>
+      </p>
+    {% elif item.is_stored and item.view_reason %}
+      <p class="empty">
+        {{ item.view_reason }}.
+        <a href="{{ item.file_url }}">Download it</a> to open it elsewhere.
+      </p>
+    {% endif %}
+
+    {% if item.path %}
+      <div class="pathbox">
+        <label>
+          <span>Path</span>
+          <input class="path" type="text" value="{{ item.path }}" readonly
+                 spellcheck="false" onclick="this.select()">
+        </label>
+        {#
+          Hidden until the script un-hides it: a button that cannot work is
+          worse than no button.
+        #}
+        <button type="button" class="copy" data-copy=".path" hidden>Copy</button>
+      </div>
+      <script src="/static/copy.js" defer></script>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

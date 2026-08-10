@@ -18,6 +18,7 @@ what the project deliberately will not do.
 - Links found on a page feed the same discovery pipeline and the same plugins local documents use.
 - A provider-independent download manager: a new host is a plugin and a provider, nothing else.
 - A self-describing library: one directory per resource, with versioned JSON metadata beside it.
+- A searchable library in the browser, and a viewer that lets the browser display what it can — no renderer of our own.
 - Typed interfaces and strict static checking with mypy.
 - Fast formatting and linting with Ruff.
 - Test-first baseline with pytest.
@@ -1097,7 +1098,7 @@ become the primary one.
 | --- | --- |
 | **Dashboard** | Start a crawl, and see the recent ones. |
 | **Crawls** | Every crawl this installation has run, live or stored, and one page per crawl. |
-| **Library** | Named, and empty. Listing it will go through a service, the way crawling does. (Sprint 11 filled it in.) |
+| **Library** | Named, and empty. Listing it will go through a service, the way crawling does. (Sprints 11 and 12 filled it in.) |
 | **Settings** | The configuration as it was read, and which file it came from. Read-only. |
 
 Naming all four from the beginning is deliberate. Two of them do very little
@@ -1330,6 +1331,131 @@ empty the page.
   which is where a finished download actually lives.
 - **Still only Mega.** A second provider needs a plugin and a provider, and not
   one line of what this sprint added.
+
+## Sprint 12: the library, and looking at what is in it
+
+Sprint 11 got a file into the library. Sprint 12 is about not having to leave
+MaxiCrawler afterwards: search it, sort it, open one file's page, and look at the
+file itself in the browser.
+
+### The library became a listing
+
+```text
+Library                                          7 of 412
+─────────────────────────────────────────────────────────
+ Search [ jump            ]  Provider [ mega ▾ ]  Status [ any ▾ ]
+─────────────────────────────────────────────────────────
+ PROVIDER   NAME        SIZE      DOWNLOADED ▾   STATUS
+ mega       Jump.pdf    1.3 MB    2026-08-10     completed
+```
+
+Search matches the name, the stored file name and the link it came from — that
+last one is how you find something again when you remember the URL and not the
+title. Every column heading sorts, the arrow says which way, and a footer walks
+the pages fifty at a time.
+
+All of it is a GET form and plain links, so every view has its own URL, the
+browser's back button is the navigation, and the page works with scripting off.
+**No htmx**: on a loopback server a round trip costs less than the vendored file
+would, and the routes already render standalone fragments if that ever changes.
+
+A **failed** download is a row too, with its reason on its page. "Where did my
+failed download go" is exactly the question somebody brings to a library.
+
+### A page per file
+
+```text
+Library / Jump.pdf
+
+[completed]  Jump.pdf                                  Download
+
+  Provider      mega
+  Size          1.3 MB
+  Downloaded    2026-08-10 14:30
+  Original URL  https://mega.nz/file/AaBbCcDd
+  SHA-256       9f86d081884c7d65…
+
+  ┌──────────────────────────────────────────────┐
+  │  (the file, shown by the browser)            │
+  └──────────────────────────────────────────────┘
+
+  Path  [ library/mega/handle00-b16ff6eee4/content/Jump.pdf ]  Copy
+```
+
+There is no "open in the file manager" button, because there cannot be one that
+works: a `file://` link from an `http://` page is blocked by every browser, and
+having the server run `explorer` on an HTTP request would mean a web page
+launching a local program. The path is a field that selects on click, with a copy
+button that appears only when scripting can make it work.
+
+### The viewer renders nothing
+
+PDF, images, text, Markdown and stored HTML are shown by the browser. MaxiCrawler
+states a content type and hands the bytes over; there is no PDF renderer, no
+Markdown converter and nothing to keep up to date.
+
+| What | Served as | Shown in |
+| --- | --- | --- |
+| `.pdf` | `application/pdf` | a frame |
+| `.png .jpg .gif .webp .bmp .ico .avif` | its own type | an `<img>` |
+| `.svg` | `image/svg+xml` | an `<img>`, never a frame |
+| `.txt .log .csv .json .xml .md …` | `text/plain; charset=utf-8` | a frame |
+| `.html` | `text/html; charset=utf-8` | a sandboxed frame |
+| anything else | `application/octet-stream` | not shown; download instead |
+
+**Markdown is shown as its source**, and that is not a shortcut. No browser
+renders Markdown, `text/markdown` makes Chrome download the file, and converting
+it would mean rendering it here — which is the one thing this viewer does not do.
+
+The table is explicit rather than asking `mimetypes`, which reads the Windows
+registry: the type of a `.webp` would differ between a developer's machine and
+the CI meant to check it, and a content type is what decides whether a browser
+executes something.
+
+### The part that needed care
+
+A downloaded HTML page or SVG served inline runs in **this application's origin**,
+and the interface has no authentication (ADR-025). Such a page could read the
+settings page, start a crawl, start a download.
+
+So HTML and SVG are served with `Content-Security-Policy: sandbox` and shown in a
+sandboxed frame, which makes the browser treat them as their own opaque origin —
+verified in a browser, not assumed: from the page around it, the framed document
+is unreachable.
+
+The other types are served *without* that policy, and that is a measurement
+rather than an omission. The first version applied it to everything, on the sound
+ground that "which types are dangerous" is a question answered wrongly once and
+then kept. Chrome then refuses to render a PDF at all — `ERR_BLOCKED_BY_CLIENT`,
+because the directive blocks the plugin its viewer is. A PDF, an image and plain
+text cannot execute script in our origin, so the policy would have cost the whole
+feature and bought nothing. See ADR-027.
+
+A key that arrives in a URL is checked before it becomes a path segment, resolved,
+and refused if it leaves the library root — which a symbolic link inside the
+library would. A file above `max_view_bytes` (32 MiB, configurable) is offered for
+download rather than shown, because a browser handed a 400 MB text file stops
+answering.
+
+### Two services over one store
+
+`DownloadService` writes into the library; `LibraryService` reads it. Searching,
+sorting and paging live in the second one, in `maxicrawler.app`, so a browser and
+a future `library list` command cannot disagree about what "sorted by name"
+means. The web layer still imports neither `library` nor `downloader` nor
+`providers`, and the import graph is read by a test that says so.
+
+### Still not done, on purpose
+
+- **No index.** Every listing reads one small metadata document per stored
+  resource — about 0.3 seconds for two thousand entries warm, and roughly sixteen
+  the first time a virus scanner sees them. An mtime-keyed cache would fix it, and
+  ADR-010 already permits one as a cache; a library of a few dozen entries does
+  not notice, and a cache nobody needs goes stale.
+- **No thumbnails, no previews in the table, no text extraction.** All three mean
+  reading files in order to render them.
+- **No renaming, no deleting, no tags.** The library is browsable, not yet
+  editable.
 
 ## Documentation
 

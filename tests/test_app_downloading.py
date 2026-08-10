@@ -6,14 +6,12 @@ client is told while it runs — and none of it about how any host moves bytes.
 Nothing opens a socket.
 """
 
-import json
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from doubles import StubProvider
 
-from maxicrawler.app import DownloadProgress, DownloadService
+from maxicrawler.app import DownloadProgress, DownloadService, LibraryService
 from maxicrawler.config import Settings
 from maxicrawler.domain import (
     Availability,
@@ -25,7 +23,7 @@ from maxicrawler.domain import (
     ResourceMetadata,
     ResourceRef,
 )
-from maxicrawler.library import FALLBACK_FILENAME, METADATA_FILENAME, Library, new_record
+from maxicrawler.library import Library
 from maxicrawler.providers import ProviderRegistry
 
 KEY = "0123456789abcdefghijkl"
@@ -281,109 +279,24 @@ def test_a_provider_that_cannot_transfer_offers_no_download(tmp_path: Path) -> N
     assert service.can_download(UNSUPPORTED_URL) is False
 
 
-# --- the library --------------------------------------------------------------
+# --- what the library service then sees ---------------------------------------
 
 
-def test_stored_downloads_lists_what_a_download_wrote(tmp_path: Path) -> None:
-    service, _ = make_service(tmp_path)
+def test_a_download_is_visible_to_the_service_that_reads_the_library(tmp_path: Path) -> None:
+    """The seam between the two services, asserted rather than assumed.
+
+    One writes, the other reads, and they agree only because they were pointed
+    at the same library. Nothing else in either suite would notice if they
+    stopped being.
+    """
+    service, library = make_service(tmp_path)
     summary = service.download(FILE_URL)
+    reader = LibraryService(Settings(library_path=library.root), library=library)
 
-    items = service.stored_downloads()
+    (item,) = reader.browse().items
 
-    assert len(items) == 1
-    item = items[0]
-    assert item.provider == "mega"
     assert item.name == "stub.bin"
-    assert item.size == len(PAYLOAD)
+    assert item.provider == "mega"
+    assert item.status is DownloadStatus.COMPLETED
     assert item.path == summary.path
-    assert item.source_url == "https://mega.nz/file/AaBbCcDd"
-    assert item.downloaded_at is not None
-
-
-def test_a_library_that_was_never_written_lists_nothing(tmp_path: Path) -> None:
-    service, _ = make_service(tmp_path)
-
-    assert service.stored_downloads() == ()
-
-
-def test_the_newest_download_is_listed_first(tmp_path: Path) -> None:
-    service, library = make_service(tmp_path)
-    write_entry(library, "AaBbCcDd", "old.bin", datetime(2026, 1, 1, tzinfo=UTC))
-    write_entry(library, "EeFfGgHh", "new.bin", datetime(2026, 8, 9, tzinfo=UTC))
-
-    names = [item.name for item in service.stored_downloads()]
-
-    assert names == ["new.bin", "old.bin"]
-
-
-def test_a_listing_can_be_capped(tmp_path: Path) -> None:
-    service, library = make_service(tmp_path)
-    write_entry(library, "AaBbCcDd", "old.bin", datetime(2026, 1, 1, tzinfo=UTC))
-    write_entry(library, "EeFfGgHh", "new.bin", datetime(2026, 8, 9, tzinfo=UTC))
-
-    assert [item.name for item in service.stored_downloads(limit=1)] == ["new.bin"]
-
-
-def test_one_damaged_entry_does_not_empty_the_listing(tmp_path: Path) -> None:
-    """A library is repairable; a page that refuses to render is not."""
-    service, library = make_service(tmp_path)
-    service.download(FILE_URL)
-    broken = library.root / "mega" / "broken"
-    broken.mkdir(parents=True)
-    (broken / METADATA_FILENAME).write_text("{not json", encoding="utf-8")
-
-    assert [item.name for item in service.stored_downloads()] == ["stub.bin"]
-
-
-def test_an_entry_without_a_payload_is_not_an_item(tmp_path: Path) -> None:
-    """A recorded failure belongs on the download that produced it, not here."""
-    provider = make_provider(failure=RuntimeError("boom"))
-    service, _ = make_service(tmp_path, provider)
-
-    with pytest.raises(RuntimeError):
-        service.download(FILE_URL)
-
-    assert service.stored_downloads() == ()
-
-
-def test_an_unnamed_resource_falls_back_to_what_it_was_stored_as(tmp_path: Path) -> None:
-    """A share published without its key has no readable name at all."""
-    nameless = ResourceInspection(
-        ref=ResourceRef(
-            provider="mega", resource_id="AaBbCcDd", kind=ResourceKind.FILE, url=FILE_URL
-        ),
-        availability=Availability.AVAILABLE,
-        metadata=ResourceMetadata(kind=ResourceKind.FILE, size=len(PAYLOAD)),
-        names_available=False,
-    )
-    service, _ = make_service(tmp_path, make_provider(inspection=nameless, content_name=None))
-
-    summary = service.download(FILE_URL)
-
-    assert summary.label == "AaBbCcDd"
-    assert [item.name for item in service.stored_downloads()] == [FALLBACK_FILENAME]
-
-
-def write_entry(library: Library, handle: str, filename: str, moment: datetime) -> None:
-    """Write a finished library entry by hand, to control when it happened."""
-    ref = ResourceRef(
-        provider="mega",
-        resource_id=handle,
-        kind=ResourceKind.FILE,
-        url=f"https://mega.nz/file/{handle}",
-    )
-    entry = library.entry(ref)
-    payload = entry.content_path(filename)
-    payload.parent.mkdir(parents=True, exist_ok=True)
-    payload.write_bytes(PAYLOAD)
-    record = new_record(ref, entry.key, status=DownloadStatus.COMPLETED, name=filename)
-    document = record.to_document()
-    document["downloaded_at"] = moment.isoformat()
-    document["content"] = {
-        "filename": filename,
-        "path": f"content/{filename}",
-        "size": len(PAYLOAD),
-        "checksums": [],
-    }
-    entry.path.mkdir(parents=True, exist_ok=True)
-    entry.metadata_path.write_text(json.dumps(document), encoding="utf-8")
+    assert reader.payload(item.directory, item.key) is not None
