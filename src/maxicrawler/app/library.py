@@ -167,6 +167,13 @@ class LibraryPage:
     removes the entry you would use to choose a different one.
     """
 
+    statuses: tuple[DownloadStatus, ...] = ()
+    """The verdicts present, on the same terms and for the same reason.
+
+    Derived rather than listed from the enum: offering "running" as a filter for
+    a store that never holds one is a menu entry that can only disappoint.
+    """
+
     @property
     def first(self) -> int:
         """Return the one-based index of the first row shown, or zero."""
@@ -228,6 +235,7 @@ class LibraryService:
             page=page,
             pages=pages,
             providers=tuple(sorted({item.directory for item in items})),
+            statuses=tuple(sorted({item.status for item in items})),
         )
 
     def item(self, provider: str, key: str) -> LibraryItem | None:

@@ -437,3 +437,60 @@ footer {
   cursor: pointer;
 }
 .grid form.row-action button:hover { background: var(--bg); }
+
+/*
+ * The library's filter bar. A GET form, so every view of the table has its own
+ * URL and the browser's own history works as navigation.
+ */
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.filters label { display: flex; flex-direction: column; gap: 4px; }
+.filters label.wide { flex: 1 1 260px; }
+.filters span {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.filters input,
+.filters select {
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+}
+.filters button {
+  padding: 7px 14px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+}
+.filters button:hover { background: var(--bg); }
+.filters .aside { font-size: 12px; }
+
+/* A sortable heading is a link; the marked one says which way it is running. */
+.grid th a { color: inherit; }
+.grid th a:hover { color: var(--accent); }
+.grid th.sorted { color: var(--text); }
+.grid th .mark { color: var(--accent); }
+
+.paging {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 0;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}

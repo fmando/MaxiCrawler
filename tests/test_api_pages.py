@@ -252,6 +252,65 @@ def test_the_library_page_carries_the_whole_layout(tmp_path: Path) -> None:
     assert ">Dashboard</a>" in body
 
 
+def test_the_library_can_be_searched(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+
+        found = test_client.get("/library?q=stub").text
+        missed = test_client.get("/library?q=nowhere").text
+
+    assert "stub.bin" in found
+    assert "stub.bin" not in missed
+    assert "Nothing matches that" in missed
+
+
+def test_the_library_can_be_filtered_by_provider_and_status(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+
+        kept = test_client.get("/library?provider=mega&status=completed").text
+        dropped = test_client.get("/library?provider=nobody").text
+
+    assert "stub.bin" in kept
+    assert "stub.bin" not in dropped
+
+
+def test_the_library_can_be_sorted_by_a_link(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+        body = test_client.get("/library").text
+
+        assert 'href="/library?sort=name&amp;dir=asc"' in body
+        assert test_client.get("/library?sort=name&dir=asc").status_code == 200
+
+
+def test_a_nonsense_query_string_still_answers(tmp_path: Path) -> None:
+    """A stale bookmark is ordinary; a refusal would not be."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+
+        response = test_client.get("/library?sort=colour&dir=sideways&page=-4&status=maybe")
+
+    assert response.status_code == 200
+    assert "stub.bin" in response.text
+
+
+def test_the_library_pages_and_says_where_it_is(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+        body = test_client.get("/library?per_page=1").text
+
+    assert "page 1 of 1" in body
+
+
+def test_a_row_links_to_the_file_it_describes(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+        body = test_client.get("/library").text
+
+    assert re.search(r'href="/library/mega/[a-z0-9-]+"', body)
+
+
 def test_the_library_lists_what_was_downloaded(tmp_path: Path) -> None:
     with client(tmp_path, provider=make_provider()) as test_client:
         finished_download(test_client)

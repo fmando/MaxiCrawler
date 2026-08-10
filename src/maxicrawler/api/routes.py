@@ -24,7 +24,14 @@ from maxicrawler.api import stream, views
 from maxicrawler.api.downloads import DownloadRun, DownloadRuns
 from maxicrawler.api.errors import DownloadBusyError
 from maxicrawler.api.jobs import DEFAULT_RETAINED_JOBS, CrawlJob, CrawlJobs
-from maxicrawler.app import LibraryService, crawl_document
+from maxicrawler.app import (
+    DEFAULT_PER_PAGE,
+    LibraryQuery,
+    LibraryService,
+    LibrarySort,
+    crawl_document,
+)
+from maxicrawler.domain import DownloadStatus
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 """Where the pages live. Beside the code, so an installed wheel carries them."""
@@ -318,23 +325,62 @@ async def crawls(request: Request) -> Response:
 
 
 async def library(request: Request) -> Response:
-    """Show what has been downloaded.
+    """Show what has been downloaded, as the query string asks for it.
 
-    Read through :class:`~maxicrawler.app.DownloadService`, not by opening the
+    Read through :class:`~maxicrawler.app.LibraryService`, not by opening the
     library here. That is the same rule crawling follows, and the reason this
-    page can list files while ``api`` imports neither ``library`` nor
-    ``downloader`` nor ``providers``.
+    page can search, sort and page real files while ``api`` imports neither
+    ``library`` nor ``downloader`` nor ``providers``.
+
+    Every parameter is read leniently. A search, a sort and a page number arrive
+    from a form, a bookmark or a typed URL, and a listing in the default order is
+    a better answer to a stale link than a refusal.
     """
     service = library_of(request)
     return page(
         request,
         "library.html",
         {
-            "library": views.library_table(service.browse().items),
+            "library": views.library_view(service.browse(_query(request))),
             "library_path": service.library_root.as_posix(),
         },
         section="library",
     )
+
+
+def _query(request: Request) -> LibraryQuery:
+    """Return the library query this request asks for."""
+    values = request.query_params
+    return LibraryQuery(
+        search=values.get("q", "").strip(),
+        provider=values.get("provider") or None,
+        status=_status(values.get("status")),
+        sort=LibrarySort.parse(values.get("sort"), default=LibraryQuery().sort),
+        descending=values.get("dir", "desc") != "asc",
+        page=_positive(values.get("page"), default=1),
+        per_page=_positive(values.get("per_page"), default=DEFAULT_PER_PAGE),
+    )
+
+
+def _status(value: str | None) -> DownloadStatus | None:
+    """Return the status *value* names, or ``None`` for anything else.
+
+    A status nobody recognises filters nothing rather than refusing the page,
+    which is the same leniency the sort order is read with.
+    """
+    try:
+        return DownloadStatus(value or "")
+    except ValueError:
+        return None
+
+
+def _positive(value: str | None, *, default: int) -> int:
+    """Return a positive whole number, or *default* for anything else."""
+    try:
+        number = int(value or "")
+    except ValueError:
+        return default
+    return number if number > 0 else default
 
 
 async def settings(request: Request) -> Response:

@@ -20,10 +20,11 @@ from collections.abc import Container, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlencode
 
 from maxicrawler.api.downloads import DownloadSnapshot
 from maxicrawler.api.jobs import JobSnapshot
-from maxicrawler.app import LibraryItem
+from maxicrawler.app import LibraryItem, LibraryPage, LibraryQuery, LibrarySort
 from maxicrawler.config import Settings
 from maxicrawler.crawler import PluginUsage
 from maxicrawler.database import StoredCrawl, StoredUrl
@@ -264,18 +265,103 @@ def download_view(snapshot: DownloadSnapshot) -> dict[str, Any]:
     }
 
 
-def library_table(
-    items: Iterable[LibraryItem], *, limit: int = MAX_LISTED_DOWNLOADS
-) -> dict[str, Any]:
-    """Return the table of everything downloaded, and what it left out."""
-    stored = tuple(items)
-    total = len(stored)
+def library_view(page: LibraryPage) -> dict[str, Any]:
+    """Return what the library page shows, links included.
+
+    The sort links and the paging links are built here rather than in the
+    template, because each of them is *this* query with one thing changed — and
+    a template assembling query strings is a template deciding something.
+    """
+    query = page.query
     return {
-        "rows": tuple(_library_row(item) for item in stored[:limit]),
-        "total": format_number(total),
-        "hidden": format_number(max(0, total - limit)),
-        "has_hidden": total > limit,
+        "rows": tuple(_library_row(item) for item in page.items),
+        "columns": tuple(_column(label, sort, query) for label, sort in COLUMNS),
+        "total": format_number(page.total),
+        "stored": format_number(page.stored),
+        "shown": f"{format_number(page.first)}–{format_number(page.last)}",
+        "has_rows": bool(page.items),
+        "is_filtered": query.is_filtered,
+        "search": query.search,
+        "provider": query.provider or "",
+        "status": "" if query.status is None else str(query.status),
+        # Carried through the filter form as hidden fields, so searching keeps
+        # the order you had chosen instead of silently resetting it.
+        "sort_value": str(query.sort),
+        "direction": "desc" if query.descending else "asc",
+        "providers": page.providers,
+        "statuses": tuple(
+            {"value": str(status), "label": STATUS_LABELS[status]} for status in page.statuses
+        ),
+        "page": format_number(page.page),
+        "pages": format_number(page.pages),
+        "previous_url": _library_url(query, page=page.page - 1) if page.has_previous else None,
+        "next_url": _library_url(query, page=page.page + 1) if page.has_next else None,
+        "reset_url": _library_url(LibraryQuery()),
     }
+
+
+COLUMNS: tuple[tuple[str, LibrarySort], ...] = (
+    ("Provider", LibrarySort.PROVIDER),
+    ("Name", LibrarySort.NAME),
+    ("Size", LibrarySort.SIZE),
+    ("Downloaded", LibrarySort.DOWNLOADED),
+    ("Status", LibrarySort.STATUS),
+)
+"""The sortable columns, in the order they are read."""
+
+SORT_MARKS = {True: "▾", False: "▴"}
+"""What marks the column a listing is ordered by, and which way."""
+
+
+def _column(label: str, sort: LibrarySort, query: LibraryQuery) -> dict[str, Any]:
+    """Return one column heading, and the link that reorders by it.
+
+    Clicking the active column reverses it; clicking another one starts at the
+    direction that column is most often wanted in — largest file and newest
+    download first, names from A. Guessing right saves a second click and
+    guessing wrong costs one, so the guess is worth making.
+    """
+    active = query.sort is sort
+    descending = not query.descending if active else sort in _DESCENDING_FIRST
+    return {
+        "label": label,
+        "url": _library_url(query, sort=sort, descending=descending, page=1),
+        "active": active,
+        "mark": SORT_MARKS[query.descending] if active else "",
+    }
+
+
+_DESCENDING_FIRST = frozenset({LibrarySort.SIZE, LibrarySort.DOWNLOADED})
+"""Columns whose first click means "biggest first" rather than "smallest"."""
+
+
+def _library_url(query: LibraryQuery, **changes: Any) -> str:
+    """Return the library URL for *query* with *changes* applied.
+
+    Only what differs from the default is written into the query string, so an
+    unfiltered listing is plain ``/library`` and a bookmarked one carries exactly
+    what it needs.
+    """
+    values = {
+        "q": changes.get("search", query.search),
+        "provider": changes.get("provider", query.provider) or "",
+        "status": _status_value(changes.get("status", query.status)),
+        "sort": str(changes.get("sort", query.sort)),
+        "dir": "desc" if changes.get("descending", query.descending) else "asc",
+        "page": str(changes.get("page", query.page)),
+    }
+    default = LibraryQuery()
+    if values["sort"] == str(default.sort) and values["dir"] == "desc":
+        del values["sort"], values["dir"]
+    if values.get("page") == "1":
+        del values["page"]
+    written = {name: value for name, value in values.items() if value}
+    return f"/library?{urlencode(written)}" if written else "/library"
+
+
+def _status_value(status: DownloadStatus | None) -> str:
+    """Return a status as a query string writes it, or nothing."""
+    return "" if status is None else str(status)
 
 
 def _library_row(item: LibraryItem) -> dict[str, Any]:
@@ -484,6 +570,11 @@ def settings_view(settings: Settings) -> tuple[dict[str, Any], ...]:
                     "library_path",
                     settings.library_path.as_posix(),
                     "Where downloads are stored, one directory per resource.",
+                ),
+                _setting(
+                    "max_view_bytes",
+                    format_bytes(settings.max_view_bytes),
+                    "Largest stored file the browser is offered inline.",
                 ),
                 _setting("log_level", settings.log_level, ""),
                 _setting("max_entries", format_number(settings.max_entries), ""),

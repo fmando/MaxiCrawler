@@ -1,10 +1,13 @@
 {#
   What has been downloaded.
 
-  Five columns and nothing else: no search, no filter, no preview. The rows are
-  read through a service in `maxicrawler.app`, the same way crawling is, which
-  is what keeps this layer from reaching into `maxicrawler.library` because it
-  was the quickest way to fill a table.
+  Server-rendered, including the searching and the sorting: the filter is a GET
+  form and every column heading is a link, so the whole page works with
+  scripting switched off and every view of it can be bookmarked.
+
+  The rows are read through a service in `maxicrawler.app`, the same way
+  crawling is, which is what keeps this layer from reaching into
+  `maxicrawler.library` because it was the quickest way to fill a table.
 #}
 {% extends "base.html" %}
 {% block title %}Library · MaxiCrawler{% endblock %}
@@ -13,17 +16,55 @@
 <section class="panel">
   <h2>
     Library
-    <span class="count">{{ library.total }} stored</span>
+    <span class="count">
+      {% if library.is_filtered %}{{ library.total }} of {{ library.stored }}{% else %}{{ library.stored }} stored{% endif %}
+    </span>
   </h2>
 
-  {% if library.rows %}
+  <form class="filters" method="get" action="/library">
+    <label class="wide">
+      <span>Search</span>
+      <input type="search" name="q" value="{{ library.search }}" placeholder="name, file or link"
+             autocomplete="off" spellcheck="false">
+    </label>
+
+    <label>
+      <span>Provider</span>
+      <select name="provider">
+        <option value="">any</option>
+        {% for provider in library.providers %}
+          <option value="{{ provider }}"{% if provider == library.provider %} selected{% endif %}>{{ provider }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      <span>Status</span>
+      <select name="status">
+        <option value="">any</option>
+        {% for status in library.statuses %}
+          <option value="{{ status.value }}"{% if status.value == library.status %} selected{% endif %}>{{ status.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    {# The order survives a search rather than resetting to the default. #}
+    <input type="hidden" name="sort" value="{{ library.sort_value }}">
+    <input type="hidden" name="dir" value="{{ library.direction }}">
+
+    <button type="submit">Search</button>
+    {% if library.is_filtered %}<a class="aside" href="{{ library.reset_url }}">Clear</a>{% endif %}
+  </form>
+
+  {% if library.has_rows %}
     <table class="grid">
       <thead>
         <tr>
-          <th>Provider</th>
-          <th>Name</th>
-          <th class="right">Size</th>
-          <th>Downloaded</th>
+          {% for column in library.columns %}
+            <th{% if column.active %} class="sorted"{% endif %}>
+              <a href="{{ column.url }}">{{ column.label }}{% if column.mark %} <span class="mark">{{ column.mark }}</span>{% endif %}</a>
+            </th>
+          {% endfor %}
           <th>Path</th>
         </tr>
       </thead>
@@ -32,19 +73,29 @@
           <tr>
             <td>{{ item.provider }}</td>
             <td>
-              {{ item.name }}
+              <a href="{{ item.url }}">{{ item.name }}</a>
               <div class="muted small url">{{ item.source_url }}</div>
             </td>
             <td class="num right">{{ item.size }}</td>
             <td class="num">{{ item.downloaded_at }}</td>
+            <td><span class="badge {{ item.state_tone }}">{{ item.state_label }}</span></td>
             <td class="url muted small">{{ item.path }}</td>
           </tr>
         {% endfor %}
       </tbody>
     </table>
-    {% if library.has_hidden %}
-      <p class="empty">{{ library.hidden }} more are stored but not shown here.</p>
-    {% endif %}
+
+    <p class="paging">
+      <span class="muted">{{ library.shown }} of {{ library.total }}</span>
+      {% if library.previous_url %}<a href="{{ library.previous_url }}">← previous</a>{% endif %}
+      <span class="muted">page {{ library.page }} of {{ library.pages }}</span>
+      {% if library.next_url %}<a href="{{ library.next_url }}">next →</a>{% endif %}
+    </p>
+  {% elif library.is_filtered %}
+    <p class="empty">
+      Nothing matches that. <a href="{{ library.reset_url }}">Show everything</a> —
+      the library holds {{ library.stored }}.
+    </p>
   {% else %}
     <p class="empty">
       Nothing has been downloaded yet. Crawl a page, then use the Download

@@ -22,7 +22,7 @@ from maxicrawler.api.views import (
     format_bytes,
     format_duration,
     format_number,
-    library_table,
+    library_view,
     link_rows,
     link_table,
     page_rows,
@@ -33,7 +33,14 @@ from maxicrawler.api.views import (
     settings_view,
     stored_view,
 )
-from maxicrawler.app import DownloadProgress, DownloadSummary, LibraryItem
+from maxicrawler.app import (
+    DownloadProgress,
+    DownloadSummary,
+    LibraryItem,
+    LibraryPage,
+    LibraryQuery,
+    LibrarySort,
+)
 from maxicrawler.crawler import DiscoverySummary, PluginUsage
 from maxicrawler.database import StoredUrl
 from maxicrawler.domain import DownloadStatus, ScanSession, Statistics, UrlRecord
@@ -908,46 +915,156 @@ def make_item(name: str = "Jump.pdf", **overrides: object) -> LibraryItem:
     """Return one stored resource."""
     values: dict[str, object] = {
         "provider": "mega",
-        "name": name,
+        "directory": "mega",
         "key": "abc",
+        "name": name,
+        "status": DownloadStatus.COMPLETED,
+        "source_url": "https://mega.nz/file/AaBbCcDd",
+        "filename": name,
         "size": 1_300_000,
         "downloaded_at": datetime(2026, 8, 9, 14, 30, tzinfo=UTC),
         "path": Path("library") / "mega" / "abc" / "content" / name,
-        "source_url": "https://mega.nz/file/AaBbCcDd",
+        "checksum": "abc123",
     }
     values.update(overrides)
     return LibraryItem(**values)  # type: ignore[arg-type]
 
 
-def test_the_library_table_has_the_five_columns_it_promises() -> None:
-    table = library_table([make_item()])
+def library_page(items: tuple[LibraryItem, ...] = (), **overrides: object) -> LibraryPage:
+    """Return a page of the library without reading one."""
+    query = overrides.pop("query", LibraryQuery())
+    assert isinstance(query, LibraryQuery)
+    values: dict[str, object] = {
+        "items": items,
+        "query": query,
+        "total": len(items),
+        "stored": len(items),
+        "page": 1,
+        "pages": 1,
+        "providers": tuple(sorted({item.directory for item in items})),
+        "statuses": tuple(sorted({item.status for item in items})),
+    }
+    values.update(overrides)
+    return LibraryPage(**values)  # type: ignore[arg-type]
 
-    row = table["rows"][0]
+
+def test_the_library_table_has_the_columns_it_promises() -> None:
+    shown = library_view(library_page((make_item(),)))
+
+    row = shown["rows"][0]
     assert row["provider"] == "mega"
     assert row["name"] == "Jump.pdf"
     assert row["size"] == "1.3 MB"
     assert row["downloaded_at"] == "2026-08-09 14:30"
     assert row["path"] == "library/mega/abc/content/Jump.pdf"
+    assert row["state_label"] == "completed"
+    assert row["url"] == "/library/mega/abc"
 
 
-def test_an_empty_library_is_an_empty_table() -> None:
-    table = library_table([])
+def test_a_failed_row_says_so_and_shows_no_path() -> None:
+    item = make_item(status=DownloadStatus.FAILED, path=None, size=None)
 
-    assert table["rows"] == ()
-    assert table["total"] == "0"
-    assert table["has_hidden"] is False
+    row = library_view(library_page((item,)))["rows"][0]
 
-
-def test_a_long_library_says_what_it_left_out() -> None:
-    table = library_table([make_item(f"file-{index}.bin") for index in range(5)], limit=2)
-
-    assert len(table["rows"]) == 2
-    assert table["total"] == "5"
-    assert table["hidden"] == "3"
-    assert table["has_hidden"] is True
+    assert row["state_label"] == "failed"
+    assert row["state_tone"] == "bad"
+    assert row["path"] == "—"
+    assert row["size"] == "unknown"
 
 
-def test_an_entry_with_no_recorded_time_says_so_rather_than_guessing() -> None:
-    table = library_table([make_item(downloaded_at=None)])
+def test_an_empty_library_has_no_rows() -> None:
+    shown = library_view(library_page())
 
-    assert table["rows"][0]["downloaded_at"] == "—"
+    assert shown["rows"] == ()
+    assert shown["has_rows"] is False
+    assert shown["stored"] == "0"
+    assert shown["is_filtered"] is False
+
+
+def test_a_filtered_listing_counts_both_numbers() -> None:
+    shown = library_view(
+        library_page((make_item(),), query=LibraryQuery(search="jump"), total=1, stored=9)
+    )
+
+    assert shown["total"] == "1"
+    assert shown["stored"] == "9"
+    assert shown["is_filtered"] is True
+    assert shown["search"] == "jump"
+
+
+# --- the links the table is navigated by --------------------------------------
+
+
+def test_every_column_offers_a_link_that_sorts_by_it() -> None:
+    shown = library_view(library_page((make_item(),)))
+
+    labels = [column["label"] for column in shown["columns"]]
+    assert labels == ["Provider", "Name", "Size", "Downloaded", "Status"]
+    assert (
+        "sort=name" in dict((column["label"], column["url"]) for column in shown["columns"])["Name"]
+    )
+
+
+def test_the_active_column_is_marked_and_its_link_reverses_it() -> None:
+    shown = library_view(library_page((make_item(),), query=LibraryQuery(descending=True)))
+    downloaded = next(column for column in shown["columns"] if column["label"] == "Downloaded")
+
+    assert downloaded["active"] is True
+    assert downloaded["mark"] == "▾"
+    assert "dir=asc" in downloaded["url"]
+
+
+def test_a_column_starts_in_the_direction_it_is_usually_wanted() -> None:
+    """Largest file and newest download first; names from A."""
+    shown = library_view(library_page((make_item(),), query=LibraryQuery()))
+    columns = {column["label"]: column["url"] for column in shown["columns"]}
+
+    assert "dir=asc" in columns["Name"]
+    assert "dir=desc" in columns["Size"]
+
+
+def test_an_unfiltered_default_listing_needs_no_query_string() -> None:
+    """So the plain link in the navigation and a reset button agree."""
+    assert library_view(library_page())["reset_url"] == "/library"
+
+
+def test_the_filter_form_carries_the_current_order() -> None:
+    shown = library_view(
+        library_page((make_item(),), query=LibraryQuery(sort=LibrarySort.NAME, descending=False))
+    )
+
+    assert shown["sort_value"] == "name"
+    assert shown["direction"] == "asc"
+
+
+def test_paging_links_appear_only_where_there_is_a_page() -> None:
+    items = (make_item(),)
+    middle = library_view(library_page(items, total=9, page=2, pages=3))
+    first = library_view(library_page(items, total=9, page=1, pages=3))
+    last = library_view(library_page(items, total=9, page=3, pages=3))
+
+    assert middle["previous_url"] is not None and middle["next_url"] is not None
+    assert first["previous_url"] is None
+    assert last["next_url"] is None
+    assert "page=3" in (middle["next_url"] or "")
+
+
+def test_a_page_says_which_rows_it_is_showing() -> None:
+    shown = library_view(library_page((make_item(), make_item("b.pdf")), total=9, page=2))
+
+    assert shown["page"] == "2"
+    assert shown["pages"] == "1"
+    assert "of 9" not in shown["shown"]
+    assert shown["shown"].count("–") == 1
+
+
+def test_a_filter_survives_a_sort_link() -> None:
+    """Otherwise reordering a search silently searches for everything."""
+    query = LibraryQuery(search="jump", provider="mega", status=DownloadStatus.COMPLETED)
+
+    shown = library_view(library_page((make_item(),), query=query))
+    url = next(column["url"] for column in shown["columns"] if column["label"] == "Name")
+
+    assert "q=jump" in url
+    assert "provider=mega" in url
+    assert "status=completed" in url
