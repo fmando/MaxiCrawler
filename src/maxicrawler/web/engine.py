@@ -63,7 +63,13 @@ from maxicrawler.web.frontier import (
     visit_key,
 )
 from maxicrawler.web.models import CrawlResult, LinkKind
-from maxicrawler.web.policy import AllowAllPolicy, CompositePolicy, CrawlPolicy, SameDomainPolicy
+from maxicrawler.web.policy import (
+    AllowAllPolicy,
+    CompositePolicy,
+    CrawlPolicy,
+    PolicyDecision,
+    SameDomainPolicy,
+)
 from maxicrawler.web.report import (
     CrawlReport,
     CrawlStatistics,
@@ -87,6 +93,11 @@ is not a page", which the markup already said.
 The four that remain are the ones a reader could follow: a link, a frame, a
 meta refresh, and a URL somebody wrote out in the text.
 """
+
+
+def _reason_of(refusal: PolicyRefusedError) -> SkipReason:
+    """Return how a report counts a refusal that arrived as an exception."""
+    return skip_reason_for(PolicyDecision.refuse(str(refusal), rule=refusal.rule))
 
 
 class CrawlEngine:
@@ -324,6 +335,15 @@ class CrawlEngine:
         self._attempts += 1
         try:
             result = self._service.crawl_page(item.url, session.scan_session)
+        except PolicyRefusedError as refusal:
+            # A rule said no *during* the fetch rather than before it — which
+            # today means a redirect landed somewhere the destination was not
+            # allowed to be. Still a skip rather than a failure: nothing broke,
+            # we declined.
+            if not self._pages:
+                raise
+            self._skips[_reason_of(refusal)] += 1
+            return
         except ContentTypeError:
             # Not a failure. We asked "is this a page?" and got a clear no,
             # which is the same answer the extension filter gives for free —

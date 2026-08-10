@@ -8,6 +8,7 @@ from web_server import Site, deflated, gzipped, serve
 from maxicrawler.web import (
     ContentEncodingError,
     ContentTypeError,
+    CrawlError,
     FetchedPage,
     HttpStatusError,
     ResponseTooLargeError,
@@ -160,6 +161,47 @@ def test_a_redirect_to_a_file_url_is_refused_whatever_the_status(status: int) ->
 
     with serve(site) as base, pytest.raises(UnsupportedSchemeError):
         make_fetcher().fetch(f"{base}/out")
+
+
+def test_every_hop_is_offered_to_the_guard() -> None:
+    """The destination is what has to be judged, not the URL somebody typed."""
+    seen: list[str] = []
+    site = Site()
+    site.add("/one", status=302, location="/two", body=b"", content_type=None)
+    site.add("/two", status=302, location="/three", body=b"", content_type=None)
+    site.add_html("/three", "<html></html>")
+
+    with serve(site) as base:
+        make_fetcher(guard=seen.append).fetch(f"{base}/one")
+
+    assert seen == [f"{base}/two", f"{base}/three"]
+
+
+def test_a_guard_that_refuses_stops_the_chain() -> None:
+    site = Site()
+    site.add("/out", status=302, location="/inside", body=b"", content_type=None)
+    site.add_html("/inside", "<html>secret</html>")
+
+    def guard(url: str) -> None:
+        if url.endswith("/inside"):
+            message = "not there"
+            raise CrawlError(message)
+
+    with serve(site) as base, pytest.raises(CrawlError, match="not there"):
+        make_fetcher(guard=guard).fetch(f"{base}/out")
+
+    assert "/inside" not in [request.path for request in site.requests]
+
+
+def test_a_page_that_does_not_redirect_never_troubles_the_guard() -> None:
+    seen: list[str] = []
+    site = Site()
+    site.add_html("/", "<html></html>")
+
+    with serve(site) as base:
+        make_fetcher(guard=seen.append).fetch(f"{base}/")
+
+    assert seen == []
 
 
 def test_zero_redirects_allowed_means_the_first_hop_is_refused() -> None:

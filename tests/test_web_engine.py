@@ -679,6 +679,40 @@ def test_a_seed_the_gate_refuses_ends_the_crawl_with_its_rule() -> None:
     assert "disallowed by robots.txt" in str(refusal.value)
 
 
+def test_a_rule_that_says_no_during_the_fetch_is_a_skip_rather_than_a_failure() -> None:
+    """What a refused redirect looks like from up here.
+
+    The gate cannot see where a URL will end up, so a destination rule fires
+    mid-fetch. Nothing broke -- we declined -- so it is counted like any other
+    refusal instead of being reported as a page that could not be read.
+    """
+
+    class RefusingService:
+        def __init__(self, inner: WebDiscoveryService) -> None:
+            self._inner = inner
+            self.start = inner.start
+            self.finish = inner.finish
+
+        def crawl_page(self, url: str, session: object) -> object:
+            if url.endswith("/a"):
+                message = "redirected to somewhere private"
+                raise PolicyRefusedError(message, rule=PolicyRule.PRIVATE_NETWORK)
+            return self._inner.crawl_page(url, session)  # type: ignore[arg-type]
+
+    service = WebDiscoveryService(
+        DiscoveryPipeline(EventBus()),
+        fetcher=UrllibPageFetcher(user_agent="MaxiCrawler/test", timeout=5.0),
+    )
+    engine = CrawlEngine(RefusingService(service))  # type: ignore[arg-type]
+
+    with serve(make_site()) as base:
+        report = engine.run(make_session(f"{base}/", max_depth=1))
+
+    assert "/a" not in visited_paths(report, base)
+    assert report.failures == ()
+    assert dict(report.statistics.skips_by_reason)[SkipReason.PRIVATE_NETWORK] == 1
+
+
 def test_without_a_gate_nothing_is_asked_twice() -> None:
     """The default gate permits everything, so an unwired engine is unchanged."""
     with crawl(make_site(), max_depth=1) as (report, base):

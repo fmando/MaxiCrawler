@@ -26,6 +26,7 @@ provider layer, which it must not.
 """
 
 import zlib
+from collections.abc import Callable
 from email.message import Message
 from http.client import HTTPMessage
 from typing import Any, Protocol, runtime_checkable
@@ -93,6 +94,14 @@ HTML_MEDIA_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 ACCEPT_HEADER = "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1"
 """Stated preference; servers that ignore it are caught by the type check."""
 
+RedirectGuard = Callable[[str], None]
+"""Vets one redirect target, raising to refuse it.
+
+A callable rather than a policy object, so this module stays free of
+:mod:`maxicrawler.web.policy`: what it needs is something that raises, and what
+the rule is remains somebody else's business.
+"""
+
 _BROTLI_CHUNK = 64 * 1024
 """How much compressed input is handed to the Brotli decoder at a time.
 
@@ -136,11 +145,24 @@ class BoundedRedirectHandler(HTTPRedirectHandler):
     again there, and that is the check the chain and the limit hang off.
 
     One handler serves one request, so the recorded chain needs no locking.
+
+    A caller may also pass a *guard*, called with every hop before it is taken.
+    That is where a rule about the *destination* belongs — a public URL
+    answering ``302 Location: http://169.254.169.254/`` is the ordinary shape
+    of an SSRF, and a check made only against the URL a crawl started with
+    would never see it. The guard is a plain callable that raises, so this
+    module keeps knowing nothing about policies.
     """
 
-    def __init__(self, *, max_redirects: int = DEFAULT_MAX_REDIRECTS) -> None:
+    def __init__(
+        self,
+        *,
+        max_redirects: int = DEFAULT_MAX_REDIRECTS,
+        guard: RedirectGuard | None = None,
+    ) -> None:
         super().__init__()
         self._max_redirects = max_redirects
+        self._guard = guard
         self.chain: list[str] = []
         """Every URL the chain passed through, in order."""
 
@@ -163,6 +185,8 @@ class BoundedRedirectHandler(HTTPRedirectHandler):
         except ValueError as error:
             message = f"redirect from {safe_target(req.full_url)} to a non-HTTP(S) target"
             raise UnsupportedSchemeError(message) from error
+        if self._guard is not None:
+            self._guard(newurl)
         if len(self.chain) >= self._max_redirects:
             message = (
                 f"more than {self._max_redirects} redirects starting at "
@@ -208,6 +232,7 @@ class UrllibPageFetcher:
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
         max_redirects: int = DEFAULT_MAX_REDIRECTS,
         accept: frozenset[str] = HTML_MEDIA_TYPES,
+        guard: RedirectGuard | None = None,
     ) -> None:
         if timeout <= 0:
             msg = "timeout must be positive"
@@ -229,6 +254,7 @@ class UrllibPageFetcher:
         self._max_response_bytes = max_response_bytes
         self._max_redirects = max_redirects
         self._accept = accept
+        self._guard = guard
 
     @property
     def accepted_media_types(self) -> frozenset[str]:
@@ -241,7 +267,7 @@ class UrllibPageFetcher:
             require_http_scheme(url)
         except ValueError as error:
             raise UnsupportedSchemeError(str(error)) from error
-        handler = BoundedRedirectHandler(max_redirects=self._max_redirects)
+        handler = BoundedRedirectHandler(max_redirects=self._max_redirects, guard=self._guard)
         request = Request(  # noqa: S310 - the scheme is checked above
             url,
             headers=self._headers(),
