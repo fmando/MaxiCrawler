@@ -198,6 +198,19 @@ class CrawlControl:
         """Ask the crawl to stop after the page it is working on."""
         self._stop.set()
 
+    def wait(self, seconds: float) -> None:
+        """Block for up to *seconds*, returning at once when a stop is asked for.
+
+        What makes politeness interruptible. A crawl waiting out a thirty-second
+        ``Crawl-delay`` would otherwise hold a shutdown open for thirty seconds,
+        and a Stop button that does nothing for half a minute reads as broken.
+
+        Handed to :class:`~maxicrawler.web.throttle.ThrottledFetcher` as its
+        waiter, which is the only thing that ever calls this — the engine still
+        knows nothing about time.
+        """
+        self._stop.wait(seconds)
+
     @property
     def stop_requested(self) -> bool:
         """Return whether a stop has been asked for."""
