@@ -100,11 +100,11 @@ def render_crawl_json(report: CrawlReport) -> str:
 def _describe_options(report: CrawlReport) -> str:
     """Return the one-line description of what the crawl was told to do."""
     options = report.session.options
-    scope = "same domain" if options.same_domain else "any domain"
-    if options.same_domain and options.include_subdomains:
-        scope = "same domain and subdomains"
     robots = "obeyed" if options.respect_robots else "ignored"
-    return f"depth {options.max_depth}, {scope}, max {options.max_pages} pages, robots.txt {robots}"
+    return (
+        f"depth {options.max_depth}, {options.scope}, "
+        f"max {options.max_pages} pages, robots.txt {robots}"
+    )
 
 
 def _render_pages(report: CrawlReport) -> list[str]:

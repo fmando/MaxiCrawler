@@ -66,6 +66,29 @@ class CrawlState(StrEnum):
         return self in {CrawlState.COMPLETED, CrawlState.PAGE_LIMIT, CrawlState.INTERRUPTED}
 
 
+class CrawlScope(StrEnum):
+    """Which rule decided where a crawl was allowed to go.
+
+    Three booleans can be spelled eight ways and mean four things, and every
+    reader of them — the engine building a policy, a report, a table row, a
+    terminal line — would otherwise work out the precedence for itself and one
+    of them would work it out differently. This is that answer, computed once
+    by :attr:`CrawlOptions.scope`.
+
+    The values *are* the phrase, as on
+    :class:`~maxicrawler.web.policy.PolicyRule`, so nothing needs a table to
+    turn one into words.
+    """
+
+    ANY_DOMAIN = "any domain"
+    """Links are followed wherever they lead."""
+
+    SAME_DOMAIN = "same domain"
+    SAME_DOMAIN_AND_SUBDOMAINS = "same domain and subdomains"
+    BELOW_SEED = "below the start URL"
+    """The seed's host, and only the path the seed named or one below it."""
+
+
 @dataclass(frozen=True, slots=True)
 class CrawlOptions:
     """What a crawl was told to do.
@@ -85,6 +108,23 @@ class CrawlOptions:
     same_domain: bool = False
     include_subdomains: bool = False
     """Whether ``docs.example.org`` counts as inside ``example.org``."""
+
+    below_seed: bool = False
+    """Whether the crawl stays at or below the place the seed URL names.
+
+    The narrower scope, and the one a host that gives each section its own path
+    needs: ``boards.example.org/hr/`` and ``boards.example.org/g/`` are one
+    domain, so ``same_domain`` admits both.
+
+    **It supersedes the two above rather than adding to them.** A path without
+    a host means nothing, so the rule carries the host itself, and subdomains
+    are outside it — see
+    :class:`~maxicrawler.web.policy.PathPrefixPolicy`. When this is set,
+    ``same_domain`` and ``include_subdomains`` describe a rule that was not
+    the one applied; they are kept on the record as submitted rather than
+    rewritten, because a record says what it was told, and
+    :attr:`scope` is what says which rule ran.
+    """
 
     respect_robots: bool = True
     """Whether this crawl obeyed the ``robots.txt`` of the hosts it visited.
@@ -110,6 +150,22 @@ class CrawlOptions:
     def is_recursive(self) -> bool:
         """Return whether this crawl follows links at all."""
         return self.max_depth > 0
+
+    @property
+    def scope(self) -> CrawlScope:
+        """Return which rule this crawl is held to.
+
+        The one place the precedence is decided: ``below_seed`` wins, because
+        it is the only rule that names a *place*, and the domain rules it
+        supersedes cannot narrow it further — its host is already the seed's.
+        """
+        if self.below_seed:
+            return CrawlScope.BELOW_SEED
+        if not self.same_domain:
+            return CrawlScope.ANY_DOMAIN
+        if self.include_subdomains:
+            return CrawlScope.SAME_DOMAIN_AND_SUBDOMAINS
+        return CrawlScope.SAME_DOMAIN
 
 
 @dataclass(frozen=True, slots=True)

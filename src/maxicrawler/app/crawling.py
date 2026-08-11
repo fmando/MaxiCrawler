@@ -85,6 +85,7 @@ class CrawlService:
         max_pages: int | None = None,
         same_domain: bool | None = None,
         include_subdomains: bool = False,
+        below_seed: bool | None = None,
         respect_robots: bool | None = None,
         scan_prose: bool = True,
         session_id: str | None = None,
@@ -108,6 +109,7 @@ class CrawlService:
             max_pages=settings.crawl_max_pages if max_pages is None else max_pages,
             same_domain=settings.crawl_same_domain if same_domain is None else same_domain,
             include_subdomains=include_subdomains,
+            below_seed=settings.crawl_below_seed if below_seed is None else below_seed,
             respect_robots=settings.respect_robots if respect_robots is None else respect_robots,
             scan_prose=scan_prose,
         )

@@ -185,6 +185,91 @@ class SameDomainPolicy:
         return PolicyDecision.refuse(f"outside {self._host}")
 
 
+def path_prefix(url: str) -> str:
+    """Return the part of *url*'s path that "at or below this URL" means.
+
+    Always ends in a slash, so it names a place rather than a thing.
+
+    The path is taken as written except in one case: when the last segment
+    contains a dot it is read as a file, and the directory holding it is what
+    the crawl covers. Without that, seeding a page would confine a crawl to
+    that single page — which is what most pasted URLs name, and would make the
+    option useless exactly where somebody reached for it.
+
+    A dot is the whole of the guess, and it is the only guess in this module.
+    It reads ``/releases/v1.0`` as a file and widens the scope to
+    ``/releases/``, which is wrong; it is written down here rather than left to
+    be discovered. A trailing slash settles the question in the other
+    direction: ``/releases/v1.0/`` names a directory whatever it looks like.
+    """
+    path = urlsplit(url).path
+    if not path:
+        return "/"
+    if path.endswith("/"):
+        return path
+    head, _, last = path.rpartition("/")
+    if "." in last:
+        return f"{head}/"
+    return f"{path}/"
+
+
+class PathPrefixPolicy:
+    """Keeps a crawl at or below the place the seed URL names.
+
+    What ``--same-domain`` cannot express. A host that gives each section its
+    own path — a forum's boards, a documentation set's versions, one user's
+    pages on a site that hosts many — is one host, so a domain rule admits all
+    of it. This admits the section that was asked for.
+
+    **The host is part of the scope**, so this replaces the domain rule rather
+    than joining it: a path prefix without a host would let any site with a
+    ``/hr/`` in it inside. The host is the seed's own, spelled as
+    :func:`registrable_host` reduces it, and subdomains are always outside —
+    ``docs.example.org/guide/`` is not a place below ``example.org/guide/``,
+    it is a different site with a similar address.
+
+    Matching is by whole path segment, never by string prefix. ``/hr/`` must
+    not admit ``/hrx/``, which is the same hole a suffix test opens in a
+    same-domain rule, and it is asserted by name in the tests.
+
+    A query string is not part of the place: ``/hr/?page=2`` is below ``/hr/``.
+    """
+
+    def __init__(self, seed_url: str) -> None:
+        host = registrable_host(seed_url)
+        if host is None:
+            msg = f"cannot read a host from the seed URL: {seed_url}"
+            raise ValueError(msg)
+        self._host = host
+        self._prefix = path_prefix(seed_url)
+        # The prefix without its trailing slash is a path in its own right:
+        # `/hr` and `/hr/` are the same place, and a link written as the first
+        # must not be turned away by a rule written with the second.
+        self._stem = self._prefix[:-1]
+
+    @property
+    def host(self) -> str:
+        """Return the host a crawl is confined to."""
+        return self._host
+
+    @property
+    def prefix(self) -> str:
+        """Return the path a crawl is confined to, ending in a slash."""
+        return self._prefix
+
+    def may_fetch(self, url: str) -> PolicyDecision:
+        """Return whether *url* is the seed's place or somewhere below it."""
+        host = registrable_host(url)
+        if host is None:
+            return PolicyDecision.refuse("no host")
+        if host != self._host:
+            return PolicyDecision.refuse(f"outside {self._host}{self._prefix}")
+        path = urlsplit(url).path
+        if path == self._stem or path.startswith(self._prefix):
+            return PolicyDecision.allow()
+        return PolicyDecision.refuse(f"outside {self._host}{self._prefix}")
+
+
 class CompositePolicy:
     """Asks several policies in turn; the first refusal wins.
 

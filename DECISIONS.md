@@ -894,3 +894,64 @@ conflated two questions: "which rows do I show" carries ordering, facets, paging
 and column choices, while "which URLs do I queue" carries none of them. Same
 service, same filter vocabulary, different answer — which is the shape ADR-028
 set up when it separated reading the library from writing it.
+
+## ADR-035: A scope that names a place, not just a host
+
+A crawl could be held to a domain or to nothing. That is the wrong number of
+choices for the sites people actually point this at.
+
+`boards.example.org/hr/` and `boards.example.org/g/` are one host. So are
+`example.org/~alice/` and `example.org/~bob/`, and every version of a
+documentation set under `/docs/v1/` and `/docs/v2/`. On all of them
+`--same-domain` is a rule that ticks a box and changes nothing: the crawl walks
+the whole site because the whole site *is* the same domain, and the operator
+filters thousands of unwanted links afterwards instead of never recording them.
+
+`--below-seed` is the third scope: the place the start URL names, and anything
+under it.
+
+**A path prefix carries its host, so it replaces the domain rule rather than
+joining it.** A rule that matched `/hr/` on any host would hand the crawl to
+every site with a section of that name. Two boxes ticked is therefore not a
+contradiction to resolve — it is the narrow rule, and the wide one beside it
+could only ever agree.
+
+**Subdomains are always outside it**, with no option to include them.
+`docs.example.org/guide/` is not a place below `example.org/guide/`; it is a
+different site whose address looks similar. Where the domain rule offers the
+choice, this one does not, because there is no reading of "below this URL" that
+reaches another host.
+
+**Matching is by whole path segment.** `/hr/` must not admit `/hrx/`, which is
+the same hole a suffix test opens in a same-domain rule, and it is asserted by
+name in the tests. `/hr` and `/hr/` are the same place, whichever of them a
+link happens to be written as.
+
+**One guess, written down: a last segment with a dot in it is read as a file.**
+`https://example.org/docs/guide.html` covers `/docs/`, not nothing. Without
+that, the option would confine a crawl to a single page on most of the URLs
+people paste — which is precisely when they reached for it. The guess is wrong
+for `/releases/v1.0`, where it widens the scope to `/releases/`; a trailing
+slash settles the question in the other direction, and there is a test whose
+name says the rule is wrong there on purpose.
+
+**Three booleans, one scope.** `same_domain`, `include_subdomains` and
+`below_seed` can be spelled eight ways and mean four things. `CrawlOptions.scope`
+decides the precedence once and returns a `CrawlScope` whose values *are* the
+phrase, the way `PolicyRule`'s are. The engine picks its policy from it, the
+crawl table renders it, the terminal prints it, and the JSON document carries it
+beside the raw booleans. Before this there were two places that worked the
+precedence out — a view and a CLI renderer — and a third about to be added.
+
+**A record keeps what it was told, not what it should have been told.** The
+database stores all three flags rather than collapsing them on the way in. A
+run submitted with both boxes ticked did what `below_seed` says; the row still
+shows both, and `scope` is what says which one governed. Rewriting the row to
+match the rule that won would destroy the only evidence of what was asked for.
+
+**Scope decides what is fetched, not what is recorded.** Every link on a page
+that *was* fetched still reaches the discovery pipeline and still appears in the
+report, including the ones pointing out of scope — that is deliberate and
+predates this decision (a Mega link out of scope is still classified). What the
+narrow scope removes is the pages that would have been fetched *for* their
+links, which is where the volume actually comes from.

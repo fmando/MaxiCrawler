@@ -352,7 +352,7 @@ def test_a_database_from_the_earlier_release_gains_the_new_column(tmp_path: Path
 
     added = store.initialize()
 
-    assert added == ("pages_attempted", "respect_robots")
+    assert added == ("pages_attempted", "respect_robots", "below_seed")
     assert "pages_attempted" in store.database.table_columns("crawl_sessions")
 
 
@@ -382,12 +382,16 @@ def test_migrating_leaves_the_earlier_rows_readable(tmp_path: Path) -> None:
     assert stored.links_discovered == 300
     assert stored.pages_attempted == 0
     assert stored.respect_robots is True
+    # False rather than true, unlike robots.txt above: a run from before the
+    # column existed could not have been confined to a path, and a default that
+    # claimed otherwise would put a restriction on the record that never ran.
+    assert stored.below_seed is False
 
 
 def test_migrating_twice_changes_nothing(tmp_path: Path) -> None:
     store = make_old_database(tmp_path / "maxicrawler.db")
 
-    assert store.initialize() == ("pages_attempted", "respect_robots")
+    assert store.initialize() == ("pages_attempted", "respect_robots", "below_seed")
     assert store.initialize() == ()
     assert store.initialize() == ()
 

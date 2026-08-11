@@ -192,6 +192,7 @@ async def start_crawl(request: Request) -> Response:
             depth=_whole_number(form, "depth"),
             max_pages=_whole_number(form, "max_pages"),
             same_domain=values["same_domain"],
+            below_seed=values["below_seed"],
             respect_robots=values["respect_robots"],
         )
     except ValueError as error:
@@ -953,6 +954,7 @@ def _default_form(jobs: CrawlJobs) -> dict[str, Any]:
         "depth": settings.crawl_depth,
         "max_pages": settings.crawl_max_pages,
         "same_domain": settings.crawl_same_domain,
+        "below_seed": settings.crawl_below_seed,
         "respect_robots": settings.respect_robots,
     }
 
@@ -997,6 +999,7 @@ def _submitted(form: dict[str, str]) -> dict[str, Any]:
         "depth": form.get("depth", "").strip(),
         "max_pages": form.get("max_pages", "").strip(),
         "same_domain": bool(form.get("same_domain")),
+        "below_seed": bool(form.get("below_seed")),
         "respect_robots": bool(form.get("respect_robots")),
     }
 

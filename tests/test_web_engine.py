@@ -577,6 +577,66 @@ def test_the_domain_option_is_honoured_without_wiring_a_policy() -> None:
     assert dict(report.statistics.skips_by_reason)[SkipReason.OUT_OF_SCOPE] == 1
 
 
+BOARDS = {
+    "/": '<a href="/hr/">hr</a><a href="/g/">g</a>',
+    "/hr/": '<a href="/hr/thread/1">thread</a><a href="/g/">g</a><a href="/">home</a>',
+    "/hr/thread/1": '<a href="/hr/">back</a>',
+    "/g/": '<a href="/g/thread/9">thread</a>',
+    "/g/thread/9": "<p>leaf</p>",
+}
+"""One host, several sections -- the shape a domain rule cannot express."""
+
+
+def test_the_path_option_keeps_a_crawl_under_the_seed() -> None:
+    """The reason the option exists.
+
+    Every one of these pages is on one host, so `same_domain` admits the lot.
+    Seeded at a section, the crawl should reach that section and stop.
+    """
+    with crawl(make_site(BOARDS), "/hr/", max_depth=3, below_seed=True) as (report, base):
+        assert sorted(visited_paths(report, base)) == ["/hr/", "/hr/thread/1"]
+        assert dict(report.statistics.skips_by_reason)[SkipReason.OUT_OF_SCOPE] == 2
+
+
+def test_the_path_option_carries_the_host_without_the_domain_option() -> None:
+    """A path prefix with no host would admit any site that has a `/hr/`."""
+    site = Site()
+
+    with serve(site) as base:
+        elsewhere = f"http://localhost:{base.rsplit(':', 1)[1]}"
+        site.add_html("/hr/", f'<a href="{elsewhere}/hr/away">away</a><a href="/hr/a">a</a>')
+        site.add_html("/hr/away", "<p>elsewhere</p>")
+        site.add_html("/hr/a", "<p>x</p>")
+        report = make_engine().run(make_session(f"{base}/hr/", max_depth=1, below_seed=True))
+
+    assert sorted(visited_paths(report, base)) == ["/hr/", "/hr/a"]
+    assert dict(report.statistics.skips_by_reason)[SkipReason.OUT_OF_SCOPE] == 1
+
+
+def test_the_path_option_wins_when_the_domain_option_is_set_beside_it() -> None:
+    """Both asked for is the narrow one, not the wide one, and not an error."""
+    with crawl(make_site(BOARDS), "/hr/", max_depth=3, below_seed=True, same_domain=True) as (
+        report,
+        base,
+    ):
+        assert sorted(visited_paths(report, base)) == ["/hr/", "/hr/thread/1"]
+
+
+def test_a_seed_outside_nothing_still_crawls_the_whole_host() -> None:
+    """Seeded at the root, "below the start URL" is the host -- and says so."""
+    with crawl(make_site(BOARDS), "/", max_depth=3, below_seed=True) as (report, base):
+        assert len(report.pages) == len(BOARDS)
+
+
+def test_a_url_refused_for_its_path_is_counted_as_scope() -> None:
+    """ "Not mine to crawl" and "its owner said no" stay two different answers."""
+    with crawl(make_site(BOARDS), "/hr/", max_depth=3, below_seed=True) as (report, _):
+        skips = dict(report.statistics.skips_by_reason)
+
+    assert SkipReason.OUT_OF_SCOPE in skips
+    assert SkipReason.ROBOTS_TXT not in skips
+
+
 def test_an_injected_policy_is_asked_alongside_the_domain_option() -> None:
     class RefuseLeaves:
         def may_fetch(self, url: str) -> PolicyDecision:

@@ -446,6 +446,7 @@ def test_the_form_offers_the_configured_defaults(tmp_path: Path) -> None:
     assert 'name="depth" value="0"' in body
     assert 'name="max_pages" value="50"' in body
     assert 'name="same_domain" value="1">' in body  # unchecked
+    assert 'name="below_seed" value="1">' in body  # unchecked
 
 
 def test_starting_a_crawl_redirects_to_it(tmp_path: Path) -> None:
@@ -464,6 +465,25 @@ def test_starting_a_crawl_redirects_to_it(tmp_path: Path) -> None:
         assert response.status_code == 303
         assert response.headers["location"].startswith("/crawls/")
         wait_until_finished(test_client, response.headers["location"].rsplit("/", 1)[1])
+
+
+def test_the_path_checkbox_confines_the_crawl_and_the_report_says_so(tmp_path: Path) -> None:
+    """The box does the thing, and the page it produces states which rule ran."""
+    site = Site()
+    site.add_html("/hr/", '<a href="/hr/a">a</a><a href="/g/">g</a>')
+    site.add_html("/hr/a", "<p>x</p>")
+    site.add_html("/g/", "<p>other board</p>")
+
+    with live_client(tmp_path) as test_client, serve(site) as base:
+        response = test_client.post(
+            "/crawls", data={"url": f"{base}/hr/", "depth": "2", "below_seed": "1"}
+        )
+        job_id = str(response.url).rsplit("/", 1)[1]
+        body = wait_until_finished(test_client, job_id)
+
+    assert "below the start URL" in body
+    assert f"{base}/hr/a" in body
+    assert f"{base}/g/" not in body
 
 
 def test_a_started_crawl_can_be_watched(tmp_path: Path) -> None:
@@ -533,11 +553,17 @@ def test_a_rejected_form_keeps_what_was_typed(tmp_path: Path) -> None:
     with client(tmp_path) as test_client:
         response = test_client.post(
             "/crawls",
-            data={"url": "https://example.test/deep/page", "depth": "-1", "same_domain": "1"},
+            data={
+                "url": "https://example.test/deep/page",
+                "depth": "-1",
+                "same_domain": "1",
+                "below_seed": "1",
+            },
         )
 
     assert 'value="https://example.test/deep/page"' in response.text
     assert 'name="same_domain" value="1" checked' in response.text
+    assert 'name="below_seed" value="1" checked' in response.text
 
 
 def test_a_rejected_form_starts_no_crawl(tmp_path: Path) -> None:
