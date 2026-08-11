@@ -60,13 +60,16 @@ from maxicrawler.downloader import (
 from maxicrawler.library import Library, provider_directory, resource_key
 from maxicrawler.plugins import PluginResolver, create_default_registry
 from maxicrawler.providers import (
+    DIRECT_PROVIDER_NAME,
     ProviderRegistry,
     RetryPolicy,
+    UrllibFileTransport,
     UrllibStreamTransport,
     UrllibTransport,
     create_default_provider_registry,
 )
 from maxicrawler.utils import normalize_url, strip_fragment
+from maxicrawler.utils.addresses import PrivateNetworkRule
 
 ProgressListener = Callable[["DownloadProgress"], None]
 """Called on the thread performing the transfer, so it must not block.
@@ -282,6 +285,26 @@ class DownloadService:
         """Return whether *url* is a link this installation could fetch."""
         return self._can_download(url, self._providers())
 
+    def downloads_ordinary_urls(self) -> bool:
+        """Return whether a file at a plain HTTP URL can be transferred here.
+
+        Not a question about any one URL, and that is the point: it says
+        whether *"can this be downloaded?"* is a **filter** — something that
+        separates a report into two groups — or a constant. With the direct
+        provider composed for transfer it is a constant, every recorded link
+        answers yes, and a control offering to show the ones that answer no
+        offers an empty table.
+
+        Asked of the registry rather than by classifying a made-up URL. A probe
+        would be a question about a URL nobody named, and would quietly change
+        meaning the day a plugin took an interest in whatever host it used.
+        """
+        registry = self._providers()
+        if DIRECT_PROVIDER_NAME not in registry:
+            return False
+        provider = registry.get(DIRECT_PROVIDER_NAME)
+        return provider.metadata.supports(ProviderCapability.DOWNLOAD)
+
     def _can_download(self, url: str, registry: ProviderRegistry) -> bool:
         """Return whether *registry* holds a provider that could fetch *url*."""
         try:
@@ -310,6 +333,17 @@ class DownloadService:
         :meth:`downloadable` answer no to everything. The default registry is
         built once and reused; a caller naming its own ``max_entries`` gets its
         own, because that number is baked into the provider.
+
+        The file transport carries the private-network rule built from the same
+        settings the crawler's guard is built from — the *only* transport here
+        that can be pointed at any host, because it is the only one that serves
+        URLs somebody else wrote. Mega's talks to mega.nz and nowhere else.
+
+        ``direct_downloads`` withholds that transport rather than removing the
+        provider, so an installation that says no to fetching arbitrary files
+        gets a provider advertising no capability instead of a registry with a
+        hole in it. Everything that asks *"can this be downloaded?"* is
+        answered the same way either way.
         """
         if self._injected_providers is not None:
             return self._injected_providers
@@ -323,6 +357,17 @@ class DownloadService:
             stream=UrllibStreamTransport(
                 user_agent=settings.user_agent, timeout=settings.network_timeout
             ),
+            files=UrllibFileTransport(
+                user_agent=settings.user_agent,
+                timeout=settings.network_timeout,
+                max_redirects=settings.max_redirects,
+                rule=PrivateNetworkRule(
+                    allow=settings.private_network_allowlist,
+                    allow_private=settings.allow_private_networks,
+                ),
+            )
+            if settings.direct_downloads
+            else None,
             retry=RetryPolicy(max_attempts=settings.network_retries),
             max_entries=max_entries if max_entries is not None else settings.max_entries,
         )

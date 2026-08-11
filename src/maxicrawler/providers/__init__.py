@@ -13,7 +13,13 @@ from maxicrawler.providers.crypto import (
     default_cipher_backend,
 )
 from maxicrawler.providers.defaults import create_default_provider_registry
+from maxicrawler.providers.direct import (
+    DIRECT_PROVIDER_NAME,
+    DIRECT_PROVIDER_PRIORITY,
+    DirectProvider,
+)
 from maxicrawler.providers.errors import (
+    AddressRefusedError,
     DuplicateProviderError,
     InvalidProviderError,
     ProviderCryptoError,
@@ -39,24 +45,34 @@ from maxicrawler.providers.registry import ProviderRegistry
 from maxicrawler.providers.retry import Retrier, RetryPolicy
 from maxicrawler.providers.transport import (
     DEFAULT_CHUNK_SIZE,
+    DEFAULT_MAX_REDIRECTS,
     DEFAULT_TIMEOUT,
+    FileTransport,
     HttpTransport,
+    RemoteFile,
     StreamTransport,
+    UrllibFileTransport,
     UrllibStreamTransport,
     UrllibTransport,
 )
 
 __all__ = [
     "DEFAULT_CHUNK_SIZE",
+    "DEFAULT_MAX_REDIRECTS",
     "DEFAULT_TIMEOUT",
+    "DIRECT_PROVIDER_NAME",
+    "DIRECT_PROVIDER_PRIORITY",
     "MEGA_API_URL",
     "MEGA_PROVIDER_NAME",
     "MEGA_PROVIDER_PRIORITY",
+    "AddressRefusedError",
     "BlockStream",
     "CipherBackend",
     "CryptographyCipherBackend",
+    "DirectProvider",
     "DownloadSink",
     "DuplicateProviderError",
+    "FileTransport",
     "HttpTransport",
     "InvalidProviderError",
     "MegaApiClient",
@@ -70,12 +86,14 @@ __all__ = [
     "ProviderRegistry",
     "ProviderRegistryError",
     "ProviderTransportError",
+    "RemoteFile",
     "ResourceProvider",
     "Retrier",
     "RetryPolicy",
     "StreamTransport",
     "UnknownProviderError",
     "UnsupportedResourceError",
+    "UrllibFileTransport",
     "UrllibStreamTransport",
     "UrllibTransport",
     "create_default_provider_registry",

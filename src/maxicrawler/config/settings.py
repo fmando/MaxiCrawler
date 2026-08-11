@@ -66,6 +66,25 @@ class Settings:
     and stops ticking a box on every crawl.
     """
 
+    direct_downloads: bool = True
+    """Whether files at ordinary URLs may be downloaded at all.
+
+    On, because it is the difference between a report full of links and a
+    library full of files: without it only a host with a provider of its own —
+    today, Mega — can be fetched, and an image is something to look at rather
+    than something to keep.
+
+    Off leaves every other provider working and turns
+    :class:`~maxicrawler.providers.direct.DirectProvider` into one that
+    advertises nothing, so a report simply offers no download beside an
+    ordinary link. That is a real configuration rather than a courtesy: this is
+    the one provider that can be pointed at any host a crawl named, and an
+    installation is entitled to say no to that in one place.
+
+    It is not a safety setting. What keeps a download off this machine and this
+    network is the private-network rule, which applies either way.
+    """
+
     respect_robots: bool = True
     """Whether a crawl obeys the ``/robots.txt`` of the hosts it visits.
 
@@ -222,6 +241,7 @@ class Settings:
                 app_config, "crawl_same_domain", defaults.crawl_same_domain
             ),
             crawl_below_seed=_bool_value(app_config, "crawl_below_seed", defaults.crawl_below_seed),
+            direct_downloads=_bool_value(app_config, "direct_downloads", defaults.direct_downloads),
             respect_robots=_bool_value(app_config, "respect_robots", defaults.respect_robots),
             robots_user_agent=_string_value(
                 app_config, "robots_user_agent", defaults.robots_user_agent
@@ -262,6 +282,7 @@ class Settings:
             f"crawl_max_pages = {self.crawl_max_pages}\n"
             f"crawl_same_domain = {str(self.crawl_same_domain).lower()}\n"
             f"crawl_below_seed = {str(self.crawl_below_seed).lower()}\n"
+            f"direct_downloads = {str(self.direct_downloads).lower()}\n"
             f"respect_robots = {str(self.respect_robots).lower()}\n"
             f'robots_user_agent = "{self.robots_user_agent}"\n'
             f"robots_timeout = {self.robots_timeout}\n"

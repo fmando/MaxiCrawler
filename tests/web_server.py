@@ -43,6 +43,13 @@ class Route:
 
     omit_content_length: bool = False
 
+    headers: tuple[tuple[str, str], ...] = ()
+    """Extra headers, as ordered pairs so a route stays hashable.
+
+    What ``Content-Disposition`` arrives through, and anything else a test
+    needs a real server to have really sent.
+    """
+
     delay: float = 0.0
     """Seconds to wait before answering.
 
@@ -58,6 +65,14 @@ class Site:
     routes: dict[str, Route] = field(default_factory=dict)
     requests: list[RecordedRequest] = field(default_factory=list)
     default: Route = field(default_factory=lambda: Route(status=404, body=b"nope"))
+
+    answers_head: bool = True
+    """Whether the server implements HEAD at all.
+
+    Plenty of real hosts do not, and answer 405 or 501 to it. A transport that
+    asks HEAD first has to cope, so a test needs a server that refuses -- which
+    is what turning this off produces.
+    """
 
     def add(self, path: str, **kwargs: object) -> None:
         """Register a route; keyword arguments are :class:`Route` fields."""
@@ -79,6 +94,19 @@ class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
 
     def do_GET(self) -> None:  # noqa: N802 - name fixed by BaseHTTPRequestHandler
+        route = self._answer()
+        self.wfile.write(route.body)
+
+    def do_HEAD(self) -> None:  # noqa: N802 - name fixed by BaseHTTPRequestHandler
+        """Answer with the headers alone, or refuse the method outright."""
+        if not self.site.answers_head:
+            self.site.requests.append(RecordedRequest(path=self.path, headers=dict(self.headers)))
+            self.send_error(501, "Unsupported method ('HEAD')")
+            return
+        self._answer()
+
+    def _answer(self) -> Route:
+        """Record the request and send the status line and every header."""
         self.site.requests.append(RecordedRequest(path=self.path, headers=dict(self.headers)))
         route = self.site.route_for(self.path)
         if route.delay:
@@ -90,13 +118,15 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", route.content_type)
         if route.content_encoding is not None:
             self.send_header("Content-Encoding", route.content_encoding)
+        for name, value in route.headers:
+            self.send_header(name, value)
         if not route.omit_content_length:
             announced = route.content_length
             self.send_header(
                 "Content-Length", str(len(route.body) if announced is None else announced)
             )
         self.end_headers()
-        self.wfile.write(route.body)
+        return route
 
     def log_message(self, format: str, *args: object) -> None:
         """Silence the default stderr logging."""

@@ -584,6 +584,27 @@ BASE = "/crawls/abc"
 """The report every link view here belongs to."""
 
 
+def test_the_download_filter_is_offered_where_it_separates_something() -> None:
+    view = make_link_view(make_link_page())
+
+    assert [label for _, label in view["downloadable_choices"]] == [
+        "any",
+        "can be downloaded",
+        "cannot",
+    ]
+
+
+def test_the_download_filter_is_withdrawn_where_everything_can_be_fetched() -> None:
+    """One full bucket and one empty one is not a filter.
+
+    Decided by the installation rather than by counting the rows on screen: one
+    page of a crawl is not evidence about the crawl.
+    """
+    view = link_view(make_link_page(), base=BASE, downloads_everything=True)
+
+    assert view["downloadable_choices"] == ()
+
+
 def test_recorded_urls_become_rows() -> None:
     page = make_link_page([make_link("https://mega.nz/file/AaBbCcDd", "mega")])
 
@@ -1098,6 +1119,23 @@ def test_every_configured_value_is_shown() -> None:
     written = {line.split(" = ")[0] for line in Settings().to_toml().splitlines() if " = " in line}
 
     assert written <= set(shown)
+
+
+def test_a_download_setting_is_filed_under_downloads() -> None:
+    """The headings are how a reader finds a setting.
+
+    `direct_downloads` governs what may be fetched, which is the other half of
+    the program from a crawl default.
+    """
+    from maxicrawler.config import Settings
+
+    sections = {
+        section["heading"]: {row["name"] for row in section["rows"]}  # type: ignore[index,union-attr]
+        for section in settings_view(Settings())
+    }
+
+    assert "direct_downloads" in sections["Downloads"]
+    assert "direct_downloads" not in sections["Crawl defaults"]
 
 
 def test_values_are_shown_the_way_they_are_written() -> None:

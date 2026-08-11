@@ -18,6 +18,7 @@ from mega_fixtures import (
     pack_file_key,
 )
 from typer.testing import CliRunner
+from web_server import Site, serve
 
 from maxicrawler import cli
 from maxicrawler.cli import app
@@ -215,11 +216,43 @@ def test_a_provider_failure_is_reported_on_stderr(transport: RecordingTransport)
     assert "Error:" in result.output
 
 
-def test_a_link_without_a_provider_is_rejected(transport: RecordingTransport) -> None:
+def test_an_ordinary_url_is_described_rather_than_rejected(
+    transport: RecordingTransport, tmp_path: Path
+) -> None:
+    """It used to answer "no provider can describe this link" for most of the web.
+
+    An inspection is one HEAD, so describing a plain file costs nothing and
+    moves nothing -- which is why this command gets a file transport while
+    still having no way at all to transfer.
+    """
+    site = Site()
+    site.add("/report.pdf", body=b"%PDF-1.4" + b"z" * 900, content_type="application/pdf")
+    (tmp_path / "maxicrawler.toml").write_text(
+        "[maxicrawler]\nallow_private_networks = true\n", encoding="utf-8"
+    )
+
+    with serve(site) as base:
+        result = runner.invoke(app, ["info", f"{base}/report.pdf"])
+
+    assert "no provider can describe this link" not in result.output
+    assert "report.pdf" in result.stdout
+
+
+def test_an_installation_that_declines_arbitrary_files_says_so(
+    transport: RecordingTransport, tmp_path: Path
+) -> None:
+    """`direct_downloads = false` reaches this command too.
+
+    Having said it does not fetch arbitrary files, an installation should not
+    find this one describing them either.
+    """
+    (tmp_path / "maxicrawler.toml").write_text(
+        "[maxicrawler]\ndirect_downloads = false\n", encoding="utf-8"
+    )
+
     result = runner.invoke(app, ["info", "https://example.test/file/AaBbCcDd"])
 
     assert result.exit_code != 0
-    assert "no provider can describe this link" in result.output
 
 
 def test_a_url_that_is_not_absolute_is_rejected(transport: RecordingTransport) -> None:

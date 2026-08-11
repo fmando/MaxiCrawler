@@ -824,6 +824,7 @@ def link_view(
     base: str,
     hidden: Container[str] = (),
     carry: Mapping[str, str] = MappingProxyType({}),
+    downloads_everything: bool = False,
 ) -> dict[str, Any]:
     """Return the link table, its filters, its facets and its paging.
 
@@ -836,6 +837,15 @@ def link_view(
     *base* is the page the table lives on, because a report's URL contains the
     crawl it belongs to. Every link this builds ends at ``#links``, so choosing
     a filter puts you back at the table rather than at the top of a long page.
+
+    *downloads_everything* withdraws the download filter. Where every recorded
+    link can be fetched, that control has one populated bucket and one empty
+    one, and offering *"show me the ones that cannot"* is offering an empty
+    table. The facets beside it already work this way — a plugin nothing used
+    is not listed — so a filter that separates nothing is not shown either.
+    The parameter, rather than a guess from the rows on screen: one page of a
+    crawl is not evidence about the crawl, and it is the installation that
+    decides this, not the links.
     """
     query = page.query
     rows = link_rows(page)
@@ -885,7 +895,7 @@ def link_view(
         "target": "" if query.target is None else str(query.target),
         "downloadable": _downloadable_value(query.downloadable),
         "normalized_only": query.normalized_only,
-        "downloadable_choices": DOWNLOADABLE_CHOICES,
+        "downloadable_choices": () if downloads_everything else DOWNLOADABLE_CHOICES,
         "orders": tuple(
             {"value": str(sort), "label": label, "selected": query.sort is sort}
             for sort, label in LINK_ORDERS
@@ -1226,6 +1236,19 @@ def settings_view(settings: Settings) -> tuple[dict[str, Any], ...]:
                     "crawl_below_seed",
                     _toml_bool(settings.crawl_below_seed),
                     "The narrower scope: the start URL's path and nothing else.",
+                ),
+            ),
+        },
+        {
+            # Its own heading rather than a line under "Crawl defaults": this
+            # governs what may be *fetched*, which is the other half of the
+            # program, and the headings are how a reader finds a setting.
+            "heading": "Downloads",
+            "rows": (
+                _setting(
+                    "direct_downloads",
+                    _toml_bool(settings.direct_downloads),
+                    "Whether a file at an ordinary URL may be downloaded at all.",
                 ),
             ),
         },

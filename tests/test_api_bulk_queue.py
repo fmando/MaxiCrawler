@@ -28,12 +28,35 @@ SECOND_LINK = f"https://mega.nz/file/EeFfGgHh#{KEY}"
 
 
 @contextmanager
-def report(tmp_path: Path, site: Site | None = None) -> Iterator[tuple[TestClient, str, str]]:
-    """Yield a client, a finished crawl's id, and its rendered report."""
-    with recording_client(tmp_path) as test_client, serve(site or findable_site()) as base:
+def report(
+    tmp_path: Path, site: Site | None = None, **settings: object
+) -> Iterator[tuple[TestClient, str, str]]:
+    """Yield a client, a finished crawl's id, and its rendered report.
+
+    *settings* reach the application's configuration. What they are here for is
+    ``direct_downloads=False``: with the shipped default every HTTP link can be
+    fetched, so a report where only *some* rows are fetchable -- which is what
+    several of these controls exist to handle -- is now the inspection-only
+    installation rather than the ordinary one.
+    """
+    with (
+        recording_client(tmp_path, **settings) as test_client,
+        serve(site or findable_site()) as base,
+    ):
         queue_of(test_client).pause()
         job_id = start(test_client, base)
         yield test_client, job_id, wait_until_finished(test_client, job_id)
+
+
+def only_mega(test_client: TestClient, job_id: str) -> str:
+    """Return the same report narrowed to the one link Mega claims.
+
+    Several tests below want a filter that matches exactly one thing. Before
+    the direct provider that was any unfiltered report; now it has to be asked
+    for, and asking through the interface is better than asking through a
+    configuration nobody runs.
+    """
+    return test_client.get(f"/crawls/{job_id}?plugin=mega").text
 
 
 def queue_of(test_client: TestClient) -> TransferQueue:
@@ -81,13 +104,23 @@ def matches_action(body: str) -> str:
 
 def test_a_link_that_can_be_fetched_gets_a_checkbox(tmp_path: Path) -> None:
     with report(tmp_path) as (_, _, body):
-        assert ticked(body) == [MEGA_LINK]
+        assert MEGA_LINK in ticked(body)
+
+
+def test_every_link_gets_one_now_that_ordinary_urls_can_be_fetched(tmp_path: Path) -> None:
+    """The consequence of a provider that claims all of them, stated plainly."""
+    with report(tmp_path) as (_, _, body):
+        assert len(ticked(body)) == 3
 
 
 def test_a_link_that_cannot_be_fetched_gets_none(tmp_path: Path) -> None:
-    """A column of empty boxes would invite a click that does nothing."""
-    with report(tmp_path) as (_, _, body):
-        assert "example.test" not in "".join(ticked(body))
+    """A column of empty boxes would invite a click that does nothing.
+
+    Only an inspection-only installation still has such a link, so that is
+    where the rule is exercised -- the rule itself has not changed.
+    """
+    with report(tmp_path, direct_downloads=False) as (_, _, body):
+        assert ticked(body) == [MEGA_LINK]
         assert body.count('type="checkbox" form="link-selection"') == 1
 
 
@@ -96,7 +129,7 @@ def test_a_report_with_nothing_fetchable_offers_no_batch_at_all(tmp_path: Path) 
     site.add_html("/", '<a href="/a">a</a>')
     site.add_html("/a", "<p>x</p>")
 
-    with report(tmp_path, site) as (_, _, body):
+    with report(tmp_path, site, direct_downloads=False) as (_, _, body):
         assert 'id="link-selection"' not in body
         assert "Queue every fetchable match" not in body
 
@@ -193,9 +226,15 @@ def test_a_full_queue_refuses_a_selection_and_says_why(tmp_path: Path) -> None:
 
 
 def test_every_fetchable_match_is_queued_without_any_url_being_sent(tmp_path: Path) -> None:
-    """The whole point: the browser sends a filter, not a list of links."""
+    """The whole point: the browser sends a filter, not a list of links.
+
+    Narrowed to one plugin so the queue is readable. That the filter is what
+    travelled is exactly what makes the narrowing possible from here.
+    """
     with report(tmp_path) as (test_client, job_id, body):
-        response = test_client.post(matches_action(body), follow_redirects=False)
+        filtered = only_mega(test_client, job_id)
+
+        response = test_client.post(matches_action(filtered), follow_redirects=False)
 
         assert response.status_code == 303
         assert waiting_urls(test_client) == ["https://mega.nz/file/AaBbCcDd"]
@@ -233,7 +272,7 @@ def test_a_full_queue_refuses_the_whole_filter_and_names_the_number(tmp_path: Pa
         response = test_client.post(f"/crawls/{job_id}/downloads")
 
         assert response.status_code == 409
-        assert "1 links match, and the queue has no room" in response.text
+        assert "3 links match, and the queue has no room" in response.text
 
 
 def test_a_crawl_nobody_recorded_matches_nothing(tmp_path: Path) -> None:
@@ -255,7 +294,7 @@ def test_the_filter_action_carries_no_key(tmp_path: Path) -> None:
 def test_queueing_a_whole_filter_still_gets_the_key_to_the_transfer(tmp_path: Path) -> None:
     """Resolved on the server, from what discovery wrote down, fragment and all."""
     with report(tmp_path) as (test_client, job_id, body):
-        test_client.post(matches_action(body))
+        test_client.post(matches_action(only_mega(test_client, job_id)))
 
         queue = queue_of(test_client)
         (waiting,) = queue.snapshot().waiting
@@ -299,7 +338,12 @@ def test_the_spoken_label_of_a_checkbox_leaves_the_key_out(tmp_path: Path) -> No
 
 
 def test_the_count_beside_the_button_is_about_the_filter_not_the_button(tmp_path: Path) -> None:
-    """Three matches where one is fetchable must not read as a promise of three."""
-    with report(tmp_path) as (_, _, body):
+    """Three matches where one is fetchable must not read as a promise of three.
+
+    The two numbers can only differ where some links are not fetchable, which
+    since the direct provider means an inspection-only installation. The rule
+    is unchanged and this is the one place left that can still show it.
+    """
+    with report(tmp_path, direct_downloads=False) as (_, _, body):
         assert ticked(body) == [MEGA_LINK]  # one link is fetchable
         assert "of the 3 links this filter matches" in body

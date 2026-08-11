@@ -77,7 +77,18 @@ not change.
 -   Pinning the resolved address onto the connection that is opened, which is
     what closes DNS rebinding. The private-network guard raises the cost of
     reaching an internal address and does not make it impossible (ADR-031), and
-    the difference is a custom `HTTPConnection` rather than another policy
+    the difference is a custom `HTTPConnection` rather than another policy. Now
+    worth more than it was: the rule guards downloads as well as crawls since
+    ADR-036, so one change would close it in both places
+-   A byte ceiling for one download, or for a queue's worth of them. Nothing
+    bounds how much a transfer may be, which was academic while the only
+    reachable host was Mega and is not now that one filter and one click can
+    queue a site's image directory. A setting rather than a rule — the queue's
+    own limit is what bounds a run today
+-   Deduplicating what is queued. `TransferQueue.submit` will happily hold the
+    same URL twice, and "queue every match" pressed after a partial drain
+    re-queues what already arrived. A set of what the library holds would
+    answer both, and wants the library index below
 -   A politeness schedule shared across concurrent crawls. Today a `HostSchedule`
     lives per crawl, which is exactly right while `serve` runs one worker and
     wrong the moment it runs two
@@ -118,7 +129,10 @@ not change.
     vendored — the routes already render standalone fragments
 -   Authentication, before the interface is anything but loopback. Until then
     `serve` refuses a public address unless `--allow-remote` asks for it
--   Further providers: Pixeldrain, GoFile, MediaFire
+-   Further providers: Pixeldrain, GoFile, MediaFire. Less urgent than they
+    were: a share on one of those still needs its own provider to be *read*,
+    but every ordinary file on the web is now fetched by `DirectProvider`
+    (ADR-036), which is what most crawl results actually point at
 -   Parallel downloads — a second thread on the same drain loop, which needs no
     other change: the queue is guarded throughout and the worker holds no state
     between requests

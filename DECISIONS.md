@@ -955,3 +955,98 @@ report, including the ones pointing out of scope — that is deliberate and
 predates this decision (a Mega link out of scope is still classified). What the
 narrow scope removes is the pages that would have been fetched *for* their
 links, which is where the volume actually comes from.
+
+## ADR-036: A provider for files that are simply at a URL
+
+Until now MaxiCrawler could classify an image, count it, sort it, filter it and
+show it in a report — and not fetch it. `DownloadService.downloadable` answers
+yes only where a plugin classifies a URL *and* a provider claims that
+classification *and* the provider was composed for transfer, and the only
+provider was Mega. Every ordinary file on the web fell through the last two.
+
+`DirectProvider` claims what nothing else does.
+
+**It claims every HTTP(S) URL, a page included, and that is the honest
+answer.** It really can transfer any of them. The consequence is that *"could
+this be downloaded?"* stops being a discriminating question — which is a fact
+about reporting rather than about the provider, and is dealt with where reports
+are made: the filter is withdrawn where it separates nothing, and `TargetKind`,
+which reads the URL's own suffix, is what tells an image from a page.
+
+**Lowest priority, for the reason the generic plugin has it.** A Mega link must
+reach the provider that can decrypt it, not the one that would faithfully store
+its ciphertext. A registry resolves by descending priority and stops at the
+first claim, so ordering is the whole of the arrangement — no provider had to
+learn about another.
+
+**No listing, ever.** A URL names one file; a page that lists more of them is a
+*crawl*, and there is one of those already.
+`ProviderCapability.LIST` is not advertised and `entries` is always empty.
+Enumerating a directory index behind a provider would be a second crawler
+wearing a different hat.
+
+### The guard had to move first
+
+This is the first provider that fetches what a *crawl* found rather than what a
+host's API returned, which puts the SSRF surface of ADR-031 in front of
+`providers` for the first time. `providers` cannot import `web`, so the rule
+had to move or be written twice — and two definitions of "internal" that drift
+apart is a hole neither file shows.
+
+What moved is the **judgement**, not just the vocabulary.
+`utils.addresses.PrivateNetworkRule` answers with a *sentence or nothing*: the
+reason a host is refused, in words, knowing no decision type and no exception
+type. Those belong to whoever asked. `web.private.PrivateNetworkPolicy` turns
+the sentence into a `PolicyDecision` a crawl records as a skip; the file
+transport turns the same sentence into an `AddressRefusedError`. One rule, two
+vocabularies, and a test asserts that the policy's reason *is* the rule's
+sentence.
+
+**Refusing is not the transport's caller's option.** `UrllibFileTransport`
+built without a rule builds the strict one. A transport somebody wired without
+thinking about it is the safe transport rather than the open one, and reaching
+a home network stays possible by handing in a rule that says so — a decision
+somebody makes rather than one they omit.
+
+### Three smaller decisions
+
+**A stated filename is reported unsanitized.** `Content-Disposition` says what
+a host wants a file called; `library.naming.safe_filename` already cleans every
+name the library stores. Two sanitizers on one string is one too many, and the
+test asserts the pairing rather than adding a second. A URL's last path segment
+is a *guess* about a name, so it is the provider's, not the transport's: a
+`RemoteFile` describes what came back and nothing else.
+
+**`head` returns a refusing status; `open` raises it.** 404 describes a
+resource, and an inspection has somewhere to put it — `Availability.NOT_FOUND`.
+A transfer has no content to hand back and no partial answer worth giving. Only
+the statuses that say something about the *resource* are mapped; every 5xx is
+`UNKNOWN` rather than a guess, because a server that is broken has not said the
+file is gone.
+
+**Identity splits across the host and the path.** A library key is a readable
+slug of `resource_id` beside a digest of the whole identity, so the path in
+`resource_id` makes an entry `ls` can be read on — `img5678png-f3b390ddda`
+rather than `httpsi4cdnorg…` — and keeping the host in the identity is what
+stops `a.test/1.jpg` and `b.test/1.jpg` becoming one entry.
+
+### What is not decided here
+
+**No size ceiling.** `UrllibStreamTransport` deliberately has none and this
+inherits that: a transfer is expected to be large and is written straight to
+disk rather than accumulated. It is worth writing down rather than assuming,
+because this is the first provider that makes it possible to fetch very much by
+accident — one filter, one click. What bounds a run today is the queue's own
+limit, and a byte ceiling would be a setting rather than a rule.
+
+**robots.txt still does not apply to downloads**, and never did: a download is
+an explicit act on a named resource. That was of no consequence while the only
+reachable host was Mega. It is of consequence now — this can take a site's image directory
+in one go — so it is restated here rather than quietly relied on. The decision
+stands; what changed is that it is worth seeing.
+
+**`direct_downloads` is not a safety setting.** It answers *"does this
+installation fetch arbitrary files at all?"*, which an installation is entitled
+to decide in one place, and it withholds the transport rather than removing the
+provider so a registry keeps its shape. What keeps a download off this machine
+and this network is the private-network rule, which applies either way.

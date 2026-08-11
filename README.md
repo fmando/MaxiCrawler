@@ -22,6 +22,7 @@ what the project deliberately will not do.
 - A searchable library in the browser, and a viewer that lets the browser display what it can — no renderer of our own.
 - A crawl report you can search, filter, sort, page and bookmark, with every link classified by what it points at.
 - A download queue you can reorder, pause and retry, and one click to queue everything a filter matches.
+- Downloads for the rest of the web: any file at a plain HTTP(S) URL, through the same library, behind the same private-network guard.
 - Typed interfaces and strict static checking with mypy.
 - Fast formatting and linting with Ruff.
 - Test-first baseline with pytest.
@@ -459,6 +460,11 @@ whole node tree.
 Setting that flag is what allocates a transfer and starts costing the share's
 quota, which is why only `download` sets it (see Sprint 7 below).
 
+For an ordinary URL there is no API and no flag: the file describes itself in
+its response headers, so an inspection is a single `HEAD` — or a `GET` whose
+body is never pulled, for a host that will not answer `HEAD`. Either way no
+content moves.
+
 ### The decryption key never leaves your machine
 
 A Mega link keeps its key in the URL fragment, which no HTTP client transmits.
@@ -766,9 +772,12 @@ print(len(plan.jobs), plan.total_size)
 report = manager.run(plan)
 ```
 
-Without a `stream=` transport the registry produces inspection-only providers,
-which is what keeps `info` unable to download by construction rather than by
-convention.
+Without a `stream=` transport the registry produces inspection-only providers
+for every host with an API behind it. `info` is composed that way, and also
+gets a `files=` transport so it can describe an ordinary URL — see
+[Direct downloads](#direct-downloads-the-file-at-the-url). What keeps that
+command from downloading is that it asks `inspect` and never `download`; an
+inspection is one `HEAD`.
 
 ## Sprint 8: the web crawler
 
@@ -1042,6 +1051,11 @@ answer, not a fault.
 A URL **you** name is always attempted. An explicit instruction outranks a
 heuristic, so `maxicrawler crawl https://example.org/sheet.pdf` tells you what
 actually came back.
+
+Not fetching them during a crawl has never meant not fetching them at all:
+every one of these links can be downloaded from the report, and since the
+direct provider that is true whatever host they sit on. See
+[Direct downloads](#direct-downloads-the-file-at-the-url).
 
 `<link rel="canonical">` is recorded and reported but never used to skip a URL.
 A page can declare a canonical it does not equal, and skipping a URL that was
@@ -1792,6 +1806,100 @@ table — a share link *is* its key, and one without it leads nowhere.
 - **Selecting across pages without a filter.** "Every match" covers every page,
   which is the better control — but a hand-picked set spanning two pages still
   needs two submissions.
+
+## Direct downloads: the file at the URL
+
+Until this, MaxiCrawler could classify an image, count it, sort it, filter it
+and show it in a report — and not fetch it. Whether a link can be downloaded is
+answered by *"does a provider claim it?"*, and there was one provider: Mega.
+Every ordinary file on the web fell through.
+
+There is now a provider for the rest of the web, and it needs nothing
+configured:
+
+```bash
+maxicrawler download https://example.org/reports/2026.pdf
+```
+
+In the browser, every discovered link has a **Download** button, **Queue
+selected** takes the ticked ones, and **Queue every fetchable match** takes the
+whole filter. So the workflow the report was built for finally ends somewhere:
+
+1. crawl a page,
+2. narrow the link table to **Type: images**,
+3. press *Queue every fetchable match*,
+4. watch them arrive under **Library**.
+
+`maxicrawler info` describes them too, which it could not before:
+
+```bash
+maxicrawler info https://example.org/reports/2026.pdf
+```
+
+That still downloads nothing, and it is worth being exact about why. For every
+host with an API behind it — Mega today — `info` is composed without a stream
+transport, so those providers have no way to move content at all. For an
+ordinary URL that would be the wrong trade: refusing the file transport would
+not make the command safer, it would only make it useless on most of the web.
+What keeps `info` from downloading there is that it asks `inspect` and never
+`download`, and an inspection is one `HEAD`.
+
+### "Can this be downloaded?" stopped being a useful question
+
+It really can fetch any HTTP(S) URL, a page included, so the answer is now yes
+for every link a crawl records. That is the honest answer rather than a bug,
+and it has one visible consequence: the report's **Download** filter is gone,
+because a control with one full bucket and one empty one is not a filter. A
+bookmarked `?dl=no` still works and still says nothing matches.
+
+What tells an image from a page is the **Type** column, which reads the URL's
+own suffix and has been there since the crawl report learned to filter.
+
+### What a file is called
+
+`Content-Disposition` first — a host that states a name has said what it wants
+the file called. Otherwise the last path segment of the URL that *answered*,
+after redirects, with percent-encoding undone: `na%C3%AFve.pdf` is a name
+written for a URL, not a name.
+
+Nothing about that is trusted. Every name the library stores goes through one
+sanitizer, so a host answering with `filename="../../etc/passwd"` gets a file
+called `passwd` inside that download's own entry directory, and nothing else
+happens. The provider reports the header faithfully and the library cleans it;
+two sanitizers on one string would be one too many.
+
+### The same guard the crawler has
+
+This is the first provider that fetches what a *crawl* found rather than what a
+host's API returned, so the private-network rule applies to it as well —
+refusing loopback, private ranges, link-local space and cloud metadata
+services, on the first URL and on **every redirect hop**. A refusal reads the
+way the crawler's does:
+
+```text
+refused the address: 127.0.0.1 is not a public address
+```
+
+The rule itself lives in one place and is used twice: the crawler turns its
+sentences into recorded skips, the download layer into failed transfers.
+
+Two things this deliberately does **not** do. There is no size ceiling — a
+transfer goes straight to disk and is expected to be large, and what bounds a
+run is the queue's own limit. And robots.txt still does not apply to downloads,
+as it never has: a download is an explicit act on a resource somebody named.
+That mattered little when the only reachable host was Mega. It matters now,
+because one filter and one click can take a site's whole image directory.
+
+### Turning it off
+
+`direct_downloads = false` in `maxicrawler.toml` leaves every other provider
+working and stops this one advertising anything. A report then offers no
+download beside an ordinary link, and the **Download** filter comes back,
+because with two groups it is a filter again.
+
+It is not a safety setting — the private-network rule applies either way. It
+answers a different question: whether this installation fetches arbitrary files
+at all, which is a thing an installation is entitled to decide in one place.
 
 ## Documentation
 

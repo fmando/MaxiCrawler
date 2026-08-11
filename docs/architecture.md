@@ -338,7 +338,7 @@ Three shapes in `download` are deliberate:
    an inspection-only composition advertises the truth rather than failing when
    asked.
 
-### Two transports, not one
+### Three transports, not one
 
 ```python
 class HttpTransport(Protocol):
@@ -347,16 +347,42 @@ class HttpTransport(Protocol):
 
 class StreamTransport(Protocol):
     def stream(self, url, *, chunk_size=...) -> Generator[bytes, None, None]: ...
+
+
+class FileTransport(Protocol):
+    def head(self, url) -> RemoteFile: ...
+    def open(self, url, *, chunk_size=...) -> tuple[RemoteFile, Generator[bytes, None, None]]: ...
 ```
 
 An API call is a small JSON document read into memory whole; a transfer is
 unbounded and must never be. Keeping them apart preserves the response-size
 bound that protects the first, and means a provider composed for metadata alone
-has no way to move content — which is what keeps `info` unable to download by
-construction rather than by convention.
+has no way to move content.
 
 `stream` returns a generator on purpose: a caller that abandons a transfer
 closes it and the socket goes with it.
+
+`FileTransport` is the third because neither of the others can answer what a
+provider of ordinary files has to ask first: *how big is it, and what is it
+called?* A file behind a plain URL describes itself in its response headers,
+and something has to read them. Two asymmetries are the contract:
+
+- **The connection is already open when `open` returns.** That is the point —
+  the headers name the payload and state its size, and a caller that abandons
+  the transfer closes the generator.
+- **`head` returns a refusing status; `open` raises it.** 404 describes a
+  resource and an inspection has somewhere to put it; a transfer has no content
+  to hand back.
+
+`RemoteFile` reports what came back and nothing else. `filename` is what
+`Content-Disposition` stated, unsanitized: `library.naming.safe_filename`
+already cleans every name the library stores, and a URL's last path segment is
+a *guess* about a name rather than something a host said.
+
+**Implementations refuse internal addresses, and not because a caller asked.**
+This is the transport that can be pointed at any host a crawl named, which is
+the ordinary shape of an SSRF, so `UrllibFileTransport` built without a rule
+builds the strict one and checks the first URL and every redirect hop.
 
 ### Errors versus availability
 
@@ -450,6 +476,39 @@ check would arrive as an empty file.
 of a host is one piece of knowledge and belongs in one place; duplicating it
 would let the two layers disagree about what a link is. The dependency runs
 providers → plugins and never the reverse, so no cycle is possible.
+
+### The direct provider
+
+`DirectProvider` claims what nothing else does: any absolute HTTP(S) URL. An
+inspection is one `HEAD` — or, for a host that answers 405 or 501 to one, a
+`GET` whose body is never pulled. A transfer is one `GET`, streamed into the
+sink and never held.
+
+It is registered at the **lowest priority**, below every specialised provider,
+for the reason the generic *plugin* has it: a Mega link must reach the provider
+that can decrypt it rather than the one that would faithfully store its
+ciphertext. A registry resolves by descending priority and stops at the first
+claim, so ordering is the whole of the arrangement and no provider had to learn
+about another.
+
+It advertises **no `LIST` capability and never will**. A URL names one file; a
+page that lists more of them is a crawl, and there is one of those already.
+
+Its reference splits identity across `parent_id` (the host) and `resource_id`
+(the path and query). A library key is a readable slug of `resource_id` beside
+a digest of the whole identity, so the path there makes an entry `ls` can be
+read on, and the host in the identity is what stops `a.test/1.jpg` and
+`b.test/1.jpg` becoming one entry.
+
+Because it claims everything, `DownloadService.downloadable` answers yes for
+every recorded link — so *"can this be downloaded?"* stops separating a report
+into two groups. `DownloadService.downloads_ordinary_urls` says whether that is
+the case, and the report withdraws the filter when it is, the same way a facet
+omits a value nothing has.
+
+`direct_downloads = false` withholds the transport rather than removing the
+provider, so the registry keeps its shape and every caller is answered the same
+way. It is not a safety setting: the private-network rule applies either way.
 
 ### Adding a provider
 
