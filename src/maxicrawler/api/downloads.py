@@ -519,6 +519,31 @@ class TransferQueue:
         with self._condition:
             return self._active
 
+    def pending(self, urls: Iterable[str]) -> frozenset[str]:
+        """Return which of *urls* are waiting or being fetched right now.
+
+        Written to the shape of
+        :data:`~maxicrawler.app.discovery.StateResolver`, so a report can mark
+        its rows without knowing there is a queue behind the answer.
+
+        Waiting and running, and deliberately nothing else. A finished transfer
+        has left the queue for the library, and a failed one is not in a line —
+        both are states of their own to answer elsewhere, and calling either
+        "queued" would put a mark on a row that no longer earns it.
+
+        Fragments are stripped to compare, because a run is stored without one
+        (ADR-020), and kept in the answer, because the caller's URL is the one
+        that still carries the key.
+        """
+        asked = tuple(urls)
+        if not asked:
+            return frozenset()
+        with self._condition:
+            queued = {self._runs[run_id].url for run_id in self._waiting}
+            if self._active is not None:
+                queued.add(self._active.url)
+        return frozenset(url for url in asked if strip_fragment(url) in queued)
+
     def position_of(self, download_id: str) -> int | None:
         """Return where a waiting request sits, counting from one.
 

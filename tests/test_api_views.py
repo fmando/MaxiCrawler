@@ -3,7 +3,7 @@
 Pure functions, so none of this needs HTTP, a database or a crawl.
 """
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -16,6 +16,8 @@ from maxicrawler.api.views import (
     ABANDONED_LABEL,
     KIND_LABELS,
     LINK_COLUMNS,
+    LINK_STATE_LABELS,
+    LINK_STATE_TONES,
     STATE_LABELS,
     STATE_TONES,
     crawl_rows,
@@ -37,6 +39,7 @@ from maxicrawler.api.views import (
     stored_view,
 )
 from maxicrawler.app import (
+    UNTRACKED,
     DownloadProgress,
     DownloadSummary,
     LibraryItem,
@@ -48,6 +51,7 @@ from maxicrawler.app import (
     LinkPage,
     LinkQuery,
     LinkSort,
+    LinkState,
     PageQuery,
     PageState,
     TargetKind,
@@ -553,6 +557,8 @@ def make_link_page(
     page: int = 1,
     plugins: Iterable[LinkFacet] = (),
     targets: Iterable[LinkFacet] = (),
+    states: Iterable[LinkFacet] = (),
+    known: Mapping[LinkState, Iterable[str]] | None = None,
 ) -> LinkPage:
     """Return a page of links the way the service would have built one.
 
@@ -571,7 +577,9 @@ def make_link_page(
         pages=pages,
         plugins=tuple(plugins),
         targets=tuple(targets),
+        states=tuple(states),
         downloadable=frozenset(downloadable),
+        known={state: frozenset(urls) for state, urls in (known or {}).items()},
     )
 
 
@@ -889,11 +897,167 @@ def test_the_url_column_cannot_be_hidden_even_if_asked() -> None:
 
 def test_every_column_is_offered_as_a_toggle() -> None:
     """A control that silently lacks an entry reads as a bug."""
-    view = make_link_view(make_link_page())
+    view = make_link_view(make_link_page(known={LinkState.IN_LIBRARY: ()}))
 
     assert [toggle["name"] for toggle in view["toggles"]] == [
         column.name for column in LINK_COLUMNS
     ]
+
+
+# --- what is already known about a link --------------------------------------
+
+
+def make_stateful_page(
+    known: Mapping[LinkState, Iterable[str]],
+    *,
+    query: LinkQuery | None = None,
+    states: Iterable[LinkFacet] = (),
+) -> LinkPage:
+    """Return a page of two links with *known* answered about them."""
+    return make_link_page(
+        [
+            make_link("https://mega.nz/file/AaBbCcDd", "mega", position=0),
+            make_link("https://mega.nz/file/EeFfGgHh", "mega", position=1),
+        ],
+        query=query,
+        states=states,
+        known=known,
+    )
+
+
+def test_a_row_says_what_is_known_about_its_url() -> None:
+    page = make_stateful_page({LinkState.IN_LIBRARY: ["https://mega.nz/file/AaBbCcDd"]})
+
+    stored, other = link_rows(page)
+
+    assert [mark["label"] for mark in stored["states"]] == ["in library"]
+    assert stored["states"][0]["tone"] == "good"
+    assert [mark["label"] for mark in other["states"]] == ["new"]
+
+
+def test_a_row_in_no_state_is_called_new_rather_than_left_blank() -> None:
+    """A blank cell would be the third thing an empty cell means in this table."""
+    page = make_stateful_page({LinkState.IN_LIBRARY: (), LinkState.IN_QUEUE: ()})
+
+    for row in link_rows(page):
+        assert [mark["label"] for mark in row["states"]] == ["new"]
+        assert row["states"][0]["tone"] == "idle"
+
+
+def test_a_row_can_wear_more_than_one_badge() -> None:
+    """One file of a folder stored and another queued is both, not either."""
+    url = "https://mega.nz/file/AaBbCcDd"
+    page = make_stateful_page({LinkState.IN_QUEUE: [url], LinkState.IN_LIBRARY: [url]})
+
+    row, _ = link_rows(page)
+
+    assert [mark["label"] for mark in row["states"]] == ["in library", "in queue"]
+
+
+def test_the_badges_follow_the_declared_order_whatever_order_they_were_resolved_in() -> None:
+    """Two reports of one crawl must not put the same badges in different places."""
+    url = "https://mega.nz/file/AaBbCcDd"
+    first = link_rows(make_stateful_page({LinkState.IN_LIBRARY: [url], LinkState.IN_QUEUE: [url]}))
+    second = link_rows(make_stateful_page({LinkState.IN_QUEUE: [url], LinkState.IN_LIBRARY: [url]}))
+
+    assert first[0]["states"] == second[0]["states"]
+
+
+def test_nothing_is_claimed_about_a_row_when_nothing_was_asked() -> None:
+    """ "Nobody asked" and "the answer was none" must not render the same."""
+    (row,) = link_rows(make_link_page([make_link("https://example.test/a")]))
+
+    assert row["states"] == ()
+
+
+def test_the_state_column_is_withdrawn_when_nothing_was_asked() -> None:
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
+
+    assert "state" not in view["shown"]
+    assert all(header["name"] != "state" for header in view["headers"])
+    assert all(toggle["name"] != "state" for toggle in view["toggles"])
+    assert view["facets"] == ()
+
+
+def test_the_state_column_leads_because_it_is_what_decides_a_tick() -> None:
+    view = make_link_view(make_stateful_page({LinkState.IN_LIBRARY: ()}))
+
+    assert [header["name"] for header in view["headers"]][0] == "state"
+
+
+def test_the_state_column_can_be_turned_off_like_any_other() -> None:
+    view = link_view(
+        make_stateful_page({LinkState.IN_LIBRARY: ()}), base=BASE, hidden=frozenset({"state"})
+    )
+    toggles = {toggle["name"]: toggle for toggle in view["toggles"]}
+
+    assert "state" not in view["shown"]
+    assert toggles["state"]["shown"] is False
+
+
+def test_the_state_column_cannot_be_ordered_by() -> None:
+    """A handful of values; grouping by them is what a chip already does."""
+    view = make_link_view(make_stateful_page({LinkState.IN_LIBRARY: ()}))
+    (header,) = [header for header in view["headers"] if header["name"] == "state"]
+
+    assert header["url"] is None
+
+
+def test_the_states_are_offered_as_chips_with_their_counts() -> None:
+    view = make_link_view(
+        make_stateful_page(
+            {LinkState.IN_LIBRARY: ["https://mega.nz/file/AaBbCcDd"]},
+            states=[LinkFacet(value=UNTRACKED, count=2918), LinkFacet(value="library", count=1)],
+        )
+    )
+    (group,) = [row for row in view["facets"] if row["heading"] == "State"]
+
+    assert [chip["label"] for chip in group["chips"]] == ["new", "in library"]
+    assert [chip["count"] for chip in group["chips"]] == ["2,918", "1"]
+    assert "state=%28new%29" in group["chips"][0]["url"]
+    assert "state=library" in group["chips"][1]["url"]
+
+
+def test_the_chip_you_are_standing_on_leads_back_to_the_whole_crawl() -> None:
+    view = make_link_view(
+        make_stateful_page(
+            {LinkState.IN_LIBRARY: ()},
+            query=LinkQuery(state="library"),
+            states=[LinkFacet(value="library", count=1)],
+        )
+    )
+    (group,) = [row for row in view["facets"] if row["heading"] == "State"]
+
+    assert group["chips"][0]["active"] is True
+    assert "state=" not in group["chips"][0]["url"]
+
+
+def test_the_state_filter_survives_a_search() -> None:
+    """It travels as a hidden field, so typing a search does not undo it."""
+    view = make_link_view(
+        make_stateful_page({LinkState.IN_LIBRARY: ()}, query=LinkQuery(state=UNTRACKED))
+    )
+
+    assert view["state"] == UNTRACKED
+
+
+def test_queueing_every_match_carries_the_state_it_is_looking_at() -> None:
+    """The filter goes in the action, so the button queues what is on screen."""
+    view = make_link_view(
+        make_stateful_page({LinkState.IN_LIBRARY: ()}, query=LinkQuery(state=UNTRACKED))
+    )
+
+    assert "state=%28new%29" in view["matches_action"]
+
+
+def test_a_state_nobody_named_is_shown_as_itself() -> None:
+    """Adding a member must not be able to take the report down with it."""
+    view = make_link_view(
+        make_stateful_page({LinkState.IN_LIBRARY: ()}, states=[LinkFacet(value="hash", count=4)])
+    )
+    (group,) = [row for row in view["facets"] if row["heading"] == "State"]
+
+    assert group["chips"][0]["label"] == "hash"
 
 
 # --- the label tables --------------------------------------------------------
@@ -905,6 +1069,12 @@ def test_every_state_has_a_label_and_a_tone() -> None:
         assert state in STATE_TONES
 
 
+def test_every_link_state_has_a_label_and_a_tone() -> None:
+    for state in [*LinkState, UNTRACKED]:
+        assert state in LINK_STATE_LABELS
+        assert state in LINK_STATE_TONES
+
+
 def test_every_link_kind_has_a_label() -> None:
     for kind in LinkKind:
         assert kind in KIND_LABELS
@@ -913,6 +1083,7 @@ def test_every_link_kind_has_a_label() -> None:
 def test_the_tones_stay_a_small_fixed_set() -> None:
     """CSS decides colour; this only decides which of four classes applies."""
     assert set(STATE_TONES.values()) <= {"idle", "busy", "good", "warn", "bad"}
+    assert set(LINK_STATE_TONES.values()) <= {"idle", "busy", "good", "warn", "bad"}
 
 
 # --- recorded crawls ---------------------------------------------------------

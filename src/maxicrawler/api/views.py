@@ -26,6 +26,7 @@ from urllib.parse import urlencode
 from maxicrawler.api.downloads import DownloadSnapshot, QueueSnapshot
 from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.app import (
+    UNTRACKED,
     DownloadProgress,
     DownloadSummary,
     LibraryItem,
@@ -36,6 +37,7 @@ from maxicrawler.app import (
     LinkPage,
     LinkQuery,
     LinkSort,
+    LinkState,
     PageQuery,
     PageSlice,
     PageState,
@@ -756,6 +758,7 @@ class LinkColumn:
 
 
 LINK_COLUMNS: tuple[LinkColumn, ...] = (
+    LinkColumn("state", "State"),
     LinkColumn("plugin", "Plugin", LinkSort.PLUGIN),
     LinkColumn("category", "Category"),
     LinkColumn("target", "Type"),
@@ -764,10 +767,38 @@ LINK_COLUMNS: tuple[LinkColumn, ...] = (
 )
 """The columns a reader can turn off, in the order they are read.
 
-``category`` and ``target`` are not sortable, and deliberately have no ordering
-of their own: both are short labels with a handful of values, and grouping by
-them is what the facet chips already do in one click.
+``state`` leads, next to the checkboxes, because it is the column a person is
+reading *in order to* tick a box. Everything else in the row describes what the
+URL is; this one is the only thing that says whether you already have it.
+
+``state``, ``category`` and ``target`` are not sortable, and deliberately have no
+ordering of their own: each is a short label with a handful of values, and
+grouping by them is what the facet chips already do in one click.
 """
+
+STATE_COLUMN = "state"
+"""The one column that is not always there; see :func:`link_view`."""
+
+LINK_STATE_LABELS: dict[str, str] = {
+    UNTRACKED: "new",
+    LinkState.IN_LIBRARY: "in library",
+    LinkState.IN_QUEUE: "in queue",
+}
+"""What each state is called, keyed the way a query string spells it.
+
+Nouns rather than sentences. *"In library"* is true of a folder share the moment
+one file inside it is stored; *"downloaded"* would not be, and a wording that
+becomes a lie as soon as containers exist is not a wording to build a filter on.
+"""
+
+LINK_STATE_TONES: dict[str, str] = {
+    UNTRACKED: "idle",
+    LinkState.IN_LIBRARY: "good",
+    LinkState.IN_QUEUE: "busy",
+}
+"""Which badge colour each state wears. "New" is the quiet one deliberately: on
+a first crawl it is every row, and a table shouting at all three thousand of
+them draws the eye to nothing."""
 
 REQUIRED_COLUMN = "url"
 """The one column that cannot be hidden.
@@ -813,7 +844,7 @@ DOWNLOADABLE_CHOICES: tuple[tuple[str, str], ...] = (
 
 
 LINK_PARAMS = frozenset(
-    {"q", "plugin", "category", "target", "dl", "norm", "sort", "dir", "page", "hide"}
+    {"q", "plugin", "category", "target", "state", "dl", "norm", "sort", "dir", "page", "hide"}
 )
 """Which query parameters the link table owns; see :data:`PAGE_PARAMS`."""
 
@@ -846,23 +877,28 @@ def link_view(
     The parameter, rather than a guess from the rows on screen: one page of a
     crawl is not evidence about the crawl, and it is the installation that
     decides this, not the links.
+
+    The state column is withdrawn the same way, but on evidence the page
+    carries: :attr:`~maxicrawler.app.LinkPage.known` is empty exactly when
+    nothing was asked, and a column of badges reading "new" against a question
+    nobody put would be a claim rather than an answer.
     """
     query = page.query
     rows = link_rows(page)
-    shown = frozenset(
-        column.name for column in LINK_COLUMNS if column.name not in hidden
-    ) | frozenset({REQUIRED_COLUMN})
+    columns = tuple(column for column in LINK_COLUMNS if column.name != STATE_COLUMN or page.known)
+    shown = frozenset(column.name for column in columns if column.name not in hidden) | frozenset(
+        {REQUIRED_COLUMN}
+    )
     return {
         "rows": rows,
         "shown": shown,
         "headers": tuple(
             _link_header(column, query, base=base, hidden=hidden, carry=carry)
-            for column in LINK_COLUMNS
+            for column in columns
             if column.name in shown
         ),
         "toggles": tuple(
-            _link_toggle(column, query, base=base, hidden=hidden, carry=carry)
-            for column in LINK_COLUMNS
+            _link_toggle(column, query, base=base, hidden=hidden, carry=carry) for column in columns
         ),
         "total": format_number(page.total),
         "recorded": format_number(page.recorded),
@@ -893,6 +929,7 @@ def link_view(
         "plugin": query.plugin or "",
         "category": query.category or "",
         "target": "" if query.target is None else str(query.target),
+        "state": query.state or "",
         "downloadable": _downloadable_value(query.downloadable),
         "normalized_only": query.normalized_only,
         "downloadable_choices": () if downloads_everything else DOWNLOADABLE_CHOICES,
@@ -1037,6 +1074,7 @@ def _link_facets(
             lambda value: TARGET_LABELS[TargetKind(value)],
         ),
         ("Category", page.categories, "category", query.category, lambda value: value),
+        ("State", page.states, "state", query.state, _link_state_label),
     )
     rows = []
     for heading, facets, name, active, label_of in groups:
@@ -1066,6 +1104,18 @@ def _link_facets(
     return tuple(rows)
 
 
+def _link_state_label(value: str) -> str:
+    """Return what a state is called, or the value itself for one nobody named.
+
+    Unlike the target kinds beside it, the states are an open set on purpose:
+    the enum's own docstring promises that adding one costs a member, a resolver
+    and a label. A missing label must therefore degrade to something legible
+    rather than take the whole report down with a lookup error — the promise is
+    only kept if the render side survives being the part that lags.
+    """
+    return LINK_STATE_LABELS.get(value, value)
+
+
 def _hide_value(hidden: Container[str]) -> str:
     """Return the hidden columns as the query string writes them."""
     return ",".join(name for name in _column_names() if name in hidden)
@@ -1092,6 +1142,7 @@ def _link_url(
         "plugin": changes.get("plugin", query.plugin) or "",
         "category": changes.get("category", query.category) or "",
         "target": "" if target is None else str(target),
+        "state": changes.get("state", query.state) or "",
         "dl": _downloadable_value(downloadable),
         "norm": "1" if changes.get("normalized_only", query.normalized_only) else "",
         "sort": str(changes.get("sort", query.sort)),
@@ -1374,10 +1425,40 @@ def _page_row(page: PageOutcome) -> dict[str, Any]:
 
 def link_rows(page: LinkPage) -> tuple[dict[str, Any], ...]:
     """Return one row per URL on *page*, in the order the service put them in."""
-    return tuple(_link_row(item, downloadable=page.downloadable) for item in page.items)
+    return tuple(
+        _link_row(item, downloadable=page.downloadable, known=page.known) for item in page.items
+    )
 
 
-def _link_row(item: LinkItem, *, downloadable: Container[str] = ()) -> dict[str, Any]:
+def _state_marks(url: str, known: Mapping[LinkState, frozenset[str]]) -> tuple[dict[str, str], ...]:
+    """Return the badges one row wears, or the one that says it wears none.
+
+    Empty when nothing was asked, which is what withdraws the column entirely.
+    Otherwise never empty: a row in no state gets the "new" badge rather than a
+    blank cell. A blank would be the third meaning of an empty cell in this
+    table — beside "the URL did not say" and "no plugin claimed it" — and the
+    one thing a reader must be able to trust here is that no mark and *new* are
+    the same sentence.
+
+    Declared order rather than resolver order, so two reports of the same crawl
+    put the same badges in the same places.
+    """
+    if not known:
+        return ()
+    marks = tuple(
+        {"label": _link_state_label(str(state)), "tone": LINK_STATE_TONES.get(str(state), "")}
+        for state in LinkState
+        if url in known.get(state, frozenset())
+    )
+    return marks or ({"label": _link_state_label(UNTRACKED), "tone": LINK_STATE_TONES[UNTRACKED]},)
+
+
+def _link_row(
+    item: LinkItem,
+    *,
+    downloadable: Container[str] = (),
+    known: Mapping[LinkState, frozenset[str]] = MappingProxyType({}),
+) -> dict[str, Any]:
     """Return one recorded URL as a table row.
 
     ``plugin`` and ``category`` are where a URL nothing claimed gets its
@@ -1408,6 +1489,11 @@ def _link_row(item: LinkItem, *, downloadable: Container[str] = ()) -> dict[str,
         # as "is it notable": a host-specific plugin can classify a link whose
         # provider cannot transfer anything.
         "can_download": item.url in downloadable,
+        # What is known about this URL beyond the crawl having found it. A row
+        # can wear several: a folder with one file stored and another queued is
+        # in both states, and showing one of them would be choosing which half
+        # of the truth to tell.
+        "states": _state_marks(item.url, known),
     }
 
 

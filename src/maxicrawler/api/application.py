@@ -22,7 +22,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from maxicrawler.api.errors import MISSING_EXTRA, WebDependencyError
-from maxicrawler.app import CrawlService, DiscoveryService, DownloadService, LibraryService
+from maxicrawler.app import (
+    CrawlService,
+    DiscoveryService,
+    DownloadService,
+    LibraryService,
+    LinkState,
+)
 from maxicrawler.config import DEFAULT_CONFIG_PATH, Settings
 
 try:
@@ -78,10 +84,22 @@ def create_app(
     # registry it builds once and caches. Handing that same instance over rather
     # than a second one is why the resolver is injected: two registries would be
     # two sets of providers to keep in step, for one identical answer.
+    #
+    # The states are wired the same way, and this is the only place that knows
+    # which collaborator answers which. `DiscoveryService` is handed a mapping of
+    # bound methods and never learns that one of them is a library and the other
+    # a queue; a state added later is a member, a resolver and a label.
     findings = (
         discovery
         if discovery is not None
-        else DiscoveryService(crawl_service.settings, downloadable=transfers.service.downloadable)
+        else DiscoveryService(
+            crawl_service.settings,
+            downloadable=transfers.service.downloadable,
+            states={
+                LinkState.IN_LIBRARY: shelf.stored,
+                LinkState.IN_QUEUE: transfers.pending,
+            },
+        )
     )
 
     @asynccontextmanager

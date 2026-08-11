@@ -58,15 +58,17 @@
       </label>
 
       {#
-        The plugin, the type and the category are chosen from the chips below
-        rather than from a box: a chip carries its count, and how many of a
-        thing there are is most of what decides whether you want only those.
-        They travel as hidden fields here, so losing the plugin you had picked
-        because you then typed a search cannot happen.
+        The plugin, the type, the category and what is already known about a
+        link are chosen from the chips below rather than from a box: a chip
+        carries its count, and how many of a thing there are is most of what
+        decides whether you want only those. They travel as hidden fields here,
+        so losing the plugin you had picked because you then typed a search
+        cannot happen.
       #}
       <input type="hidden" name="plugin" value="{{ links.plugin }}">
       <input type="hidden" name="target" value="{{ links.target }}">
       <input type="hidden" name="category" value="{{ links.category }}">
+      <input type="hidden" name="state" value="{{ links.state }}">
       <input type="hidden" name="dir" value="{{ links.direction }}">
       <input type="hidden" name="hide" value="{{ links.hide_value }}">
 
@@ -169,6 +171,19 @@
                     <input type="checkbox" form="link-selection" name="url" value="{{ link.url }}"
                            aria-label="Queue {{ link.spoken_url }}">
                   {% endif %}
+                </td>
+              {% endif %}
+              {#
+                What is already known about this URL. Never empty while the
+                column is there: a row in no state says "new" rather than
+                showing a blank, so nothing in this cell has to be interpreted.
+                The view decides the badges; this places them.
+              #}
+              {% if "state" in links.shown %}
+                <td class="states">
+                  {% for mark in link.states %}
+                    <span class="badge {{ mark.tone }}">{{ mark.label }}</span>
+                  {% endfor %}
                 </td>
               {% endif %}
               {% if "plugin" in links.shown %}

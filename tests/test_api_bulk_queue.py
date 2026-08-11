@@ -282,6 +282,33 @@ def test_a_crawl_nobody_recorded_matches_nothing(tmp_path: Path) -> None:
         assert response.status_code == 409
 
 
+# --- queueing only what is not known yet ---------------------------------------
+
+
+def test_queueing_every_new_match_leaves_out_what_is_already_queued(tmp_path: Path) -> None:
+    """The re-crawl in two clicks: pick "new", then queue every match of it.
+
+    The state the filter names is resolved on the server against what the crawl
+    recorded, exactly as the plugin filter is. Nothing about which links were
+    already known has to travel to a browser and back to be left out.
+    """
+    with report(tmp_path) as (test_client, job_id, _):
+        test_client.post("/downloads", data={"url": MEGA_LINK}, follow_redirects=False)
+        body = test_client.get(f"/crawls/{job_id}?state=%28new%29").text
+
+        test_client.post(matches_action(body))
+
+        assert waiting_urls(test_client).count("https://mega.nz/file/AaBbCcDd") == 1
+        assert len(waiting_urls(test_client)) == 3
+
+
+def test_the_action_carries_the_state_that_was_on_screen(tmp_path: Path) -> None:
+    with report(tmp_path) as (test_client, job_id, _):
+        filtered = test_client.get(f"/crawls/{job_id}?state=%28new%29").text
+
+        assert matches_action(filtered) == f"/crawls/{job_id}/downloads?state=%28new%29"
+
+
 # --- the key -------------------------------------------------------------------
 
 

@@ -851,6 +851,12 @@ def _link_query(request: Request) -> LinkQuery:
         plugin=values.get("plugin") or None,
         category=values.get("category") or None,
         target=_target(values.get("target")),
+        # Read as written rather than parsed into a state. The sentinel for
+        # "in none of them" is not a member, and a value naming a state this
+        # installation cannot answer is handled by the service — which filters
+        # nothing rather than everything, so a bookmark that predates a resolver
+        # shows the crawl instead of an empty table.
+        state=values.get("state") or None,
         downloadable=_downloadable(values.get("dl")),
         normalized_only=values.get("norm") == "1",
         sort=LinkSort.parse(values.get("sort"), default=LinkQuery().sort),

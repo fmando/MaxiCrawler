@@ -281,6 +281,61 @@ def test_the_run_never_learns_the_key(tmp_path: Path) -> None:
     assert KEY not in repr(snapshot)
 
 
+# --- which of these URLs is in the queue ---------------------------------------
+
+
+def test_a_waiting_request_puts_its_url_in_the_queue(tmp_path: Path) -> None:
+    with paused(tmp_path) as runs:
+        runs.submit(FILE_URL)
+
+        assert runs.pending([FILE_URL, OTHER_URL]) == frozenset({FILE_URL})
+
+
+def test_the_running_transfer_counts_as_queued_too(tmp_path: Path) -> None:
+    """Being worked on is not having left the line; it is the front of it."""
+    provider = BlockingProvider()
+    with registry(tmp_path, provider) as runs:
+        runs.submit(FILE_URL)
+        assert provider.transferring.wait(timeout=10.0)
+
+        assert runs.pending([FILE_URL]) == frozenset({FILE_URL})
+
+        provider.release.set()
+
+
+def test_a_finished_transfer_has_left_the_queue(tmp_path: Path) -> None:
+    """It is in the library now, which is a different state and a different mark."""
+    with registry(tmp_path) as runs:
+        run = runs.submit(FILE_URL)
+        wait_for(run)
+
+        assert runs.pending([FILE_URL]) == frozenset()
+
+
+def test_the_url_comes_back_with_the_key_it_arrived_with(tmp_path: Path) -> None:
+    """A run is stored without a fragment; the caller's link still needs one."""
+    with paused(tmp_path) as runs:
+        runs.submit(FILE_URL)
+
+        assert runs.pending([FILE_URL]) == frozenset({FILE_URL})
+        assert KEY in next(iter(runs.pending([FILE_URL])))
+
+
+def test_the_same_file_under_a_different_key_is_still_the_queued_one(tmp_path: Path) -> None:
+    with paused(tmp_path) as runs:
+        runs.submit(FILE_URL)
+        asked = f"{bare(FILE_URL)}#Zz{KEY[2:]}"
+
+        assert runs.pending([asked]) == frozenset({asked})
+
+
+def test_asking_about_nothing_asks_the_queue_nothing(tmp_path: Path) -> None:
+    with paused(tmp_path) as runs:
+        runs.submit(FILE_URL)
+
+        assert runs.pending([]) == frozenset()
+
+
 # --- watching it --------------------------------------------------------------
 
 
