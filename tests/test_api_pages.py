@@ -194,6 +194,52 @@ def test_the_page_you_are_on_is_marked(tmp_path: Path, path: str, label: str) ->
     assert body.count('class="active"') == 1
 
 
+def test_an_idle_installation_has_no_strip_in_the_top_bar(tmp_path: Path) -> None:
+    """A top bar only grows when there is something in it worth crossing to."""
+    with client(tmp_path) as test_client:
+        assert 'class="queue-strip"' not in test_client.get("/").text
+
+
+@pytest.mark.parametrize("path", ["/", "/crawls", "/library", "/settings"])
+def test_a_queued_download_is_visible_from_anywhere(tmp_path: Path, path: str) -> None:
+    """The point of it: navigating away no longer means losing track."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        test_client.app.state.downloads.pause()  # type: ignore[attr-defined]
+        test_client.post("/downloads", data={"url": MEGA_URL}, follow_redirects=False)
+
+        body = test_client.get(path).text
+
+        assert 'class="queue-strip"' in body
+        assert "1 waiting" in body
+        assert "paused" in body
+
+
+def test_the_queue_page_does_not_count_itself(tmp_path: Path) -> None:
+    """A strip above the table listing the same runs is the numbers twice.
+
+    Asserted from both sides on purpose. The chrome and the queue page each
+    hand the layout something about the queue, and a name they shared would
+    make one of them silently win — which looks like a missing strip from here
+    and like an empty one from the page.
+    """
+    with client(tmp_path, provider=make_provider()) as test_client:
+        test_client.app.state.downloads.pause()  # type: ignore[attr-defined]
+        test_client.post("/downloads", data={"url": MEGA_URL}, follow_redirects=False)
+
+        body = test_client.get("/downloads").text
+
+        assert 'class="queue-strip"' not in body
+        assert "Waiting" in body  # the queue's own table, still built from its own context
+
+
+def test_the_strip_leads_to_the_queue(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        test_client.app.state.downloads.pause()  # type: ignore[attr-defined]
+        test_client.post("/downloads", data={"url": MEGA_URL}, follow_redirects=False)
+
+        assert '<a class="queue-strip" href="/downloads">' in test_client.get("/").text
+
+
 def test_the_layout_carries_the_version(tmp_path: Path) -> None:
     with client(tmp_path) as test_client:
         assert __version__ in test_client.get("/").text

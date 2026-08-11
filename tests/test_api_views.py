@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from maxicrawler.api.downloads import DownloadSnapshot
+from maxicrawler.api.downloads import DownloadSnapshot, QueueTally
 from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.api.views import (
     ABANDONED_LABEL,
@@ -38,6 +38,7 @@ from maxicrawler.api.views import (
     page_view,
     plugin_shares,
     progress_view,
+    queue_strip,
     report_view,
     settings_view,
     stored_view,
@@ -1062,6 +1063,53 @@ def test_a_state_nobody_named_is_shown_as_itself() -> None:
     (group,) = [row for row in view["facets"] if row["heading"] == "State"]
 
     assert group["chips"][0]["label"] == "hash"
+
+
+# --- what the top bar says about the queue ------------------------------------
+
+
+def test_an_idle_queue_leaves_the_top_bar_alone() -> None:
+    assert queue_strip(QueueTally(running=0, waiting=0, failed=0)) is None
+
+
+def test_a_busy_queue_says_what_it_is_doing() -> None:
+    strip = queue_strip(QueueTally(running=1, waiting=1291, failed=0))
+
+    assert [part["text"] for part in strip["parts"]] == ["1 downloading", "1,291 waiting"]
+    assert [part["tone"] for part in strip["parts"]] == ["busy", "idle"]
+    assert strip["url"] == "/downloads"
+
+
+def test_a_part_that_is_zero_is_not_written() -> None:
+    strip = queue_strip(QueueTally(running=0, waiting=4, failed=0))
+
+    assert [part["text"] for part in strip["parts"]] == ["4 waiting"]
+
+
+def test_failures_are_said_once_there_is_nothing_left_to_do() -> None:
+    """The one thing about a finished queue somebody would otherwise miss."""
+    strip = queue_strip(QueueTally(running=0, waiting=0, failed=2))
+
+    assert [part["text"] for part in strip["parts"]] == ["2 failed"]
+    assert strip["parts"][0]["tone"] == "bad"
+
+
+def test_a_paused_queue_says_so_even_with_nothing_in_it() -> None:
+    strip = queue_strip(QueueTally(running=0, waiting=0, failed=0, is_paused=True))
+
+    assert [part["text"] for part in strip["parts"]] == ["paused"]
+
+
+def test_paused_comes_last_because_it_is_the_reason_for_the_rest() -> None:
+    strip = queue_strip(QueueTally(running=0, waiting=3, failed=1, is_paused=True))
+
+    assert [part["text"] for part in strip["parts"]] == ["3 waiting", "1 failed", "paused"]
+
+
+def test_the_strip_wears_only_tones_the_stylesheet_knows() -> None:
+    strip = queue_strip(QueueTally(running=1, waiting=1, failed=1, is_paused=True))
+
+    assert {part["tone"] for part in strip["parts"]} <= {"idle", "busy", "good", "warn", "bad"}
 
 
 # --- the way back from a batch ------------------------------------------------

@@ -20,6 +20,17 @@
         <a href="{{ item.url }}"{% if item.active %} class="active"{% endif %}>{{ item.label }}</a>
       {% endfor %}
     </nav>
+    {#
+      What the queue is doing, wherever you are. Counts only -- the line naming
+      the file being fetched lives on the pages with room for it. Absent
+      entirely when the queue is idle, so a top bar only grows when there is
+      something in it worth crossing the page for.
+    #}
+    {% if queue_strip %}
+      <a class="queue-strip" href="{{ queue_strip.url }}">
+        {% for part in queue_strip.parts %}<span class="badge {{ part.tone }}">{{ part.text }}</span>{% endfor %}
+      </a>
+    {% endif %}
     <span class="version">{{ version }}</span>
   </header>
 

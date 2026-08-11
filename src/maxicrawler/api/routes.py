@@ -156,10 +156,31 @@ def page(
         name=template,
         context={
             "navigation": _navigation(request, section),
+            # Not "queue": that name belongs to the queue page's own context,
+            # which is merged in below and would quietly win. A key the chrome
+            # shares with a page is a key one of them silently loses.
+            "queue_strip": _queue_strip(request, section),
             "version": __version__,
             **(context or {}),
         },
     )
+
+
+def _queue_strip(request: Request, section: str) -> dict[str, Any] | None:
+    """Return what the top bar says about the queue, on the pages that say it.
+
+    Every page but the queue's own, where a strip counting what the table below
+    already lists would be the same numbers twice — and the one place somebody
+    is certainly not about to lose track of a transfer.
+
+    Read on every render rather than streamed. A count a few seconds stale still
+    answers the question the strip is for, and a top bar that reconnected an
+    event source on every page would be a lot of machinery for a number that
+    changes when a file finishes.
+    """
+    if section == "downloads":
+        return None
+    return views.queue_strip(downloads_of(request).tally())
 
 
 def fragment(request: Request, template: str, context: dict[str, Any]) -> Response:

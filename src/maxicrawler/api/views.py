@@ -23,7 +23,7 @@ from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlencode
 
-from maxicrawler.api.downloads import DownloadSnapshot, QueueSnapshot
+from maxicrawler.api.downloads import DownloadSnapshot, QueueSnapshot, QueueTally
 from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.app import (
     UNTRACKED,
@@ -358,6 +358,40 @@ NEARLY_FULL = 0.9
 Late enough not to nag over an ordinary afternoon, early enough that a refusal
 is not a surprise.
 """
+
+QUEUE_STRIP_URL = "/downloads"
+"""Where the strip in the top bar leads. The queue is the only detail it has."""
+
+
+def queue_strip(tally: QueueTally) -> dict[str, Any] | None:
+    """Return the queue's line for the top bar, or ``None`` when it has none.
+
+    Counts and nothing else. The line that names the running file already
+    exists on the two pages that have room for it; this one is on *every* page,
+    which is a different job and has to be a different sentence — otherwise the
+    dashboard says the same thing twice in two shapes.
+
+    A part is written only when it is not zero, so an idle installation has an
+    unchanged top bar and a busy one gains exactly as much as it has to say.
+    Read once per page render from :meth:`~maxicrawler.api.downloads.TransferQueue.tally`,
+    which is why it is counts: a strip is not worth a snapshot of five hundred
+    waiting requests.
+    """
+    if not tally.is_worth_saying:
+        return None
+    parts = []
+    if tally.running:
+        parts.append({"text": f"{format_number(tally.running)} downloading", "tone": "busy"})
+    if tally.waiting:
+        parts.append({"text": f"{format_number(tally.waiting)} waiting", "tone": "idle"})
+    if tally.failed:
+        parts.append({"text": f"{format_number(tally.failed)} failed", "tone": "bad"})
+    if tally.is_paused:
+        # Last, and said even with nothing in the queue: it is the answer to
+        # "why is nothing happening", which is a question asked about an empty
+        # queue as often as about a full one.
+        parts.append({"text": "paused", "tone": "warn"})
+    return {"parts": tuple(parts), "url": QUEUE_STRIP_URL}
 
 
 def _waiting_row(snapshot: DownloadSnapshot, position: int, *, last: bool) -> dict[str, Any]:

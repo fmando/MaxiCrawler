@@ -76,6 +76,12 @@ code { font-family: var(--mono); background: var(--raised); padding: 1px 4px; }
 .topbar nav a:hover { color: var(--text); text-decoration: none; }
 .topbar nav a.active { color: var(--text); border-bottom-color: var(--accent); }
 
+/* What the queue is doing, in the top bar. Absent when it is doing nothing, so
+   this never takes room from the navigation on an idle installation. */
+.queue-strip { display: flex; align-items: center; gap: 6px; }
+.queue-strip:hover { text-decoration: none; }
+.queue-strip .badge { font-size: 10px; }
+
 .version { color: var(--muted); font-family: var(--mono); font-size: 12px; }
 
 main { padding: 20px; max-width: 1280px; }

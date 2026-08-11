@@ -402,6 +402,43 @@ class QueueSnapshot:
         return written + (0 if self.active is None else self.active.progress.bytes_written)
 
 
+@dataclass(frozen=True, slots=True)
+class QueueTally:
+    """How much the queue has left, and how much of it went wrong.
+
+    The counts of :class:`QueueSnapshot` without the runs behind them, for the
+    pages whose whole interest in the queue is one line at the top. Kept apart
+    rather than added as more properties on the snapshot, because what makes it
+    worth having is precisely what it does *not* build.
+    """
+
+    running: int
+    waiting: int
+    failed: int
+    is_paused: bool = False
+
+    @property
+    def remaining(self) -> int:
+        """Return how many downloads have still to happen, the running one included."""
+        return self.running + self.waiting
+
+    @property
+    def is_busy(self) -> bool:
+        """Return whether there is anything left to do."""
+        return self.remaining > 0
+
+    @property
+    def is_worth_saying(self) -> bool:
+        """Return whether a page elsewhere in the interface should mention this.
+
+        A paused queue counts even when it is empty. Somebody who paused it an
+        hour ago and queues forty links now is owed the reason nothing starts,
+        and a silence that is only broken once there is work to do would break
+        exactly too late.
+        """
+        return self.is_busy or self.failed > 0 or self.is_paused
+
+
 class TransferQueue:
     """The downloads this process knows about, drained one at a time.
 
@@ -554,6 +591,39 @@ class TransferQueue:
             if download_id not in self._waiting:
                 return None
             return self._waiting.index(download_id) + 1
+
+    def tally(self) -> QueueTally:
+        """Return the queue's counts, without a snapshot of every run in it.
+
+        What a page whose interest in the queue is one line needs.
+        :meth:`snapshot` builds a :class:`DownloadSnapshot` per waiting request
+        as well, and a full queue is five hundred of them — a cost worth paying
+        to render the queue's own table and worth not paying on every other page
+        in the interface.
+
+        The failures are counted from the runs that are neither waiting nor
+        running, which is bounded by how many finished ones the queue retains.
+        Counted through the same snapshot the tables read rather than from a
+        second reading of the same fields: a tally that could disagree with the
+        page it sits above would be worse than no tally.
+        """
+        with self._condition:
+            queued = set(self._waiting)
+            waiting = len(self._waiting)
+            active = self._active
+            paused = self._paused
+            done = [
+                run for key, run in self._runs.items() if key not in queued and run is not active
+            ]
+        # Outside the lock: each run guards its own fields, and holding the
+        # queue's condition while asking fifty of them is a wait nobody needs.
+        failed = sum(1 for run in done if run.snapshot().status is DownloadStatus.FAILED)
+        return QueueTally(
+            running=1 if active is not None else 0,
+            waiting=waiting,
+            failed=failed,
+            is_paused=paused,
+        )
 
     def snapshot(self) -> QueueSnapshot:
         """Return what the queue holds right now.

@@ -336,6 +336,82 @@ def test_asking_about_nothing_asks_the_queue_nothing(tmp_path: Path) -> None:
         assert runs.pending([]) == frozenset()
 
 
+# --- counting without looking at everything ------------------------------------
+
+
+def test_an_idle_queue_has_nothing_worth_saying(tmp_path: Path) -> None:
+    with registry(tmp_path) as runs:
+        tally = runs.tally()
+
+        assert tally.remaining == 0
+        assert tally.is_busy is False
+        assert tally.is_worth_saying is False
+
+
+def test_waiting_requests_are_counted(tmp_path: Path) -> None:
+    with paused(tmp_path) as runs:
+        runs.submit(FILE_URL)
+        runs.submit(OTHER_URL)
+
+        tally = runs.tally()
+
+        assert (tally.waiting, tally.running) == (2, 0)
+        assert tally.remaining == 2
+        assert tally.is_worth_saying is True
+
+
+def test_the_running_one_is_counted_apart_from_the_waiting(tmp_path: Path) -> None:
+    provider = BlockingProvider()
+    with registry(tmp_path, provider) as runs:
+        runs.submit(FILE_URL)
+        assert provider.transferring.wait(timeout=10.0)
+        runs.submit(OTHER_URL)
+
+        tally = runs.tally()
+
+        assert (tally.running, tally.waiting) == (1, 1)
+        assert tally.remaining == 2
+
+        provider.release.set()
+
+
+def test_a_failure_is_counted_after_the_queue_is_empty_again(tmp_path: Path) -> None:
+    """Which is the whole reason a page elsewhere mentions the queue at all."""
+    with registry(tmp_path, StubProvider("mega", url_prefix="https://mega.nz/")) as runs:
+        wait_for(runs.submit(FILE_URL))
+
+        tally = runs.tally()
+
+        assert tally.failed == 1
+        assert tally.is_busy is False
+        assert tally.is_worth_saying is True
+
+
+def test_a_paused_queue_is_worth_saying_even_with_nothing_in_it(tmp_path: Path) -> None:
+    """It is the answer to "why is nothing happening", asked of an empty queue."""
+    with paused(tmp_path) as runs:
+        assert runs.tally().is_worth_saying is True
+
+
+def test_the_tally_and_the_snapshot_never_disagree(tmp_path: Path) -> None:
+    """Two readings of one queue is one bug waiting for a slow afternoon."""
+    provider = BlockingProvider()
+    with registry(tmp_path, provider) as runs:
+        runs.submit(FILE_URL)
+        assert provider.transferring.wait(timeout=10.0)
+        runs.submit(OTHER_URL)
+
+        tally = runs.tally()
+        snapshot = runs.snapshot()
+
+        assert tally.remaining == snapshot.remaining
+        assert tally.waiting == len(snapshot.waiting)
+        assert tally.failed == snapshot.failed
+        assert tally.is_paused == snapshot.is_paused
+
+        provider.release.set()
+
+
 # --- watching it --------------------------------------------------------------
 
 
