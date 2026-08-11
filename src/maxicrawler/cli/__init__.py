@@ -69,10 +69,12 @@ from maxicrawler.providers import (
     ProviderError,
     ProviderRegistry,
     RetryPolicy,
+    UrllibFileTransport,
     UrllibTransport,
     create_default_provider_registry,
 )
 from maxicrawler.utils import configure_logging, normalize_url, strip_fragment
+from maxicrawler.utils.addresses import PrivateNetworkRule
 from maxicrawler.web import ContentTypeError, FetchError, PolicyRefusedError
 
 app = typer.Typer(help="Configuration and runtime tools for MaxiCrawler.", no_args_is_help=True)
@@ -440,10 +442,22 @@ def _classify(url: str) -> UrlClassification:
 def _build_provider_registry(settings: Settings, *, max_entries: int | None) -> ProviderRegistry:
     """Return the providers ``info`` may ask, wired to the configured network.
 
-    Composed without a stream transport, so this registry has no way to move
-    content at all. That is what keeps ``info`` unable to download by
-    construction rather than by convention — and the providers say so through
-    their capabilities rather than by failing when asked.
+    Composed without a stream transport, so no provider with an API behind it
+    can move content: Mega is inspection-only here by construction rather than
+    by convention, and says so through its capabilities.
+
+    The file transport is the exception, and it is a deliberate one. A file at
+    a plain URL is *described* by its response headers, so refusing that
+    transport would not make ``info`` safer — it would make ``info`` useless on
+    every URL that is not a share link, which is most of them. What keeps this
+    command from downloading is that it asks
+    :meth:`~maxicrawler.providers.protocol.ResourceProvider.inspect` and never
+    :meth:`~maxicrawler.providers.protocol.ResourceProvider.download`; an
+    inspection is one ``HEAD``, and a ``HEAD`` moves nothing.
+
+    ``direct_downloads`` is honoured here too. An installation that has said it
+    does not fetch arbitrary files should not have this command reaching them
+    either.
 
     The registry that *can* transfer is built by
     :class:`~maxicrawler.app.DownloadService`, which is the only place that
@@ -451,6 +465,17 @@ def _build_provider_registry(settings: Settings, *, max_entries: int | None) -> 
     """
     return create_default_provider_registry(
         transport=UrllibTransport(user_agent=settings.user_agent, timeout=settings.network_timeout),
+        files=UrllibFileTransport(
+            user_agent=settings.user_agent,
+            timeout=settings.network_timeout,
+            max_redirects=settings.max_redirects,
+            rule=PrivateNetworkRule(
+                allow=settings.private_network_allowlist,
+                allow_private=settings.allow_private_networks,
+            ),
+        )
+        if settings.direct_downloads
+        else None,
         retry=RetryPolicy(max_attempts=settings.network_retries),
         max_entries=max_entries if max_entries is not None else settings.max_entries,
     )

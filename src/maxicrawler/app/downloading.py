@@ -62,11 +62,13 @@ from maxicrawler.plugins import PluginResolver, create_default_registry
 from maxicrawler.providers import (
     ProviderRegistry,
     RetryPolicy,
+    UrllibFileTransport,
     UrllibStreamTransport,
     UrllibTransport,
     create_default_provider_registry,
 )
 from maxicrawler.utils import normalize_url, strip_fragment
+from maxicrawler.utils.addresses import PrivateNetworkRule
 
 ProgressListener = Callable[["DownloadProgress"], None]
 """Called on the thread performing the transfer, so it must not block.
@@ -310,6 +312,17 @@ class DownloadService:
         :meth:`downloadable` answer no to everything. The default registry is
         built once and reused; a caller naming its own ``max_entries`` gets its
         own, because that number is baked into the provider.
+
+        The file transport carries the private-network rule built from the same
+        settings the crawler's guard is built from — the *only* transport here
+        that can be pointed at any host, because it is the only one that serves
+        URLs somebody else wrote. Mega's talks to mega.nz and nowhere else.
+
+        ``direct_downloads`` withholds that transport rather than removing the
+        provider, so an installation that says no to fetching arbitrary files
+        gets a provider advertising no capability instead of a registry with a
+        hole in it. Everything that asks *"can this be downloaded?"* is
+        answered the same way either way.
         """
         if self._injected_providers is not None:
             return self._injected_providers
@@ -323,6 +336,17 @@ class DownloadService:
             stream=UrllibStreamTransport(
                 user_agent=settings.user_agent, timeout=settings.network_timeout
             ),
+            files=UrllibFileTransport(
+                user_agent=settings.user_agent,
+                timeout=settings.network_timeout,
+                max_redirects=settings.max_redirects,
+                rule=PrivateNetworkRule(
+                    allow=settings.private_network_allowlist,
+                    allow_private=settings.allow_private_networks,
+                ),
+            )
+            if settings.direct_downloads
+            else None,
             retry=RetryPolicy(max_attempts=settings.network_retries),
             max_entries=max_entries if max_entries is not None else settings.max_entries,
         )

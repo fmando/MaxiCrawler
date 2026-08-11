@@ -10,6 +10,7 @@ from mega_fixtures import (
 
 from maxicrawler.domain import ProviderCapability
 from maxicrawler.providers import (
+    DIRECT_PROVIDER_NAME,
     CryptographyCipherBackend,
     ProviderRegistry,
     RetryPolicy,
@@ -35,10 +36,44 @@ def test_the_default_registry_resolves_a_mega_link() -> None:
     assert provider.metadata.name == MEGA_PROVIDER_NAME
 
 
-def test_the_default_registry_declines_an_unrelated_link() -> None:
+def test_the_default_registry_hands_an_ordinary_link_to_the_direct_provider() -> None:
+    """Nothing used to claim these, which is why an image had no download button."""
     registry = create_default_provider_registry(transport=RecordingTransport())
 
-    assert registry.resolve(mega_classification("https://example.test/file")) is None
+    provider = registry.resolve(mega_classification("https://example.test/photo.jpg"))
+
+    assert provider is not None
+    assert provider.metadata.name == DIRECT_PROVIDER_NAME
+
+
+def test_a_mega_link_still_reaches_mega_though_the_direct_provider_claims_it_too() -> None:
+    """Priority is the whole of the arrangement.
+
+    The direct provider would faithfully store a Mega link's ciphertext, which
+    is the wrong kind of success, so it sits below everything that knows more.
+    """
+    registry = create_default_provider_registry(transport=RecordingTransport())
+
+    provider = registry.resolve(mega_classification(file_url()))
+
+    assert provider is not None
+    assert provider.metadata.name == MEGA_PROVIDER_NAME
+
+
+def test_the_default_registry_declines_what_is_not_an_http_url() -> None:
+    registry = create_default_provider_registry(transport=RecordingTransport())
+
+    assert registry.resolve(mega_classification("mailto:someone@example.test")) is None
+
+
+def test_the_direct_provider_cannot_transfer_without_being_given_a_transport() -> None:
+    """The same switch every provider has, and the visible answer to "does this
+    installation fetch arbitrary files?"."""
+    registry = create_default_provider_registry(transport=RecordingTransport())
+
+    provider = registry.get(DIRECT_PROVIDER_NAME)
+
+    assert ProviderCapability.DOWNLOAD not in provider.metadata.capabilities
 
 
 def test_the_default_registry_wires_the_transport_through() -> None:

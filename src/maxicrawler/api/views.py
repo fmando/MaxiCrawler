@@ -1218,6 +1218,11 @@ def settings_view(settings: Settings) -> tuple[dict[str, Any], ...]:
                     _toml_bool(settings.crawl_same_domain),
                     "Off by default, so a share link to another host still works.",
                 ),
+                _setting(
+                    "direct_downloads",
+                    _toml_bool(settings.direct_downloads),
+                    "Whether a file at an ordinary URL may be downloaded at all.",
+                ),
             ),
         },
         {

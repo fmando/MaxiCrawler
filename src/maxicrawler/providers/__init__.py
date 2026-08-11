@@ -13,6 +13,11 @@ from maxicrawler.providers.crypto import (
     default_cipher_backend,
 )
 from maxicrawler.providers.defaults import create_default_provider_registry
+from maxicrawler.providers.direct import (
+    DIRECT_PROVIDER_NAME,
+    DIRECT_PROVIDER_PRIORITY,
+    DirectProvider,
+)
 from maxicrawler.providers.errors import (
     AddressRefusedError,
     DuplicateProviderError,
@@ -55,6 +60,8 @@ __all__ = [
     "DEFAULT_CHUNK_SIZE",
     "DEFAULT_MAX_REDIRECTS",
     "DEFAULT_TIMEOUT",
+    "DIRECT_PROVIDER_NAME",
+    "DIRECT_PROVIDER_PRIORITY",
     "MEGA_API_URL",
     "MEGA_PROVIDER_NAME",
     "MEGA_PROVIDER_PRIORITY",
@@ -62,6 +69,7 @@ __all__ = [
     "BlockStream",
     "CipherBackend",
     "CryptographyCipherBackend",
+    "DirectProvider",
     "DownloadSink",
     "DuplicateProviderError",
     "FileTransport",

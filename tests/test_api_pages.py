@@ -768,8 +768,15 @@ MEGA_LINK = "https://mega.nz/file/AaBbCcDd#0123456789abcdefghijklmnopqrstuvwxyzA
 
 
 @contextmanager
-def recording_client(tmp_path: Path) -> Iterator[TestClient]:
-    """Yield a client whose crawls write their URLs down, as a server's would."""
+def recording_client(tmp_path: Path, **overrides: object) -> Iterator[TestClient]:
+    """Yield a client whose crawls write their URLs down, as a server's would.
+
+    *overrides* reach :class:`Settings`. What they exist for is
+    ``direct_downloads=False``: with the shipped default every HTTP link can be
+    fetched, so "a link nothing can download" is a state only an
+    inspection-only installation still has — and the interface has to keep
+    behaving for that one.
+    """
     service = CrawlService(
         Settings(
             user_agent="MaxiCrawler/test",
@@ -777,6 +784,7 @@ def recording_client(tmp_path: Path) -> Iterator[TestClient]:
             library_path=tmp_path / "library",
             network_timeout=5.0,
             allow_private_networks=True,
+            **overrides,  # type: ignore[arg-type]
         )
     )
     jobs = CrawlJobs(service, persist=True)
@@ -828,9 +836,23 @@ def test_a_mega_link_in_the_report_offers_a_download(tmp_path: Path) -> None:
         body = wait_until_finished(test_client, start(test_client, base))
 
     links = body.split("Discovered links", 1)[1]
-    assert links.count("Download</button>") == 1
     assert '<form class="row-action" method="post" action="/downloads">' in links
     assert f'name="url" value="{MEGA_LINK}"' in links
+
+
+def test_an_ordinary_link_offers_a_download_too(tmp_path: Path) -> None:
+    """What the direct provider is for. Before it, this row had no button.
+
+    Every discovered link gets one now, which is the honest consequence of
+    something claiming ordinary URLs -- and why the *type* filter, not this
+    button, is what tells an image from a page.
+    """
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = wait_until_finished(test_client, start(test_client, base))
+
+    links = body.split("Discovered links", 1)[1]
+    assert links.count("Download</button>") == 3
+    assert 'name="url" value="http://127.0.0.1' in links
 
 
 def test_the_download_button_carries_the_key_in_a_field_not_a_link(tmp_path: Path) -> None:
@@ -848,12 +870,23 @@ def test_the_download_button_carries_the_key_in_a_field_not_a_link(tmp_path: Pat
     assert MEGA_LINK.split("#")[1] in body  # in the hidden field, which is sent
 
 
-def test_a_report_of_ordinary_links_offers_no_download(tmp_path: Path) -> None:
+def test_a_report_of_ordinary_links_offers_no_download_where_nothing_may(
+    tmp_path: Path,
+) -> None:
+    """An inspection-only installation, which `direct_downloads = false` makes.
+
+    The column and the button disappear together rather than leaving a row of
+    controls that would refuse. Worth keeping a test on: it is now the *only*
+    way a report has nothing to offer, and it would otherwise rot unexercised.
+    """
     site = Site()
     site.add_html("/", '<a href="/a">a</a>')
     site.add_html("/a", "<p>x</p>")
 
-    with recording_client(tmp_path) as test_client, serve(site) as base:
+    with (
+        recording_client(tmp_path, direct_downloads=False) as test_client,
+        serve(site) as base,
+    ):
         body = wait_until_finished(test_client, start(test_client, base))
 
     assert "Download</button>" not in body
@@ -921,13 +954,34 @@ def test_a_report_can_be_filtered_by_what_a_url_points_at(tmp_path: Path) -> Non
 
 
 def test_a_report_can_be_filtered_down_to_what_can_be_fetched(tmp_path: Path) -> None:
-    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+    """Still a filter, and on an inspection-only installation still a narrowing.
+
+    With the direct provider on it matches everything, which is not a bug and
+    not worth asserting -- what is worth asserting is that the filter still
+    separates the two groups wherever there are two.
+    """
+    with (
+        recording_client(tmp_path, direct_downloads=False) as test_client,
+        serve(findable_site()) as base,
+    ):
         body = finished_report(test_client, base, dl="yes")
 
     links = body.split("Discovered links", 1)[1]
 
     assert MEGA_LINK.split("#")[0] in links
     assert "/i.png" not in links
+
+
+def test_the_fetchable_filter_matches_everything_once_ordinary_urls_count(
+    tmp_path: Path,
+) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = finished_report(test_client, base, dl="yes")
+
+    links = body.split("Discovered links", 1)[1]
+
+    assert MEGA_LINK.split("#")[0] in links
+    assert "/i.png" in links
 
 
 def test_a_report_can_be_searched(tmp_path: Path) -> None:

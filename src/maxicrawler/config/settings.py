@@ -57,6 +57,25 @@ class Settings:
     workflows an installation mostly serves is an installation's business.
     """
 
+    direct_downloads: bool = True
+    """Whether files at ordinary URLs may be downloaded at all.
+
+    On, because it is the difference between a report full of links and a
+    library full of files: without it only a host with a provider of its own —
+    today, Mega — can be fetched, and an image is something to look at rather
+    than something to keep.
+
+    Off leaves every other provider working and turns
+    :class:`~maxicrawler.providers.direct.DirectProvider` into one that
+    advertises nothing, so a report simply offers no download beside an
+    ordinary link. That is a real configuration rather than a courtesy: this is
+    the one provider that can be pointed at any host a crawl named, and an
+    installation is entitled to say no to that in one place.
+
+    It is not a safety setting. What keeps a download off this machine and this
+    network is the private-network rule, which applies either way.
+    """
+
     respect_robots: bool = True
     """Whether a crawl obeys the ``/robots.txt`` of the hosts it visits.
 
@@ -212,6 +231,7 @@ class Settings:
             crawl_same_domain=_bool_value(
                 app_config, "crawl_same_domain", defaults.crawl_same_domain
             ),
+            direct_downloads=_bool_value(app_config, "direct_downloads", defaults.direct_downloads),
             respect_robots=_bool_value(app_config, "respect_robots", defaults.respect_robots),
             robots_user_agent=_string_value(
                 app_config, "robots_user_agent", defaults.robots_user_agent
