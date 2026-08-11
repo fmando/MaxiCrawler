@@ -210,7 +210,19 @@ weiß.
     Adresse ist; der Fetcher bekommt für jede Weiterleitung eine Funktion, die
     wirft, und keine Policy.
 -   robots.txt regelt das Crawlen. Kein Provider fragt sie: ein Download ist eine
-    ausdrückliche Handlung an einer benannten Ressource.
+    ausdrückliche Handlung an einer benannten Ressource. Seit es einen Provider
+    für gewöhnliche URLs gibt, ist das eine Aussage mit Folgen und keine
+    Formalität mehr — sie steht deshalb ausdrücklich in ADR-036.
+-   Was eine interne Adresse ist, entscheidet genau eine Regel:
+    `utils.addresses.PrivateNetworkRule`. Sie antwortet mit einem *Satz oder
+    nichts* und kennt weder Entscheidungs- noch Fehlertyp. Der Crawler macht
+    daraus eine `PolicyDecision`, der Datei-Transport einen
+    `AddressRefusedError`. Eine zweite Definition von „intern" wäre ein Loch,
+    das in keiner der beiden Dateien zu sehen wäre.
+-   Ein Transport, der auf beliebige Hosts gerichtet werden kann, prüft ohne
+    Zutun des Aufrufers: `UrllibFileTransport` ohne Regel baut die strenge. Wer
+    ein Heimnetz erreichen will, reicht eine Regel herein, die das sagt — eine
+    Entscheidung, die jemand trifft, statt einer, die jemand vergisst.
 -   Der Crawler holt genau eine Seite. Rekursion ist Sache des Aufrufers — der
     `CrawlEngine` ist eine Schleife *über* dem Crawler, nie eine Änderung darin.
 -   Der Frontier bestimmt die Reihenfolge, das VisitedSet die Identität. Nie
@@ -228,6 +240,14 @@ weiß.
 -   Der Download Manager verzweigt nie über einen Providernamen. Unterschiede
     werden über das Provider-Protokoll erfragt oder über `ProviderCapability`
     deklariert.
+-   Ein Provider, der alles beansprucht, steht in der Registry ganz unten.
+    `DirectProvider` beansprucht jede HTTP(S)-URL; die Auflösung nach
+    absteigender Priorität ist die ganze Vorkehrung dafür, dass ein Mega-Link
+    beim Provider landet, der ihn entschlüsseln kann, und nicht bei dem, der
+    brav den Geheimtext speichern würde.
+-   Ein Provider zählt keine Verzeichnisse auf, die eine Seite listet. Eine URL
+    benennt eine Datei; was mehrere davon aufführt, ist ein *Crawl*, und den
+    gibt es bereits.
 -   Die Library kennt keinen Provider über dessen Namen hinaus und entscheidet
     als einzige Schicht einen Pfad für heruntergeladene Inhalte.
 -   Jeder Name, der aus einer fremden Antwort stammt, wird über
