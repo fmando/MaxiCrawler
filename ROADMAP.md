@@ -112,11 +112,13 @@ not change.
     same shape and the same gap, and it cannot close it before resume exists —
     a restored queue could otherwise only offer to start the same files again
     from zero (ADR-033)
--   An index over the library, as a cache and never as the authority (ADR-010).
-    Every listing reads one metadata document per stored resource: about 0.3
-    seconds for two thousand entries warm, and roughly sixteen the first time a
-    virus scanner sees them. Invalidated by modification time, it would turn the
-    second listing into a `stat` per entry
+-   A stable identity for a library entry, minted once and preserved. The
+    directory key is derived from the reference and changes when the reference
+    does; anything that wants to *point at* an entry across time — a collection,
+    a persistent job, a group of duplicates — wants a name that does not. The
+    cache column is already there and unwritten, and the reason it is unwritten
+    is that `DownloadManager` rebuilds the record on every status change, so
+    minting one needs a read before the write
 -   `library` commands — list, verify, prune. `LibraryService` already answers
     the first two questions; what is missing is the command that asks them
 -   Per-host politeness for downloads. The queue drains one at a time, and that

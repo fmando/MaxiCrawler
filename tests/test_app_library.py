@@ -28,9 +28,18 @@ PAYLOAD = b"payload"
 
 
 def make_service(tmp_path: Path, **overrides: object) -> tuple[LibraryService, Library]:
-    """Return a service over an empty library below *tmp_path*."""
+    """Return a service over an empty library below *tmp_path*.
+
+    The database goes below *tmp_path* too. The service keeps its listing cache
+    there and would otherwise create one in whatever directory the tests were
+    started from; where the cache lives is tested in ``test_library_index.py``.
+    """
     library = Library(tmp_path / "library")
-    settings = Settings(library_path=library.root, **overrides)  # type: ignore[arg-type]
+    settings = Settings(
+        library_path=library.root,
+        database_path=tmp_path / "maxicrawler.db",
+        **overrides,  # type: ignore[arg-type]
+    )
     return LibraryService(settings, library=library), library
 
 

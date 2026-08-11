@@ -661,8 +661,12 @@ rejected:
 
 1. **The file system is the source of truth.** Every entry describes itself, so
    a library survives losing a database, can be moved with `rsync`, and stays
-   readable with a text editor. An index may be added later as a cache, never
-   as the authority.
+   readable with a text editor. There is an index now, and it is a cache rather
+   than the authority: `LibraryService` answers *set* questions from it — a
+   listing, and soon "is this URL among them?" — and reads a single entry from
+   its own directory, so a stale row can delay a listing and can never serve the
+   wrong file. Every entry is `stat`-ed on every listing, and only the documents
+   that changed are read again.
 2. **The payload and the metadata cannot collide.** A provider is free to name
    a file `metadata.json`; putting the payload in its own directory makes that
    harmless instead of destructive.
