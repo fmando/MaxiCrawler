@@ -514,6 +514,38 @@ def _nothing_matched(matches: Matches) -> str:
     return "nothing this filter matches can be downloaded by the providers installed here"
 
 
+async def retry_all_downloads(request: Request) -> Response:
+    """Queue everything in the history that did not arrive, and show the queue.
+
+    The same set the rows offer one at a time, in one click. Which is where it
+    belongs: the history is the list this acts on, and a request evicted from it
+    has no URL left to try again.
+    """
+    accepted = downloads_of(request).retry_all()
+    if accepted.queued == 0:
+        return _refuse_download(request, _nothing_retried(accepted), status=409)
+    return RedirectResponse(url=_back_to(request, "/downloads"), status_code=303)
+
+
+def _nothing_retried(accepted: Accepted) -> str:
+    """Return why trying everything again produced no downloads at all."""
+    if accepted.no_room:
+        return f"the queue had no room for any of the {accepted.no_room} requests in the history"
+    return "nothing in this queue's history ended without the file arriving"
+
+
+async def clear_history(request: Request) -> Response:
+    """Forget the downloads that are over, and show the queue again.
+
+    The rows and the counters above them together, because the counters are
+    totals over those rows. What was actually downloaded is in the library and
+    is not touched — the footnote under the table says so, which is why this
+    button can be a plain form with nothing asking twice.
+    """
+    downloads_of(request).forget_finished()
+    return RedirectResponse(url=_back_to(request, "/downloads"), status_code=303)
+
+
 async def download_detail(request: Request) -> Response:
     """Show one download as it stands, or what became of it.
 

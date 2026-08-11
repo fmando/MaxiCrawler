@@ -1756,6 +1756,21 @@ Asking for the panels rather than the page is what makes following a batch
 bearable. Reloading cost a full page load per file, and on two hundred files
 that is two hundred scroll positions to find again.
 
+Above the counters is a bar across the whole queue — "41 of 200 finished" —
+and beside it the rate, said to be an average over the time actually spent
+transferring. There is no estimate of how much longer, and that is a decision:
+a waiting request has not been inspected, so nothing here knows what it points
+at, how many files it will turn out to be, or how large they are. A time left
+would be invented rather than measured.
+
+The history offers "Try all N again" and "Clear the list". The first takes the
+same set the rows offer one at a time — everything that ended without the file
+arriving, a request somebody stopped included — and says how many, so nobody
+finds out afterwards what "everything" turned out to mean. The second empties
+the list and the counters over it together, because the counters are totals
+over exactly those rows. The files themselves are in the library, which is what
+the footnote under the table has always said.
+
 Reordering is three buttons rather than drag and drop. That would be a
 JavaScript dependency for the last five percent of a control the buttons already
 give, on a page that otherwise needs none — and it would leave anybody working

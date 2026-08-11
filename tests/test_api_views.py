@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from maxicrawler.api.downloads import DownloadSnapshot, QueueSnapshot, QueueTally
+from maxicrawler.api.downloads import Departed, DownloadSnapshot, QueueSnapshot, QueueTally
 from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.api.views import (
     ABANDONED_LABEL,
@@ -42,6 +42,7 @@ from maxicrawler.api.views import (
     progress_view,
     queue_follow,
     queue_strip,
+    queue_view,
     report_view,
     settings_view,
     stored_view,
@@ -1239,6 +1240,93 @@ def test_a_paused_queue_is_not_watched_because_nothing_will_start() -> None:
     snapshot = make_queue_snapshot(waiting=(make_download_snapshot(),), is_paused=True)
 
     assert queue_follow(snapshot) is None
+
+
+# --- how far along the whole queue is ------------------------------------------
+
+
+def make_queue_view(**overrides: object) -> dict[str, Any]:
+    """Return what the queue page shows, for a queue in some state."""
+    return queue_view(make_queue_snapshot(**overrides), limit=500)
+
+
+def test_the_bar_measures_what_is_done_against_what_is_known() -> None:
+    view = make_queue_view(
+        departed=Departed(count=40, succeeded=40),
+        finished=(make_download_snapshot(summary=make_summary()),),
+        waiting=tuple(make_download_snapshot() for _ in range(159)),
+    )
+
+    assert view["done"] == "41"
+    assert view["known"] == "200"
+    assert view["progress_percent"] == 20
+    assert view["has_progress"] is True
+
+
+def test_a_queue_with_anything_left_in_it_never_reads_as_finished() -> None:
+    """Rounded down, so the last file finishing is what puts it at a hundred."""
+    view = make_queue_view(
+        departed=Departed(count=999, succeeded=999), waiting=(make_download_snapshot(),)
+    )
+
+    assert view["progress_percent"] == 99
+
+
+def test_a_queue_nobody_has_used_shows_no_bar_at_all() -> None:
+    view = make_queue_view()
+
+    assert view["has_progress"] is False
+    assert view["progress_percent"] == 0
+
+
+def test_a_queue_that_has_moved_nothing_states_no_rate() -> None:
+    """A number divided out of no time at all is not a measurement."""
+    view = make_queue_view(waiting=(make_download_snapshot(),))
+
+    assert view["rate"] is None
+
+
+def test_the_rate_is_measured_once_there_is_something_to_divide() -> None:
+    view = make_queue_view(
+        finished=(make_download_snapshot(written=1_000_000, summary=make_summary()),)
+    )
+
+    assert view["rate"] == "80.0 KB/s"
+
+
+def test_one_thing_left_to_try_is_the_rows_own_business() -> None:
+    """A second button doing what the one beside it does teaches nothing."""
+    view = make_queue_view(
+        finished=(make_download_snapshot(summary=make_summary(status=DownloadStatus.FAILED)),)
+    )
+
+    assert view["can_retry_all"] is False
+    assert view["unarrived"] == "1"
+
+
+def test_a_stopped_request_is_counted_into_the_button_that_would_take_it() -> None:
+    """So nobody discovers afterwards what "everything" turned out to include."""
+    view = make_queue_view(
+        finished=(
+            make_download_snapshot(summary=make_summary(status=DownloadStatus.FAILED)),
+            make_download_snapshot(summary=make_summary(status=DownloadStatus.CANCELLED)),
+            make_download_snapshot(summary=make_summary()),
+        )
+    )
+
+    assert view["can_retry_all"] is True
+    assert view["unarrived"] == "2"
+
+
+def test_the_button_counts_rows_rather_than_the_total_it_cannot_act_on() -> None:
+    """A run evicted an hour ago has no URL left, and no row offering one."""
+    view = make_queue_view(
+        departed=Departed(count=40, failed=40),
+        finished=(make_download_snapshot(summary=make_summary(status=DownloadStatus.FAILED)),),
+    )
+
+    assert view["failed"] == "41"
+    assert view["unarrived"] == "1"
 
 
 # --- the way back from a batch ------------------------------------------------

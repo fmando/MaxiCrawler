@@ -326,11 +326,18 @@ def queue_view(snapshot: QueueSnapshot, *, limit: int) -> dict[str, Any]:
     here rendered in full — it is the only one with something to report — so it
     goes through :func:`download_view` and everything else through a row
     builder that answers only what its table asks.
+
+    There is a bar across the whole queue and deliberately no estimate under it.
+    A waiting request has not been inspected: nothing here knows what it points
+    at, how many files it will turn out to be or how large they are, so "about
+    twelve minutes left" would be a number invented rather than measured. What
+    can be measured is what has already happened, and that is what is shown.
     """
     waiting = tuple(
         _waiting_row(item, position, last=position == len(snapshot.waiting))
         for position, item in enumerate(snapshot.waiting, start=1)
     )
+    unarrived = sum(1 for item in snapshot.finished if not item.status.is_success)
     return {
         "is_paused": snapshot.is_paused,
         "is_busy": snapshot.is_busy,
@@ -346,11 +353,39 @@ def queue_view(snapshot: QueueSnapshot, *, limit: int) -> dict[str, Any]:
         "stopped": format_number(snapshot.stopped),
         "has_failures": snapshot.failed > 0,
         "bytes_written": format_size(snapshot.bytes_written),
+        # How far along the whole queue is, which the per-file bar cannot say.
+        "done": format_number(snapshot.done),
+        "known": format_number(snapshot.known),
+        "progress_percent": _queue_percent(snapshot),
+        "has_progress": snapshot.known > 0,
+        # An average over the time actually spent transferring, and said to be
+        # one. It is not what the line is doing this second, and a page that let
+        # it be read that way would be lying quietly rather than loudly.
+        "rate": _rate(snapshot.bytes_written, snapshot.transfer_seconds),
+        # Counted off the rows on the page rather than from the totals, because
+        # this is the label on a button that acts on exactly those rows: the
+        # ones already evicted have no URL left to try again.
+        "unarrived": format_number(unarrived),
+        # One, and the row's own button is beside it already. A second button
+        # doing the same thing as the one next to it teaches nothing.
+        "can_retry_all": unarrived > 1,
+        "has_history": bool(snapshot.finished),
         # Named rather than implied, so a refusal is not the first time somebody
         # learns there is a ceiling at all.
         "limit": format_number(limit),
         "is_nearly_full": len(snapshot.waiting) >= limit * NEARLY_FULL,
     }
+
+
+def _queue_percent(snapshot: QueueSnapshot) -> int:
+    """Return how much of what is known has been got through, as a percentage.
+
+    Rounded down, so a queue with anything left in it never reads as a hundred
+    per cent. The last file finishing is what puts it there, not arithmetic.
+    """
+    if snapshot.known == 0:
+        return 0
+    return int(snapshot.done * 100 / snapshot.known)
 
 
 NEARLY_FULL = 0.9

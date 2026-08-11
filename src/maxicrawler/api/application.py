@@ -160,6 +160,21 @@ def create_app(
                 methods=["POST"],
                 name="pause_downloads",
             ),
+            # Both act on the whole history rather than on one download, which
+            # is why they are here and not under `{download_id}` — and why they
+            # sit above it, where a path parameter cannot swallow them.
+            Route(
+                "/downloads/retry",
+                routes.retry_all_downloads,
+                methods=["POST"],
+                name="retry_all_downloads",
+            ),
+            Route(
+                "/downloads/clear",
+                routes.clear_history,
+                methods=["POST"],
+                name="clear_history",
+            ),
             Route(
                 "/downloads/{download_id}",
                 routes.download_detail,

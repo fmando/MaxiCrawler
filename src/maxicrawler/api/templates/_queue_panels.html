@@ -30,6 +30,27 @@
   </h2>
 
   <div class="body">
+    {#
+      How far along the whole queue is, which the bar on the running transfer
+      cannot say -- that one is about one file, and there are two hundred.
+
+      No estimate under it, and that is a decision rather than an omission. A
+      waiting request has not been inspected: nothing here knows what it points
+      at, how many files it will turn out to be or how large they are, so a time
+      left would be invented rather than measured. The rate beside it is the
+      opposite -- it is only ever about transfers that already happened, which
+      is why it says so.
+    #}
+    {% if queue.has_progress %}
+      <div class="progress">
+        <div class="bar"><span style="width: {{ queue.progress_percent }}%"></span></div>
+        <p class="bar-caption">
+          {{ queue.done }} of {{ queue.known }} finished
+          {% if queue.rate %}· {{ queue.rate }} while transferring{% endif %}
+        </p>
+      </div>
+    {% endif %}
+
     <dl class="readout">
       <div>
         <dt>Left to do</dt>
@@ -130,6 +151,22 @@
     <h2>
       Finished
       <span class="count">{{ queue.finished_count }}</span>
+
+      {#
+        The same offer the rows make, once -- and only once there is more than
+        one row making it, because a button doing what the single button beside
+        it already does teaches nothing. It says how many, so nobody discovers
+        after the fact that "everything that did not arrive" included the twenty
+        they stopped on purpose.
+      #}
+      {% if queue.can_retry_all %}
+        <form class="inline" method="post" action="/downloads/retry?back=/downloads">
+          <button type="submit">Try all {{ queue.unarrived }} again</button>
+        </form>
+      {% endif %}
+      <form class="inline" method="post" action="/downloads/clear?back=/downloads">
+        <button type="submit">Clear the list</button>
+      </form>
     </h2>
     <div class="body">
       {% include "_finished_table.html" %}
