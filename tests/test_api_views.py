@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from maxicrawler.api.downloads import DownloadSnapshot, QueueTally
+from maxicrawler.api.downloads import DownloadSnapshot, QueueSnapshot, QueueTally
 from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.api.views import (
     ABANDONED_LABEL,
@@ -40,6 +40,7 @@ from maxicrawler.api.views import (
     panel_view,
     plugin_shares,
     progress_view,
+    queue_follow,
     queue_strip,
     report_view,
     settings_view,
@@ -1182,6 +1183,62 @@ def test_the_strip_wears_only_tones_the_stylesheet_knows() -> None:
     strip = queue_strip(QueueTally(running=1, waiting=1, failed=1, is_paused=True))
 
     assert {part["tone"] for part in strip["parts"]} <= {"idle", "busy", "good", "warn", "bad"}
+
+
+# --- what the queue page keeps watching ---------------------------------------
+
+
+def make_queue_snapshot(**overrides: object) -> QueueSnapshot:
+    """Return what a queue holds, with no queue behind it."""
+    values: dict[str, object] = {"active": None, "waiting": (), "finished": ()}
+    values.update(overrides)
+    return QueueSnapshot(**values)  # type: ignore[arg-type]
+
+
+def test_a_queue_with_nothing_left_to_do_is_not_watched() -> None:
+    """A page that cannot change again has no reason to ask whether it did."""
+    assert queue_follow(make_queue_snapshot()) is None
+
+
+def test_a_running_transfer_is_what_the_page_listens_to() -> None:
+    follow = queue_follow(make_queue_snapshot(active=make_download_snapshot()))
+
+    assert follow["stream"] == "/downloads/d1/events"
+    assert follow["swap"] == "/downloads?part=queue"
+    assert follow["into"] == "queue"
+
+
+def test_the_moment_between_two_transfers_is_asked_about_rather_than_listened_to() -> None:
+    """The one case this exists for.
+
+    The transfer that ended is finished and the next has not been picked up, so
+    there is no stream — and a page that read that as "nothing left to do" would
+    stop following a batch at whichever file lost the race.
+    """
+    follow = queue_follow(
+        make_queue_snapshot(
+            active=make_download_snapshot(summary=make_summary()),
+            waiting=(make_download_snapshot(),),
+        )
+    )
+
+    assert follow["stream"] is None
+    assert follow["swap"] == "/downloads?part=queue"
+
+
+def test_a_queue_with_something_waiting_and_nothing_running_asks_again() -> None:
+    """The same gap, seen from the other side: the worker has not started yet."""
+    follow = queue_follow(make_queue_snapshot(waiting=(make_download_snapshot(),)))
+
+    assert follow["stream"] is None
+    assert follow["into"] == "queue"
+
+
+def test_a_paused_queue_is_not_watched_because_nothing_will_start() -> None:
+    """Resuming is a form submission, and a form submission is a page load."""
+    snapshot = make_queue_snapshot(waiting=(make_download_snapshot(),), is_paused=True)
+
+    assert queue_follow(snapshot) is None
 
 
 # --- the way back from a batch ------------------------------------------------

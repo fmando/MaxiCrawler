@@ -323,19 +323,36 @@ async def downloads(request: Request) -> Response:
     order right. Every control on it is a form, so it works with scripting off.
 
     Live without a stream of its own. The running transfer's own event stream
-    is embedded, and ``download.js`` reloads the page when that transfer ends —
-    which is exactly when the rest of this page changes. A queue nobody is
-    draining has nothing to stream, and a page that reloaded on a timer would
-    fight whoever is reading it.
+    is embedded, and when that transfer ends the panels below are asked for
+    again — which is exactly when they change. A queue nobody is draining has
+    nothing to stream, and a page that reloaded on a timer would fight whoever
+    is reading it.
+
+    Answers with those panels alone when ``part`` asks for them, from the same
+    snapshot and the same template the page is built from. That is the whole of
+    what makes following a batch cost one small answer per file rather than one
+    page per file. Anything else in ``part`` is read as a request for the page,
+    the way every other parameter of this interface is read leniently.
     """
     queue = downloads_of(request)
     snapshot = queue.snapshot()
-    return page(
-        request,
-        "downloads.html",
-        {"queue": views.queue_view(snapshot, limit=queue.limit)},
-        section="downloads",
-    )
+    context = {"queue": views.queue_view(snapshot, limit=queue.limit)}
+    if request.query_params.get("part") == views.QUEUE_PART:
+        return _queue_panels(request, context)
+    return page(request, "downloads.html", context, section="downloads")
+
+
+def _queue_panels(request: Request, context: dict[str, Any]) -> Response:
+    """Answer with the queue's panels, for a page that already has the rest.
+
+    ``no-store`` because this is the one answer here that a browser is asked
+    for repeatedly at the same URL while the thing it describes changes under
+    it. A reload cannot be served stale; a fetch can, and a queue page showing
+    a cached copy of two files ago would be worse than one that never moved.
+    """
+    response = fragment(request, "_queue_panels.html", context)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 async def start_download(request: Request) -> Response:

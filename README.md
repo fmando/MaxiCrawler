@@ -1747,9 +1747,14 @@ patience.
 became of the rest, with the counters that answer "how much is left".
 
 It has no event stream of its own. It embeds the running transfer's stream, and
-the same script that keeps one download's page current reloads this one when
-that transfer ends — which is exactly when the next one starts and everything
-else on the page changes. A queue nobody is draining has nothing to send.
+when that transfer ends — which is exactly when the next one starts and
+everything else on the page changes — the same script that keeps one download's
+page current asks for the panels below the heading and puts them where the old
+ones were. A queue nobody is draining has nothing to send.
+
+Asking for the panels rather than the page is what makes following a batch
+bearable. Reloading cost a full page load per file, and on two hundred files
+that is two hundred scroll positions to find again.
 
 Reordering is three buttons rather than drag and drop. That would be a
 JavaScript dependency for the last five percent of a control the buttons already

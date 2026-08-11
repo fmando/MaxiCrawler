@@ -106,6 +106,98 @@ def test_a_quiet_queue_streams_nothing(tmp_path: Path) -> None:
     assert "download.js" not in body
 
 
+# --- following a batch without reloading a page --------------------------------
+
+
+def test_the_panels_can_be_asked_for_without_the_page_around_them(tmp_path: Path) -> None:
+    """What makes following two hundred files cost two hundred small answers."""
+    with paused(tmp_path) as test_client:
+        submit(test_client, FIRST)
+
+        response = test_client.get("/downloads?part=queue")
+
+    assert response.status_code == 200
+    assert "Left to do" in response.text
+    assert waiting_labels(response.text) == ["https://mega.nz/file/AaBbCcDd"]
+    # No chrome, because the page it is going into already has all of it.
+    assert "<!DOCTYPE" not in response.text
+    assert "<nav>" not in response.text
+
+
+def test_the_panels_are_the_same_whether_they_arrive_alone_or_in_the_page(
+    tmp_path: Path,
+) -> None:
+    """One template, so a swapped page and a reloaded one cannot drift apart."""
+    with paused(tmp_path) as test_client:
+        submit(test_client, FIRST)
+
+        panels = test_client.get("/downloads?part=queue").text
+        whole = test_client.get("/downloads").text
+
+    assert panels.strip() in whole
+
+
+def test_the_panels_are_never_served_from_a_cache(tmp_path: Path) -> None:
+    """The one answer here asked for repeatedly at one URL while it changes."""
+    with paused(tmp_path) as test_client:
+        response = test_client.get("/downloads?part=queue")
+
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_a_part_nobody_knows_is_read_as_a_request_for_the_page(tmp_path: Path) -> None:
+    """Read leniently, the way every parameter of this interface is."""
+    with paused(tmp_path) as test_client:
+        body = test_client.get("/downloads?part=sideways").text
+
+    assert "<!DOCTYPE" in body
+    assert "Left to do" in body
+
+
+def test_the_running_page_says_where_to_ask_and_where_the_answer_goes(
+    tmp_path: Path,
+) -> None:
+    """Decided by the server. The script reads three attributes and no more."""
+    provider = BlockingProvider()
+    with client(tmp_path, provider=provider) as test_client:
+        submit(test_client, FIRST)
+        assert provider.transferring.wait(timeout=10)
+
+        body = test_client.get("/downloads").text
+        provider.release.set()
+
+    assert 'id="queue"' in body
+    assert 'data-swap="/downloads?part=queue"' in body
+    assert 'data-into="queue"' in body
+    assert "data-stream=" in body
+
+
+def test_a_downloads_own_page_asks_for_itself_rather_than_for_the_panels(
+    tmp_path: Path,
+) -> None:
+    """Where the file went and the way to the library are worth a page load."""
+    provider = BlockingProvider()
+    with client(tmp_path, provider=provider) as test_client:
+        download_id = submit(test_client, FIRST)
+        assert provider.transferring.wait(timeout=10)
+
+        body = test_client.get(f"/downloads/{download_id}").text
+        provider.release.set()
+
+    assert 'id="download-live"' in body
+    assert "data-swap" not in body
+
+
+def test_a_drained_queue_stops_watching_itself(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        submit(test_client, FIRST)
+
+        body = wait_until_quiet(test_client)
+
+    assert 'id="download-live"' not in body
+    assert "download.js" not in body
+
+
 def test_the_page_counts_what_is_left_and_what_arrived(tmp_path: Path) -> None:
     with client(tmp_path, provider=make_provider()) as test_client:
         submit(test_client, FIRST)

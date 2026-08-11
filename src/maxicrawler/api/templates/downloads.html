@@ -4,161 +4,27 @@
   Complete without JavaScript. Every control is a form, every value was
   rendered by the server, and a reload is a working way to follow the whole
   queue. What the embedded stream adds is that you do not have to.
+
+  The panels live in one element, and one element is what a finished transfer
+  replaces. That is the difference between following a batch of two hundred and
+  reloading a page two hundred times -- the scroll position, the stylesheet, the
+  connection and everything else on screen survive each file now.
 #}
 {% extends "base.html" %}
 {% block title %}Downloads · MaxiCrawler{% endblock %}
 
 {% block content %}
-<section class="panel">
-  <h2>
-    Downloads
-    {% if queue.is_paused %}
-      <span class="badge warn">paused</span>
-    {% endif %}
-    <span class="count">{{ queue.remaining }}</span>
-
-    {#
-      Whichever state the click would leave, so the label is a promise rather
-      than a description. The field carries the intention, so a page left open
-      since before somebody else resumed cannot pause it again by reload.
-    #}
-    <form class="stop" method="post" action="/downloads/pause?back=/downloads">
-      <input type="hidden" name="paused" value="{{ 0 if queue.is_paused else 1 }}">
-      <button type="submit">{% if queue.is_paused %}Resume{% else %}Pause{% endif %}</button>
-    </form>
-  </h2>
-
-  <div class="body">
-    <dl class="readout">
-      <div>
-        <dt>Left to do</dt>
-        <dd class="num">{{ queue.remaining }}</dd>
-      </div>
-      <div>
-        <dt>Waiting</dt>
-        <dd class="num">{{ queue.waiting_count }}</dd>
-      </div>
-      <div>
-        <dt>Transferred</dt>
-        <dd class="num">{{ queue.bytes_written }}</dd>
-      </div>
-      <div>
-        <dt>Stored</dt>
-        <dd class="num">{{ queue.succeeded }}</dd>
-      </div>
-      {#
-        Both only once they are not zero. A row of zeroes reads as a report of
-        trouble that has not happened.
-      #}
-      {% if queue.failed != "0" %}
-        <div>
-          <dt>Failed</dt>
-          <dd class="num bad-text">{{ queue.failed }}</dd>
-        </div>
-      {% endif %}
-      {% if queue.stopped != "0" %}
-        <div>
-          <dt>Stopped</dt>
-          <dd class="num">{{ queue.stopped }}</dd>
-        </div>
-      {% endif %}
-    </dl>
-
-    {#
-      Only when something is actually held up by it. A paused queue with
-      nothing in it is a setting, not a situation.
-    #}
-    {% if queue.is_paused and queue.waiting %}
-      <p class="notice">
-        The queue is paused: nothing new is taken off it until you resume.
-        {% if queue.active %}
-          The transfer already running is not affected and will finish.
-        {% endif %}
-      </p>
-    {% endif %}
-
-    {% if queue.is_nearly_full %}
-      <p class="notice">
-        {{ queue.waiting_count }} of {{ queue.limit }} places are taken. Above
-        that a new link is refused rather than queued.
-      </p>
-    {% endif %}
-  </div>
-</section>
-
-{% if queue.active %}
-  {#
-    The one download with something to report, rendered in full. `download` is
-    what the progress partial reads, and binding the name here means the same
-    markup and the same identifiers serve this page and the download's own --
-    which is why the live update below needs no code of its own.
-  #}
-  {% set download = queue.active %}
-  <section class="panel">
-    <h2>
-      <span class="badge {{ download.state_tone }}" id="download-state">{{ download.state_label }}</span>
-      <span class="url">{{ download.label }}</span>
-
-      <form class="stop" method="post" action="/downloads/{{ download.download_id }}/stop?back=/downloads">
-        <button type="submit">Stop</button>
-      </form>
-    </h2>
-
-    <div class="body">
-      <p class="muted url">{{ download.url }}</p>
-      {% include "_download_progress.html" %}
-      <p><a class="action" href="/downloads/{{ download.download_id }}">Open this download</a></p>
-    </div>
-  </section>
-{% endif %}
-
-{% if queue.waiting %}
-  <section class="panel">
-    <h2>
-      Waiting
-      <span class="count">{{ queue.waiting_count }}</span>
-    </h2>
-    <div class="body">
-      {% include "_queue_table.html" %}
-    </div>
-  </section>
-{% endif %}
-
-{% if queue.finished %}
-  <section class="panel">
-    <h2>
-      Finished
-      <span class="count">{{ queue.finished_count }}</span>
-    </h2>
-    <div class="body">
-      {% include "_finished_table.html" %}
-      <p class="footnote">
-        What this process remembers, not the record. A download that finished is
-        in <a href="/library">the library</a>, and stays there across restarts —
-        this list does not.
-      </p>
-    </div>
-  </section>
-{% endif %}
-
-{% if not queue.is_busy and not queue.finished %}
-  <section class="panel">
-    <div class="body">
-      <p class="empty">
-        Nothing has been queued yet. Downloads start from a crawl's report,
-        where every link that can be fetched has a button.
-      </p>
-    </div>
-  </section>
-{% endif %}
+<div id="queue">
+  {% include "_queue_panels.html" %}
+</div>
 
 {#
-  The running transfer's own stream, borrowed. It updates the bar above, and
-  `download.js` reloads this page when the transfer ends -- which is when the
-  next one starts and everything else on this page changes.
+  Outside the element it replaces, because a script put into a page as markup
+  is not run -- and because this one has to outlive every swap it makes. Loaded
+  only when there is something to watch: a queue that is idle, or paused, has
+  nothing to say until a form is submitted, and that is a page load.
 #}
-{% if queue.active and not queue.active.is_finished %}
-  <div id="download-live" data-stream="/downloads/{{ queue.active.download_id }}/events" hidden></div>
+{% if queue.follow %}
   <script src="/static/download.js" defer></script>
 {% endif %}
 {% endblock %}

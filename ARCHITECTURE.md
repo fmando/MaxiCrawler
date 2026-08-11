@@ -164,9 +164,17 @@ Ein Worker, und das ist eine Höflichkeitsentscheidung, keine technische Grenze.
 
 Seit Sprint 15 ist Downloads ein eigener Navigationsbereich mit einer Seite,
 die die ganze Warteschlange zeigt. Sie hat **keinen eigenen Ereignisstrom**:
-eingebettet ist der Strom des gerade laufenden Transfers, und `download.js`
-lädt die Seite neu, wenn dieser endet — also genau dann, wenn sich der Rest der
-Seite ändert. Eine Warteschlange, die niemand abarbeitet, hat nichts zu senden.
+eingebettet ist der Strom des gerade laufenden Transfers. Eine Warteschlange,
+die niemand abarbeitet, hat nichts zu senden.
+
+Endet dieser Transfer, holt `download.js` **nur die Panels** nach — dieselbe
+Teilvorlage, die auch die Seite einbindet, unter `/downloads?part=queue` — und
+setzt sie an die Stelle der alten. Vorher war das ein vollständiger Seitenaufruf
+pro Datei; bei zweihundert Dateien zweihundert verlorene Scrollpositionen. Das
+Skript entscheidet dabei nichts: der Server schreibt in ein leeres Element,
+welcher Strom zu hören ist, wo nachzufragen ist und wohin die Antwort gehört.
+Fehlt der Strom, während die Warteschlange noch etwas vorhat, ist das der
+Moment zwischen zwei Transfers — dann wird kurz darauf erneut gefragt.
 
 ## Ausblick: Crawl Jobs
 

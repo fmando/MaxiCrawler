@@ -334,6 +334,7 @@ def queue_view(snapshot: QueueSnapshot, *, limit: int) -> dict[str, Any]:
     return {
         "is_paused": snapshot.is_paused,
         "is_busy": snapshot.is_busy,
+        "follow": queue_follow(snapshot),
         "active": None if snapshot.active is None else download_view(snapshot.active),
         "waiting": waiting,
         "finished": tuple(_finished_row(item) for item in snapshot.finished),
@@ -358,6 +359,46 @@ NEARLY_FULL = 0.9
 Late enough not to nag over an ordinary afternoon, early enough that a refusal
 is not a surprise.
 """
+
+QUEUE_PART = "queue"
+"""What ``part`` has to say for the queue's panels to be answered on their own."""
+
+QUEUE_FRAGMENT_URL = f"/downloads?part={QUEUE_PART}"
+"""Where the panels of the queue page are, without the page around them."""
+
+QUEUE_REGION = "queue"
+"""The element on the queue page that holds everything a transfer changes."""
+
+
+def queue_follow(snapshot: QueueSnapshot) -> dict[str, Any] | None:
+    """Return what the queue page has left to watch, or ``None``.
+
+    Three answers rather than two, and the third is what this exists for. There
+    is a transfer to listen to; there is nothing left to do at all; and there is
+    the moment *between* two transfers, where the queue is busy and the worker
+    has not picked the next one up. A page that read the third as the second
+    would stop following a batch of two hundred at whichever file lost that
+    race — which over two hundred files is not a rare event, it is an expected
+    one. So the third is answered with somewhere to ask again and nothing to
+    listen to, and the browser asks again.
+
+    A paused queue is not busy in the sense this means. Nothing will be taken
+    off it until somebody presses Resume, and that press is a page load.
+
+    Both URLs are written here rather than in the template because they are the
+    same decision: *where the answer is* and *where it goes* belong to whoever
+    decided there was something to ask for.
+    """
+    if not snapshot.is_busy or snapshot.is_paused:
+        return None
+    active = snapshot.active
+    running = None if active is None or active.is_finished else active
+    return {
+        "stream": None if running is None else f"/downloads/{running.download_id}/events",
+        "swap": QUEUE_FRAGMENT_URL,
+        "into": QUEUE_REGION,
+    }
+
 
 QUEUE_STRIP_URL = "/downloads"
 """Where the strip in the top bar leads. The queue is the only detail it has."""
