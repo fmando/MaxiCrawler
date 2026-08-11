@@ -38,24 +38,35 @@
     {% elif report %}
       <a class="aside" href="{{ report.json_url }}">JSON</a>
     {% endif %}
+
+    {#
+      Folds this panel away and leaves everything else exactly as it was. A
+      link rather than a <details>, because a <details> forgets on every click
+      and the point of folding a panel is that it stays folded while you work
+      the one below it. The heading stays either way: it says which crawl this
+      is, which is not a detail to hide.
+    #}
+    <a class="fold-panel" href="{{ panels.summary.url }}">{{ panels.summary.label }}</a>
   </h2>
 
-  <div class="body">
-    <p class="muted">{{ crawl.options }}</p>
+  {% if panels.summary.is_open %}
+    <div class="body">
+      <p class="muted">{{ crawl.options }}</p>
 
-    {% if crawl.error %}
-      <p class="error">{{ crawl.error }}</p>
-    {% elif report %}
-      {% include "_report.html" %}
-    {% else %}
-      {#
-        Also the last thing a crawl that has ended but whose report is still
-        being assembled shows. The counters are final by then; only the tables
-        below are missing, and a reload brings them.
-      #}
-      {% include "_progress.html" %}
-    {% endif %}
-  </div>
+      {% if crawl.error %}
+        <p class="error">{{ crawl.error }}</p>
+      {% elif report %}
+        {% include "_report.html" %}
+      {% else %}
+        {#
+          Also the last thing a crawl that has ended but whose report is still
+          being assembled shows. The counters are final by then; only the tables
+          below are missing, and a reload brings them.
+        #}
+        {% include "_progress.html" %}
+      {% endif %}
+    </div>
+  {% endif %}
 </section>
 
 {% if report %}

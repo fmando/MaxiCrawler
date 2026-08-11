@@ -16,7 +16,29 @@
     <span class="count">
       {% if links.is_filtered %}{{ links.total }} of {{ links.recorded }}{% else %}{{ links.recorded }} unique{% endif %}
     </span>
+    {#
+      Absent where nothing supplied the fold state, which is any rendering of
+      this partial outside a report page. The table is the thing there, and a
+      control that folded it away would have nothing left to show.
+    #}
+    {% if panels %}
+      <a class="fold-panel" href="{{ panels.links.url }}">{{ panels.links.label }}</a>
+    {% endif %}
   </h2>
+
+  {% if not panels or panels.links.is_open %}
+
+  {#
+    What the batch that sent you back here did. Rendered from the URL and
+    carried by nothing, so it is gone the moment anything else is clicked.
+  #}
+  {% if links.queued %}
+    <p class="notice">
+      {{ links.queued.sentence }}
+      {% for note in links.queued.notes %}{{ note }}{% endfor %}
+      <a href="/downloads">Watch the queue →</a>
+    </p>
+  {% endif %}
 
   {% if links.has_any %}
     <form class="filters" method="get" action="{{ links.action }}">
@@ -58,15 +80,17 @@
       </label>
 
       {#
-        The plugin, the type and the category are chosen from the chips below
-        rather than from a box: a chip carries its count, and how many of a
-        thing there are is most of what decides whether you want only those.
-        They travel as hidden fields here, so losing the plugin you had picked
-        because you then typed a search cannot happen.
+        The plugin, the type, the category and what is already known about a
+        link are chosen from the chips below rather than from a box: a chip
+        carries its count, and how many of a thing there are is most of what
+        decides whether you want only those. They travel as hidden fields here,
+        so losing the plugin you had picked because you then typed a search
+        cannot happen.
       #}
       <input type="hidden" name="plugin" value="{{ links.plugin }}">
       <input type="hidden" name="target" value="{{ links.target }}">
       <input type="hidden" name="category" value="{{ links.category }}">
+      <input type="hidden" name="state" value="{{ links.state }}">
       <input type="hidden" name="dir" value="{{ links.direction }}">
       <input type="hidden" name="hide" value="{{ links.hide_value }}">
 
@@ -125,6 +149,19 @@
     {% if links.has_downloads %}
       <form class="batch" id="link-selection" method="post" action="{{ links.selection_action }}">
         <button type="submit">Queue selected</button>
+        {#
+          How many are ticked. Hidden until something is, and hidden again when
+          nothing is: the script writes the number, this holds the word. Absent
+          entirely without scripting, where a counter would say nothing true.
+        #}
+        <span class="chosen muted small" hidden><span class="num">0</span> selected</span>
+        {#
+          Where to land afterwards. This form has no filter in its action to
+          rebuild one from -- it posts a selection, not a query -- so the way
+          back is the one thing it has to be told. The server refuses anything
+          that is not a path of ours, so it cannot be pointed elsewhere.
+        #}
+        <input type="hidden" name="back" value="{{ links.return_to }}">
       </form>
       <form class="batch" method="post" action="{{ links.matches_action }}">
         <button type="submit">Queue every fetchable match</button>
@@ -142,7 +179,19 @@
       <table class="grid sticky">
         <thead>
           <tr>
-            {% if links.has_downloads %}<th class="tick"><span class="visually-hidden">Select</span></th>{% endif %}
+            {% if links.has_downloads %}
+              <th class="tick">
+                <span class="visually-hidden">Select</span>
+                {#
+                  Ticks every box on this page. No name, so it is a control and
+                  never a field: whatever it does to the boxes is what gets
+                  submitted, and it submits nothing of its own. Hidden until the
+                  script can make it work.
+                #}
+                <input type="checkbox" class="tick-all" hidden
+                       aria-label="Select every link on this page">
+              </th>
+            {% endif %}
             {% for header in links.headers %}
               <th{% if header.active %} class="sorted"{% endif %}>
                 {% if header.url %}
@@ -171,6 +220,19 @@
                   {% endif %}
                 </td>
               {% endif %}
+              {#
+                What is already known about this URL. Never empty while the
+                column is there: a row in no state says "new" rather than
+                showing a blank, so nothing in this cell has to be interpreted.
+                The view decides the badges; this places them.
+              #}
+              {% if "state" in links.shown %}
+                <td class="states">
+                  {% for mark in link.states %}
+                    <span class="badge {{ mark.tone }}">{{ mark.label }}</span>
+                  {% endfor %}
+                </td>
+              {% endif %}
               {% if "plugin" in links.shown %}
                 <td{% if not link.is_notable %} class="muted"{% endif %}>{{ link.plugin }}</td>
               {% endif %}
@@ -178,12 +240,16 @@
               {% if "target" in links.shown %}
                 <td{% if not link.target_is_stated %} class="muted"{% endif %}>{{ link.target }}</td>
               {% endif %}
-              <td class="url">
-                {{ link.url }}
-                {% if link.was_normalized %}
-                  <div class="muted small">as written: {{ link.raw_url }}</div>
-                {% endif %}
-              </td>
+              <td class="url">{{ link.url }}</td>
+              {#
+                What the page actually said, where that differs. An em dash
+                where it does not, the same way the source column marks a URL
+                nobody found on a page -- a blank would be the reader's job to
+                interpret.
+              #}
+              {% if "raw" in links.shown %}
+                <td class="url muted small">{{ link.raw_url if link.was_normalized else "—" }}</td>
+              {% endif %}
               {% if "source" in links.shown %}
                 <td class="url muted small">{{ link.source_url or "—" }}</td>
               {% endif %}
@@ -210,6 +276,15 @@
       </table>
     </div>
 
+    {#
+      What turns the header checkbox and the counter on. Loaded only where
+      there are boxes to tick, so a report with nothing fetchable in it asks
+      the browser for nothing.
+    #}
+    {% if links.has_downloads %}
+      <script src="/static/select.js" defer></script>
+    {% endif %}
+
     <p class="paging">
       <span class="muted">{{ links.shown_range }} of {{ links.total }}</span>
       {% if links.previous_url %}<a href="{{ links.previous_url }}">← previous</a>{% endif %}
@@ -233,5 +308,6 @@
       This crawl found {{ links.discovered }} unique URLs but recorded none of them:
       it ran without persistence. The counts above are still what it saw.
     </p>
+  {% endif %}
   {% endif %}
 </section>

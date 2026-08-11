@@ -76,6 +76,12 @@ code { font-family: var(--mono); background: var(--raised); padding: 1px 4px; }
 .topbar nav a:hover { color: var(--text); text-decoration: none; }
 .topbar nav a.active { color: var(--text); border-bottom-color: var(--accent); }
 
+/* What the queue is doing, in the top bar. Absent when it is doing nothing, so
+   this never takes room from the navigation on an idle installation. */
+.queue-strip { display: flex; align-items: center; gap: 6px; }
+.queue-strip:hover { text-decoration: none; }
+.queue-strip .badge { font-size: 10px; }
+
 .version { color: var(--muted); font-family: var(--mono); font-size: 12px; }
 
 main { padding: 20px; max-width: 1280px; }
@@ -284,6 +290,18 @@ footer {
 }
 .aside:hover { text-decoration: none; border-color: var(--accent); }
 
+/* Folds one panel of a report away. Last in the heading, after whatever
+   already claims the right edge -- the count on a table, the JSON link or the
+   stop button on the summary -- so nothing that was there moves. Quiet, because
+   it is on every panel and none of them is where the eye should land. */
+.fold-panel {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.fold-panel:hover { color: var(--text); text-decoration: none; }
+
 .panel > h2 .count {
   margin-left: auto;
   font-family: var(--mono);
@@ -453,6 +471,13 @@ footer {
 
 .grid .tick { width: 1%; padding-right: 0; }
 .grid .tick input { margin: 0; cursor: pointer; }
+
+/* A row can be in more than one state, so the cell is a stack rather than a
+   line: wrapping two badges onto one row would widen the column past the URL
+   it sits beside. */
+.grid .states { width: 1%; white-space: nowrap; }
+.grid .states .badge { display: block; margin-bottom: 2px; text-align: center; }
+.grid .states .badge:last-child { margin-bottom: 0; }
 
 /* --- the download queue -------------------------------------------------- */
 

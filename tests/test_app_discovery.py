@@ -7,7 +7,7 @@ tests at the end do crawl, because "does what the crawl wrote come back out"
 is the one question the rest of the file assumes.
 """
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 
 import pytest
@@ -15,10 +15,12 @@ from web_server import Site, serve
 
 from maxicrawler.app import (
     UNRESOLVED,
+    UNTRACKED,
     CrawlService,
     DiscoveryService,
     LinkQuery,
     LinkSort,
+    LinkState,
     TargetKind,
 )
 from maxicrawler.config import Settings
@@ -66,15 +68,32 @@ def make_url(
 
 
 def make_service(
-    urls: Iterable[StoredUrl] = (), *, downloadable: Iterable[str] = ()
+    urls: Iterable[StoredUrl] = (),
+    *,
+    downloadable: Iterable[str] = (),
+    states: Mapping[LinkState, Iterable[str]] | None = None,
 ) -> DiscoveryService:
-    """Return a service over the rows *urls*, with *downloadable* fetchable."""
+    """Return a service over the rows *urls*, with *downloadable* fetchable.
+
+    *states* names which URLs are in which state. A state left out of the mapping
+    has no resolver at all, which is a different thing from one whose answer is
+    empty — several tests below are about exactly that difference.
+    """
     fetchable = frozenset(downloadable)
+    resolvers = {
+        state: _resolver(frozenset(matching)) for state, matching in (states or {}).items()
+    }
     return DiscoveryService(
         Settings(),
         repository=FakeRepository(urls),  # type: ignore[arg-type]
         downloadable=lambda candidates: frozenset(candidates) & fetchable,
+        states=resolvers,
     )
+
+
+def _resolver(matching: frozenset[str]) -> Callable[[Iterable[str]], frozenset[str]]:
+    """Return a resolver answering with those of its candidates in *matching*."""
+    return lambda candidates: frozenset(candidates) & matching
 
 
 def urls_of(page: object) -> list[str]:
@@ -613,3 +632,186 @@ def test_a_negative_limit_is_a_mistake_rather_than_an_empty_answer() -> None:
 
     with pytest.raises(ValueError, match="cannot be negative"):
         service.fetchable(SESSION, limit=-1)
+
+
+# --- what is already known about a link ---------------------------------------
+
+OTHER_LINK = "https://mega.nz/file/EeFfGgHh#abcdefghijklmnopqrstuvwxyz0123456789ABC"
+THIRD_LINK = "https://example.test/report.pdf"
+
+
+def test_a_link_the_library_holds_something_from_is_marked() -> None:
+    service = make_service(
+        [make_url(MEGA_LINK, "mega"), make_url(OTHER_LINK, "mega")],
+        states={LinkState.IN_LIBRARY: [MEGA_LINK]},
+    )
+
+    page = service.browse(SESSION)
+
+    assert page.known[LinkState.IN_LIBRARY] == frozenset({MEGA_LINK})
+
+
+def test_a_state_nobody_resolved_is_absent_rather_than_empty() -> None:
+    """ "We did not ask" and "we asked and the answer was none" are different."""
+    service = make_service([make_url(MEGA_LINK, "mega")], states={LinkState.IN_LIBRARY: []})
+
+    page = service.browse(SESSION)
+
+    assert page.known[LinkState.IN_LIBRARY] == frozenset()
+    assert LinkState.IN_QUEUE not in page.known
+
+
+def test_no_resolvers_means_no_state_facets_at_all() -> None:
+    """A chip row calling every URL new would be a claim nobody made."""
+    service = make_service([make_url(MEGA_LINK, "mega")])
+
+    assert service.browse(SESSION).states == ()
+
+
+def test_the_states_are_counted_over_the_whole_crawl() -> None:
+    service = make_service(
+        [make_url(MEGA_LINK, "mega"), make_url(OTHER_LINK, "mega"), make_url(THIRD_LINK)],
+        states={LinkState.IN_LIBRARY: [MEGA_LINK], LinkState.IN_QUEUE: [OTHER_LINK]},
+    )
+
+    facets = service.browse(SESSION, LinkQuery(per_page=1)).states
+
+    assert [(facet.value, facet.count) for facet in facets] == [
+        (UNTRACKED, 1),
+        ("library", 1),
+        ("queue", 1),
+    ]
+
+
+def test_a_link_in_two_states_is_counted_in_both_and_is_not_new() -> None:
+    """The states are not exclusive, which is why they are a set and not a column."""
+    service = make_service(
+        [make_url(MEGA_LINK, "mega")],
+        states={LinkState.IN_LIBRARY: [MEGA_LINK], LinkState.IN_QUEUE: [MEGA_LINK]},
+    )
+
+    facets = service.browse(SESSION).states
+
+    assert [(facet.value, facet.count) for facet in facets] == [("library", 1), ("queue", 1)]
+
+
+def test_a_state_nothing_is_in_gets_no_chip() -> None:
+    service = make_service(
+        [make_url(MEGA_LINK, "mega")],
+        states={LinkState.IN_LIBRARY: [], LinkState.IN_QUEUE: []},
+    )
+
+    assert [facet.value for facet in service.browse(SESSION).states] == [UNTRACKED]
+
+
+def test_filtering_by_a_state_keeps_only_what_is_in_it() -> None:
+    service = make_service(
+        [make_url(MEGA_LINK, "mega"), make_url(OTHER_LINK, "mega")],
+        states={LinkState.IN_LIBRARY: [MEGA_LINK]},
+    )
+
+    page = service.browse(SESSION, LinkQuery(state="library"))
+
+    assert urls_of(page) == [MEGA_LINK]
+    assert page.query.is_filtered
+
+
+def test_filtering_for_what_is_new_keeps_only_what_is_in_no_state() -> None:
+    """The filter the second crawl of a site is run for."""
+    service = make_service(
+        [make_url(MEGA_LINK, "mega"), make_url(OTHER_LINK, "mega"), make_url(THIRD_LINK)],
+        states={LinkState.IN_LIBRARY: [MEGA_LINK], LinkState.IN_QUEUE: [OTHER_LINK]},
+    )
+
+    page = service.browse(SESSION, LinkQuery(state=UNTRACKED))
+
+    assert urls_of(page) == [THIRD_LINK]
+
+
+def test_an_unknown_state_filters_nothing_rather_than_everything() -> None:
+    """A bookmark predating a rename must not read as "this crawl found nothing"."""
+    service = make_service(
+        [make_url(MEGA_LINK, "mega")], states={LinkState.IN_LIBRARY: [MEGA_LINK]}
+    )
+
+    assert urls_of(service.browse(SESSION, LinkQuery(state="elsewhere"))) == [MEGA_LINK]
+
+
+def test_a_state_without_a_resolver_filters_nothing() -> None:
+    service = make_service([make_url(MEGA_LINK, "mega")])
+
+    assert urls_of(service.browse(SESSION, LinkQuery(state="library"))) == [MEGA_LINK]
+
+
+def test_the_marks_cover_the_page_rather_than_the_crawl() -> None:
+    """One page of marks, because that is what a table renders."""
+    service = make_service(
+        [make_url(MEGA_LINK, "mega"), make_url(OTHER_LINK, "mega")],
+        states={LinkState.IN_LIBRARY: [MEGA_LINK, OTHER_LINK]},
+    )
+
+    page = service.browse(SESSION, LinkQuery(per_page=1))
+
+    assert page.known[LinkState.IN_LIBRARY] == frozenset({MEGA_LINK})
+    assert page.states[0].count == 2
+
+
+# --- and the same question asked by "queue every match" -----------------------
+
+
+def test_queueing_every_match_honours_the_state_filter() -> None:
+    service = make_service(
+        [make_url(MEGA_LINK, "mega"), make_url(OTHER_LINK, "mega")],
+        downloadable=[MEGA_LINK, OTHER_LINK],
+        states={LinkState.IN_LIBRARY: [MEGA_LINK]},
+    )
+
+    matches = service.fetchable(SESSION, LinkQuery(state=UNTRACKED), limit=10)
+
+    assert matches.urls == (OTHER_LINK,)
+    assert matches.total == 1
+
+
+def test_queueing_every_match_asks_only_about_the_state_it_filters_by() -> None:
+    """A click with no chips to fill in should not pay for the counts behind them."""
+    asked: list[LinkState] = []
+
+    def watching(state: LinkState, matching: frozenset[str]) -> Callable[..., frozenset[str]]:
+        def resolve(candidates: Iterable[str]) -> frozenset[str]:
+            asked.append(state)
+            return frozenset(candidates) & matching
+
+        return resolve
+
+    service = DiscoveryService(
+        Settings(),
+        repository=FakeRepository([make_url(MEGA_LINK, "mega")]),  # type: ignore[arg-type]
+        downloadable=lambda candidates: frozenset(candidates),
+        states={
+            LinkState.IN_LIBRARY: watching(LinkState.IN_LIBRARY, frozenset()),
+            LinkState.IN_QUEUE: watching(LinkState.IN_QUEUE, frozenset()),
+        },
+    )
+
+    service.fetchable(SESSION, LinkQuery(state="queue"), limit=10)
+
+    assert asked == [LinkState.IN_QUEUE]
+
+
+def test_queueing_every_match_asks_nothing_when_no_state_is_filtered_by() -> None:
+    asked: list[str] = []
+
+    def resolve(candidates: Iterable[str]) -> frozenset[str]:
+        asked.append("asked")
+        return frozenset()
+
+    service = DiscoveryService(
+        Settings(),
+        repository=FakeRepository([make_url(MEGA_LINK, "mega")]),  # type: ignore[arg-type]
+        downloadable=lambda candidates: frozenset(candidates),
+        states={LinkState.IN_LIBRARY: resolve},
+    )
+
+    service.fetchable(SESSION, LinkQuery(), limit=10)
+
+    assert asked == []

@@ -1746,10 +1746,11 @@ patience.
 `/downloads` shows the whole queue: what is running, what is waiting, and what
 became of the rest, with the counters that answer "how much is left".
 
-It has no event stream of its own. It embeds the running transfer's stream, and
-the same script that keeps one download's page current reloads this one when
-that transfer ends — which is exactly when the next one starts and everything
-else on the page changes. A queue nobody is draining has nothing to send.
+It has no event stream of its own. It embeds the running transfer's stream,
+because the moment that transfer ends is exactly the moment the next one starts
+and everything else on the page changes. A queue nobody is draining has nothing
+to send. What the page does with that event, and what it says above the tables,
+is where the next milestone went.
 
 Reordering is three buttons rather than drag and drop. That would be a
 JavaScript dependency for the last five percent of a control the buttons already
@@ -1900,6 +1901,232 @@ because with two groups it is a filter again.
 It is not a safety setting — the private-network rule applies either way. It
 answers a different question: whether this installation fetches arbitrary files
 at all, which is a thing an installation is entitled to decide in one place.
+
+## The report as a workspace
+
+A crawl finds three thousand links and you want forty of them. Everything
+needed for that existed after 0.14 — searching, filtering, sorting, a queue, a
+button that takes a whole filter — and doing it still meant being sent to the
+queue and finding your way back to the report, twice, to queue two sets. This
+milestone is about the space between the controls rather than the controls.
+
+For a set a filter can describe it is now the filter and one button, and you
+are still on the report afterwards: same filter, same sort, same page of it,
+with the rows you queued saying *in queue*. For a set only a person can
+describe, the checkbox in the table header ticks the page and the same button
+beside it queues what is ticked.
+
+### What is already known about each link
+
+The report used to describe links and nothing else. It says now whether a link
+is *in library* or *in queue*, as a badge on the row and as a filter beside the
+others.
+
+Both answers are set questions, and both are asked of somebody who already
+knows: `LibraryService.stored` and `TransferQueue.pending`. Neither knows there
+is a report; `DiscoveryService` is handed a mapping from a state to a callable
+and never learns that one of them is a library and the other a queue. Adding a
+state later is a member, a resolver and a label.
+
+**They are states, not adjectives.** "in library" rather than "already
+downloaded", and that is not a wording preference. Mega gives every child of a
+folder the folder's own URL as its source, so one stored file inside a folder
+makes the whole folder link *in library* — which is true, and which "already
+downloaded" would not be. It also leaves room: a link that turns out to be a
+duplicate of something stored under another address is a further state rather
+than an argument about what the first one meant.
+
+Three rules keep the marks honest, and each is a test:
+
+- a state nothing can answer is **absent** rather than empty — an installation
+  without a library does not claim every link is missing from it;
+- filtering on a state nobody can answer filters **nothing** rather than
+  everything, so a bookmark that predates a resolver shows the crawl instead of
+  an empty table;
+- a row with no state says **new** rather than nothing, because a blank cell in
+  that table already means "the crawl recorded no value".
+
+Answering them at all needed the library to stop being read one JSON document
+at a time. There is a SQLite index over it now — a cache, never the authority
+(ADR-037).
+
+### The way back from a batch
+
+Queueing forty links used to answer with the queue. That is the right answer to
+"what did I just start?" and the wrong one to what somebody is actually doing,
+which is working through a filtered report. You come back to the report now,
+with the filter, the sort, the page and the columns exactly as they were, and a
+one-line confirmation of what the batch did.
+
+The two buttons get there differently, and the difference is the decision
+(ADR-039). **Queue every fetchable match** already carries the filter in its
+action, so the server rebuilds the way back from it: two copies of one filter
+are two things that can disagree, and the copy a browser holds is the one that
+could be made to point somewhere else. **Queue selected** posts a set of ticked
+URLs and no query at all, so it is told where to go back to in a form field —
+and everything a browser sends goes through a check that accepts a path of ours
+and nothing else, `//elsewhere.test/` included, which is how a "go back
+afterwards" parameter turns into an open redirect.
+
+The ticks themselves do not come back. Carrying them would mean putting the
+URLs in a query string, which is the one place a share link's key must never go
+(ADR-020). What comes back instead is the rows saying *in queue* — the same
+information without the credential, and true of the ones somebody else queued
+too.
+
+The confirmation lasts exactly one page. It lives in the redirect rather than
+in a session, and the parameters that carry it are dropped by the same function
+that carries every other parameter forward, so nothing has to remember that it
+has already shown one.
+
+### Two hundred boxes, one click
+
+The header of the link table has a checkbox that ticks every row on the page,
+and a counter beside the button that says how many are ticked. Both are
+rendered hidden and revealed by the script that gives them meaning — a checkbox
+that ticks nothing is worse than no checkbox.
+
+"Every link on this page" is meant exactly. The other button queues every link
+the *filter* matches, which is a different set, is resolved on the server, and
+is not bounded by two hundred.
+
+### A report you can fit on the screen you have
+
+The summary, the page table and the link table fold from their own headings,
+and the fold is carried by every link on the page — which is the difference
+between staying folded and folding once. A folded panel keeps its heading and
+its count, so this is a way of arranging the report rather than of losing it.
+
+A link and a query parameter rather than a `<details>`, which the three
+breakdowns inside the summary still are. That difference is the point: a
+`<details>` forgets on every click, which is right for something you open to
+read once and wrong for a table you are keeping out of your way for an
+afternoon.
+
+What a link was *written as* before normalization is a column now rather than a
+second line under the URL, so a crawl of a site that rewrites its URLs no
+longer doubles the height of every affected row — and it turns off in one click
+like every other column.
+
+### The queue, wherever you are
+
+Every page but the queue's own carries a line in the top bar saying what the
+queue is doing: how many downloading, how many waiting, how many failed, and
+whether it is paused. Counts only — the line naming the file being fetched
+already exists on the two pages with room for it.
+
+It is read once per page render rather than streamed, from a call that
+deliberately does not build a snapshot of five hundred waiting requests. A
+count a few seconds old still answers the question the line is for.
+
+Paused is said even when the queue is empty. It is the answer to "why is
+nothing happening", which is asked of an empty queue as often as of a full one.
+
+### Two hundred files, one page
+
+The queue page followed a running transfer by reloading itself when that
+transfer ended. On two hundred files that is two hundred page loads and two
+hundred lost scroll positions.
+
+It asks for the panels instead. Everything a finished transfer changes lives in
+one partial that the page includes and that `/downloads?part=queue` answers on
+its own — the same template, the same snapshot, the same view function, so what
+a reload produces and what a swap produces cannot drift apart.
+
+The script decides nothing (ADR-038). It reads three attributes the server
+writes into an empty element: which stream to listen to, where to ask when that
+stream ends, and where the answer goes. One download's page renders the first
+and not the other two, which is the whole of how one script serves two pages
+that mean different things by "finished" — there the server has more to say
+than a swap could carry, and asking for the page is right once.
+
+A missing stream is a signal rather than a silence. There are three states, not
+two: something to listen to, nothing left to do, and the moment *between* two
+transfers where the queue is busy and the worker has not picked the next one
+up. A page that read the third as the second would stop following a batch at
+whichever file lost that race, and a rare race rolled two hundred times is not
+rare.
+
+### How far along the whole queue is
+
+Above the counters is a bar across the queue — "41 of 200 finished" — and
+beside it a rate. The denominator grows when more is queued, which is honest
+rather than awkward: there is no batch here, only a queue.
+
+**No estimate of how much longer, deliberately.** A waiting request has not
+been inspected, so nothing knows what it points at, whether it is one file or
+two hundred, or how large any of them is. "About twelve minutes left" would be
+invented rather than measured, and an interface that guesses once is one nobody
+believes the second time. The rate is the opposite: bytes over the time
+actually spent transferring, not over the wall clock — a queue that sat paused
+overnight did not get slower while it was paused — and it says "while
+transferring" so it cannot be read as what the line is doing this second.
+
+The counters survive the rows they were counted from. The history keeps fifty
+entries and every number above it was a sum over the entries still held, so the
+next thing queued after an afternoon of downloads dropped everything past the
+fiftieth and the counters went with it — the second batch opened on a page that
+had forgotten the first. What eviction drops is now folded into a total first:
+the row goes, the number stays. Clearing the list is the only thing that resets
+them, which is what makes them worth reading the rest of the time.
+
+The history offers **Try all N again** and **Clear the list**. The first takes
+the same set the rows offer one at a time — everything that ended without the
+file arriving, a request somebody stopped included — and says how many, so
+nobody finds out afterwards what "everything" turned out to mean; it appears
+only above one row, since a button doing what the single button beside it does
+teaches nothing. The second empties the list and the counters over it together,
+because the counters are totals over exactly those rows, and it is the only
+thing that resets them. The files are in the library either way, which is what
+the footnote under the table has said since the table existed.
+
+### The part that needed care
+
+**A tally is not a snapshot.** The line in the top bar needed four numbers and
+was rendering on every page of the interface; a snapshot builds one object per
+waiting request, and a full queue is five hundred of them. So there is a second,
+cheaper reading — and because two readings of one queue is one bug waiting for a
+slow afternoon, the failures in it are counted through the same snapshots the
+tables read, and a test holds the two together.
+
+**A context key the chrome shares with a page is a key one of them silently
+loses.** The queue line is merged into every page's context by the same function
+that merges the page's own; the queue page passes its context under `queue`, so
+the line arrived on `/downloads` with every field empty. It is called
+`queue_strip` now. What made it survive a test run is worth recording too: a
+`-k` expression that looked like it selected the test that would have caught it
+and selected six others instead.
+
+**Nothing in a test suite lays a page out.** The two commits that changed how
+the report and the queue look were checked in a browser instead: the fold link
+sits flush at the panel's right padding in all three headings; folding the
+summary and the page table moves the link table from 961 pixels down the page to
+276; and a queue of two hundred drained through thirty-six panel swaps in one
+document with the scroll position identical at every one of them.
+
+### Still not done, on purpose
+
+**A stable identity for a library entry.** The column is reserved and stays
+empty, and that is now a decision rather than a gap (ADR-037). An entry already
+has a stable identity in its directory key; what a separate one would add is
+independence from the *address*, for a file reached through two links. A random
+id would be the one thing in the library that cannot be recomputed from the file
+system, which is the property ADR-010 exists to keep — restore from a backup and
+every reference to it dangles. A derived one would be a second name for the key.
+The natural anchor for duplicates is the checksum, which is both
+address-independent and recomputable, so the column waits for the question that
+will choose it.
+
+**The queue still does not decline what it already holds.** The report tells you
+before you click, which is most of the value; the queue accepting the same URL
+twice is a decision about what a refusal means and has not been made.
+
+**The list of crawls is still everything, in the order it was recorded.** The
+tables *inside* one report have had searching, filtering, sorting and paging
+since 0.14. This is the point at which htmx would earn being vendored, and there
+is a measurement behind that now: the fragment swap this milestone needed cost
+about forty lines and no dependency (ADR-038). The question is how many more
+places want their own forty.
 
 ## Documentation
 

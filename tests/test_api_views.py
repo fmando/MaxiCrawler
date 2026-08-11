@@ -3,21 +3,28 @@
 Pure functions, so none of this needs HTTP, a database or a crawl.
 """
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from maxicrawler.api.downloads import DownloadSnapshot
+from maxicrawler.api.downloads import Departed, DownloadSnapshot, QueueSnapshot, QueueTally
 from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.api.views import (
     ABANDONED_LABEL,
     KIND_LABELS,
     LINK_COLUMNS,
+    LINK_PARAMS,
+    LINK_STATE_LABELS,
+    LINK_STATE_TONES,
+    PAGE_PARAMS,
+    PANELS,
     STATE_LABELS,
     STATE_TONES,
+    TRANSIENT_PARAMS,
+    QueuedBatch,
     crawl_rows,
     describe_options,
     describe_scope,
@@ -30,13 +37,18 @@ from maxicrawler.api.views import (
     link_view,
     page_rows,
     page_view,
+    panel_view,
     plugin_shares,
     progress_view,
+    queue_follow,
+    queue_strip,
+    queue_view,
     report_view,
     settings_view,
     stored_view,
 )
 from maxicrawler.app import (
+    UNTRACKED,
     DownloadProgress,
     DownloadSummary,
     LibraryItem,
@@ -48,6 +60,7 @@ from maxicrawler.app import (
     LinkPage,
     LinkQuery,
     LinkSort,
+    LinkState,
     PageQuery,
     PageState,
     TargetKind,
@@ -553,6 +566,8 @@ def make_link_page(
     page: int = 1,
     plugins: Iterable[LinkFacet] = (),
     targets: Iterable[LinkFacet] = (),
+    states: Iterable[LinkFacet] = (),
+    known: Mapping[LinkState, Iterable[str]] | None = None,
 ) -> LinkPage:
     """Return a page of links the way the service would have built one.
 
@@ -571,7 +586,9 @@ def make_link_page(
         pages=pages,
         plugins=tuple(plugins),
         targets=tuple(targets),
+        states=tuple(states),
         downloadable=frozenset(downloadable),
+        known={state: frozenset(urls) for state, urls in (known or {}).items()},
     )
 
 
@@ -846,6 +863,24 @@ def test_clicking_the_active_column_reverses_it() -> None:
     assert "dir=desc" in header["url"]
 
 
+def test_what_a_link_was_written_as_is_a_column_of_its_own() -> None:
+    """It was a second line under the URL, which doubled the height of the table."""
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
+    toggles = {toggle["name"]: toggle for toggle in view["toggles"]}
+
+    assert "raw" in view["shown"]
+    assert toggles["raw"]["label"] == "As written"
+    assert "hide=raw" in toggles["raw"]["url"]
+
+
+def test_the_raw_column_cannot_be_ordered_by() -> None:
+    """It would order almost exactly as the URL beside it already does."""
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
+    (header,) = [header for header in view["headers"] if header["name"] == "raw"]
+
+    assert header["url"] is None
+
+
 def test_every_column_but_the_url_can_be_turned_off() -> None:
     view = make_link_view(make_link_page([make_link("https://example.test/a")]))
     toggles = {toggle["name"]: toggle for toggle in view["toggles"]}
@@ -866,6 +901,7 @@ def test_a_hidden_column_is_left_out_and_offered_back() -> None:
         "category",
         "target",
         "url",
+        "raw",
     ]
     assert toggles["source"]["shown"] is False
     assert "hide=" not in toggles["source"]["url"]
@@ -889,11 +925,468 @@ def test_the_url_column_cannot_be_hidden_even_if_asked() -> None:
 
 def test_every_column_is_offered_as_a_toggle() -> None:
     """A control that silently lacks an entry reads as a bug."""
-    view = make_link_view(make_link_page())
+    view = make_link_view(make_link_page(known={LinkState.IN_LIBRARY: ()}))
 
     assert [toggle["name"] for toggle in view["toggles"]] == [
         column.name for column in LINK_COLUMNS
     ]
+
+
+# --- what is already known about a link --------------------------------------
+
+
+def make_stateful_page(
+    known: Mapping[LinkState, Iterable[str]],
+    *,
+    query: LinkQuery | None = None,
+    states: Iterable[LinkFacet] = (),
+) -> LinkPage:
+    """Return a page of two links with *known* answered about them."""
+    return make_link_page(
+        [
+            make_link("https://mega.nz/file/AaBbCcDd", "mega", position=0),
+            make_link("https://mega.nz/file/EeFfGgHh", "mega", position=1),
+        ],
+        query=query,
+        states=states,
+        known=known,
+    )
+
+
+def test_a_row_says_what_is_known_about_its_url() -> None:
+    page = make_stateful_page({LinkState.IN_LIBRARY: ["https://mega.nz/file/AaBbCcDd"]})
+
+    stored, other = link_rows(page)
+
+    assert [mark["label"] for mark in stored["states"]] == ["in library"]
+    assert stored["states"][0]["tone"] == "good"
+    assert [mark["label"] for mark in other["states"]] == ["new"]
+
+
+def test_a_row_in_no_state_is_called_new_rather_than_left_blank() -> None:
+    """A blank cell would be the third thing an empty cell means in this table."""
+    page = make_stateful_page({LinkState.IN_LIBRARY: (), LinkState.IN_QUEUE: ()})
+
+    for row in link_rows(page):
+        assert [mark["label"] for mark in row["states"]] == ["new"]
+        assert row["states"][0]["tone"] == "idle"
+
+
+def test_a_row_can_wear_more_than_one_badge() -> None:
+    """One file of a folder stored and another queued is both, not either."""
+    url = "https://mega.nz/file/AaBbCcDd"
+    page = make_stateful_page({LinkState.IN_QUEUE: [url], LinkState.IN_LIBRARY: [url]})
+
+    row, _ = link_rows(page)
+
+    assert [mark["label"] for mark in row["states"]] == ["in library", "in queue"]
+
+
+def test_the_badges_follow_the_declared_order_whatever_order_they_were_resolved_in() -> None:
+    """Two reports of one crawl must not put the same badges in different places."""
+    url = "https://mega.nz/file/AaBbCcDd"
+    first = link_rows(make_stateful_page({LinkState.IN_LIBRARY: [url], LinkState.IN_QUEUE: [url]}))
+    second = link_rows(make_stateful_page({LinkState.IN_QUEUE: [url], LinkState.IN_LIBRARY: [url]}))
+
+    assert first[0]["states"] == second[0]["states"]
+
+
+def test_nothing_is_claimed_about_a_row_when_nothing_was_asked() -> None:
+    """ "Nobody asked" and "the answer was none" must not render the same."""
+    (row,) = link_rows(make_link_page([make_link("https://example.test/a")]))
+
+    assert row["states"] == ()
+
+
+def test_the_state_column_is_withdrawn_when_nothing_was_asked() -> None:
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
+
+    assert "state" not in view["shown"]
+    assert all(header["name"] != "state" for header in view["headers"])
+    assert all(toggle["name"] != "state" for toggle in view["toggles"])
+    assert view["facets"] == ()
+
+
+def test_the_state_column_leads_because_it_is_what_decides_a_tick() -> None:
+    view = make_link_view(make_stateful_page({LinkState.IN_LIBRARY: ()}))
+
+    assert [header["name"] for header in view["headers"]][0] == "state"
+
+
+def test_the_state_column_can_be_turned_off_like_any_other() -> None:
+    view = link_view(
+        make_stateful_page({LinkState.IN_LIBRARY: ()}), base=BASE, hidden=frozenset({"state"})
+    )
+    toggles = {toggle["name"]: toggle for toggle in view["toggles"]}
+
+    assert "state" not in view["shown"]
+    assert toggles["state"]["shown"] is False
+
+
+def test_the_state_column_cannot_be_ordered_by() -> None:
+    """A handful of values; grouping by them is what a chip already does."""
+    view = make_link_view(make_stateful_page({LinkState.IN_LIBRARY: ()}))
+    (header,) = [header for header in view["headers"] if header["name"] == "state"]
+
+    assert header["url"] is None
+
+
+def test_the_states_are_offered_as_chips_with_their_counts() -> None:
+    view = make_link_view(
+        make_stateful_page(
+            {LinkState.IN_LIBRARY: ["https://mega.nz/file/AaBbCcDd"]},
+            states=[LinkFacet(value=UNTRACKED, count=2918), LinkFacet(value="library", count=1)],
+        )
+    )
+    (group,) = [row for row in view["facets"] if row["heading"] == "State"]
+
+    assert [chip["label"] for chip in group["chips"]] == ["new", "in library"]
+    assert [chip["count"] for chip in group["chips"]] == ["2,918", "1"]
+    assert "state=%28new%29" in group["chips"][0]["url"]
+    assert "state=library" in group["chips"][1]["url"]
+
+
+def test_the_chip_you_are_standing_on_leads_back_to_the_whole_crawl() -> None:
+    view = make_link_view(
+        make_stateful_page(
+            {LinkState.IN_LIBRARY: ()},
+            query=LinkQuery(state="library"),
+            states=[LinkFacet(value="library", count=1)],
+        )
+    )
+    (group,) = [row for row in view["facets"] if row["heading"] == "State"]
+
+    assert group["chips"][0]["active"] is True
+    assert "state=" not in group["chips"][0]["url"]
+
+
+def test_the_state_filter_survives_a_search() -> None:
+    """It travels as a hidden field, so typing a search does not undo it."""
+    view = make_link_view(
+        make_stateful_page({LinkState.IN_LIBRARY: ()}, query=LinkQuery(state=UNTRACKED))
+    )
+
+    assert view["state"] == UNTRACKED
+
+
+def test_queueing_every_match_carries_the_state_it_is_looking_at() -> None:
+    """The filter goes in the action, so the button queues what is on screen."""
+    view = make_link_view(
+        make_stateful_page({LinkState.IN_LIBRARY: ()}, query=LinkQuery(state=UNTRACKED))
+    )
+
+    assert "state=%28new%29" in view["matches_action"]
+
+
+def test_a_state_nobody_named_is_shown_as_itself() -> None:
+    """Adding a member must not be able to take the report down with it."""
+    view = make_link_view(
+        make_stateful_page({LinkState.IN_LIBRARY: ()}, states=[LinkFacet(value="hash", count=4)])
+    )
+    (group,) = [row for row in view["facets"] if row["heading"] == "State"]
+
+    assert group["chips"][0]["label"] == "hash"
+
+
+# --- folding a panel away ------------------------------------------------------
+
+
+def test_every_panel_starts_open() -> None:
+    panels = panel_view(frozenset(), base=BASE)
+
+    assert set(panels) == set(PANELS)
+    assert all(panel["is_open"] for panel in panels.values())
+    assert all(panel["label"] == "Collapse" for panel in panels.values())
+
+
+def test_a_folded_panel_says_so_and_offers_the_way_back() -> None:
+    panels = panel_view(frozenset({"pages"}), base=BASE)
+
+    assert panels["pages"]["is_open"] is False
+    assert panels["pages"]["label"] == "Expand"
+    assert panels["pages"]["url"] == f"{BASE}#pages"
+    assert panels["links"]["url"] == f"{BASE}?shut=pages%2Clinks#links"
+
+
+def test_folding_a_panel_leaves_everything_else_where_it_was() -> None:
+    """Filtering, sorting, paging and columns all outlive a fold."""
+    panels = panel_view(
+        frozenset(), base=BASE, carry={"plugin": "mega", "sort": "url", "hide": "source"}
+    )
+
+    assert panels["pages"]["url"] == (f"{BASE}?plugin=mega&sort=url&hide=source&shut=pages#pages")
+
+
+def test_a_link_lands_on_the_panel_it_just_changed() -> None:
+    """A control that scrolls away from itself is one nobody uses twice."""
+    panels = panel_view(frozenset(), base=BASE)
+
+    for name, panel in panels.items():
+        assert panel["url"].endswith(f"#{name}")
+
+
+def test_an_untouched_report_writes_no_fold_state() -> None:
+    """The default is nothing in the URL, the same way every other default is."""
+    panels = panel_view(frozenset({"summary"}), base=BASE)
+
+    assert panels["summary"]["url"] == f"{BASE}#summary"
+
+
+def test_the_panels_are_written_in_the_order_they_appear() -> None:
+    """So one report has one URL, whichever order the folds were clicked in."""
+    panels = panel_view(frozenset({"links", "summary"}), base=BASE)
+
+    assert "shut=summary%2Cpages%2Clinks" in panels["pages"]["url"]
+
+
+# --- what the top bar says about the queue ------------------------------------
+
+
+def test_an_idle_queue_leaves_the_top_bar_alone() -> None:
+    assert queue_strip(QueueTally(running=0, waiting=0, failed=0)) is None
+
+
+def test_a_busy_queue_says_what_it_is_doing() -> None:
+    strip = queue_strip(QueueTally(running=1, waiting=1291, failed=0))
+
+    assert [part["text"] for part in strip["parts"]] == ["1 downloading", "1,291 waiting"]
+    assert [part["tone"] for part in strip["parts"]] == ["busy", "idle"]
+    assert strip["url"] == "/downloads"
+
+
+def test_a_part_that_is_zero_is_not_written() -> None:
+    strip = queue_strip(QueueTally(running=0, waiting=4, failed=0))
+
+    assert [part["text"] for part in strip["parts"]] == ["4 waiting"]
+
+
+def test_failures_are_said_once_there_is_nothing_left_to_do() -> None:
+    """The one thing about a finished queue somebody would otherwise miss."""
+    strip = queue_strip(QueueTally(running=0, waiting=0, failed=2))
+
+    assert [part["text"] for part in strip["parts"]] == ["2 failed"]
+    assert strip["parts"][0]["tone"] == "bad"
+
+
+def test_a_paused_queue_says_so_even_with_nothing_in_it() -> None:
+    strip = queue_strip(QueueTally(running=0, waiting=0, failed=0, is_paused=True))
+
+    assert [part["text"] for part in strip["parts"]] == ["paused"]
+
+
+def test_paused_comes_last_because_it_is_the_reason_for_the_rest() -> None:
+    strip = queue_strip(QueueTally(running=0, waiting=3, failed=1, is_paused=True))
+
+    assert [part["text"] for part in strip["parts"]] == ["3 waiting", "1 failed", "paused"]
+
+
+def test_the_strip_wears_only_tones_the_stylesheet_knows() -> None:
+    strip = queue_strip(QueueTally(running=1, waiting=1, failed=1, is_paused=True))
+
+    assert {part["tone"] for part in strip["parts"]} <= {"idle", "busy", "good", "warn", "bad"}
+
+
+# --- what the queue page keeps watching ---------------------------------------
+
+
+def make_queue_snapshot(**overrides: object) -> QueueSnapshot:
+    """Return what a queue holds, with no queue behind it."""
+    values: dict[str, object] = {"active": None, "waiting": (), "finished": ()}
+    values.update(overrides)
+    return QueueSnapshot(**values)  # type: ignore[arg-type]
+
+
+def test_a_queue_with_nothing_left_to_do_is_not_watched() -> None:
+    """A page that cannot change again has no reason to ask whether it did."""
+    assert queue_follow(make_queue_snapshot()) is None
+
+
+def test_a_running_transfer_is_what_the_page_listens_to() -> None:
+    follow = queue_follow(make_queue_snapshot(active=make_download_snapshot()))
+
+    assert follow["stream"] == "/downloads/d1/events"
+    assert follow["swap"] == "/downloads?part=queue"
+    assert follow["into"] == "queue"
+
+
+def test_the_moment_between_two_transfers_is_asked_about_rather_than_listened_to() -> None:
+    """The one case this exists for.
+
+    The transfer that ended is finished and the next has not been picked up, so
+    there is no stream — and a page that read that as "nothing left to do" would
+    stop following a batch at whichever file lost the race.
+    """
+    follow = queue_follow(
+        make_queue_snapshot(
+            active=make_download_snapshot(summary=make_summary()),
+            waiting=(make_download_snapshot(),),
+        )
+    )
+
+    assert follow["stream"] is None
+    assert follow["swap"] == "/downloads?part=queue"
+
+
+def test_a_queue_with_something_waiting_and_nothing_running_asks_again() -> None:
+    """The same gap, seen from the other side: the worker has not started yet."""
+    follow = queue_follow(make_queue_snapshot(waiting=(make_download_snapshot(),)))
+
+    assert follow["stream"] is None
+    assert follow["into"] == "queue"
+
+
+def test_a_paused_queue_is_not_watched_because_nothing_will_start() -> None:
+    """Resuming is a form submission, and a form submission is a page load."""
+    snapshot = make_queue_snapshot(waiting=(make_download_snapshot(),), is_paused=True)
+
+    assert queue_follow(snapshot) is None
+
+
+# --- how far along the whole queue is ------------------------------------------
+
+
+def make_queue_view(**overrides: object) -> dict[str, Any]:
+    """Return what the queue page shows, for a queue in some state."""
+    return queue_view(make_queue_snapshot(**overrides), limit=500)
+
+
+def test_the_bar_measures_what_is_done_against_what_is_known() -> None:
+    view = make_queue_view(
+        departed=Departed(count=40, succeeded=40),
+        finished=(make_download_snapshot(summary=make_summary()),),
+        waiting=tuple(make_download_snapshot() for _ in range(159)),
+    )
+
+    assert view["done"] == "41"
+    assert view["known"] == "200"
+    assert view["progress_percent"] == 20
+    assert view["has_progress"] is True
+
+
+def test_a_queue_with_anything_left_in_it_never_reads_as_finished() -> None:
+    """Rounded down, so the last file finishing is what puts it at a hundred."""
+    view = make_queue_view(
+        departed=Departed(count=999, succeeded=999), waiting=(make_download_snapshot(),)
+    )
+
+    assert view["progress_percent"] == 99
+
+
+def test_a_queue_nobody_has_used_shows_no_bar_at_all() -> None:
+    view = make_queue_view()
+
+    assert view["has_progress"] is False
+    assert view["progress_percent"] == 0
+
+
+def test_a_queue_that_has_moved_nothing_states_no_rate() -> None:
+    """A number divided out of no time at all is not a measurement."""
+    view = make_queue_view(waiting=(make_download_snapshot(),))
+
+    assert view["rate"] is None
+
+
+def test_the_rate_is_measured_once_there_is_something_to_divide() -> None:
+    view = make_queue_view(
+        finished=(make_download_snapshot(written=1_000_000, summary=make_summary()),)
+    )
+
+    assert view["rate"] == "80.0 KB/s"
+
+
+def test_one_thing_left_to_try_is_the_rows_own_business() -> None:
+    """A second button doing what the one beside it does teaches nothing."""
+    view = make_queue_view(
+        finished=(make_download_snapshot(summary=make_summary(status=DownloadStatus.FAILED)),)
+    )
+
+    assert view["can_retry_all"] is False
+    assert view["unarrived"] == "1"
+
+
+def test_a_stopped_request_is_counted_into_the_button_that_would_take_it() -> None:
+    """So nobody discovers afterwards what "everything" turned out to include."""
+    view = make_queue_view(
+        finished=(
+            make_download_snapshot(summary=make_summary(status=DownloadStatus.FAILED)),
+            make_download_snapshot(summary=make_summary(status=DownloadStatus.CANCELLED)),
+            make_download_snapshot(summary=make_summary()),
+        )
+    )
+
+    assert view["can_retry_all"] is True
+    assert view["unarrived"] == "2"
+
+
+def test_the_button_counts_rows_rather_than_the_total_it_cannot_act_on() -> None:
+    """A run evicted an hour ago has no URL left, and no row offering one."""
+    view = make_queue_view(
+        departed=Departed(count=40, failed=40),
+        finished=(make_download_snapshot(summary=make_summary(status=DownloadStatus.FAILED)),),
+    )
+
+    assert view["failed"] == "41"
+    assert view["unarrived"] == "1"
+
+
+# --- the way back from a batch ------------------------------------------------
+
+
+def test_a_batch_is_told_to_come_back_to_this_exact_view() -> None:
+    view = make_link_view(
+        make_link_page(query=LinkQuery(plugin="mega", search="share")), hidden=["source"]
+    )
+
+    assert view["return_to"] == f"{BASE}?q=share&plugin=mega&hide=source#links"
+
+
+def test_a_report_reached_any_other_way_says_nothing_about_a_batch() -> None:
+    assert make_link_view(make_link_page())["queued"] is None
+
+
+def test_a_batch_that_went_through_whole_says_only_that() -> None:
+    view = link_view(make_link_page(), base=BASE, queued=QueuedBatch(queued=1291))
+
+    assert view["queued"]["sentence"] == "1,291 links queued."
+    assert view["queued"]["notes"] == ()
+
+
+def test_one_link_is_not_called_links() -> None:
+    view = link_view(make_link_page(), base=BASE, queued=QueuedBatch(queued=1))
+
+    assert view["queued"]["sentence"] == "1 link queued."
+
+
+def test_a_batch_that_went_through_partly_names_the_remainder() -> None:
+    """ "150 queued" alone leaves somebody to find the other fifty by counting."""
+    view = link_view(
+        make_link_page(), base=BASE, queued=QueuedBatch(queued=150, rejected=2, no_room=48)
+    )
+
+    assert view["queued"]["sentence"] == "150 links queued."
+    assert view["queued"]["notes"] == (
+        "48 did not fit — the queue is full.",
+        "2 could not be fetched by the providers installed here.",
+    )
+
+
+def test_a_batch_that_queued_nothing_at_all_says_so() -> None:
+    view = link_view(make_link_page(), base=BASE, queued=QueuedBatch(queued=0))
+
+    assert view["queued"]["sentence"] == "Nothing was queued."
+
+
+def test_a_confirmation_is_owned_by_neither_table() -> None:
+    """Which is what makes it last one page: nothing carries it forward."""
+    assert not TRANSIENT_PARAMS & LINK_PARAMS
+    assert not TRANSIENT_PARAMS & PAGE_PARAMS
+
+
+def test_nothing_a_link_is_built_from_can_carry_a_confirmation() -> None:
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
+    built = [view["action"], view["reset_url"], view["matches_action"], view["return_to"]]
+
+    assert all(param not in url for url in built for param in TRANSIENT_PARAMS)
 
 
 # --- the label tables --------------------------------------------------------
@@ -905,6 +1398,12 @@ def test_every_state_has_a_label_and_a_tone() -> None:
         assert state in STATE_TONES
 
 
+def test_every_link_state_has_a_label_and_a_tone() -> None:
+    for state in [*LinkState, UNTRACKED]:
+        assert state in LINK_STATE_LABELS
+        assert state in LINK_STATE_TONES
+
+
 def test_every_link_kind_has_a_label() -> None:
     for kind in LinkKind:
         assert kind in KIND_LABELS
@@ -913,6 +1412,7 @@ def test_every_link_kind_has_a_label() -> None:
 def test_the_tones_stay_a_small_fixed_set() -> None:
     """CSS decides colour; this only decides which of four classes applies."""
     assert set(STATE_TONES.values()) <= {"idle", "busy", "good", "warn", "bad"}
+    assert set(LINK_STATE_TONES.values()) <= {"idle", "busy", "good", "warn", "bad"}
 
 
 # --- recorded crawls ---------------------------------------------------------

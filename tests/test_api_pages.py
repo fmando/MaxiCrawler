@@ -194,6 +194,52 @@ def test_the_page_you_are_on_is_marked(tmp_path: Path, path: str, label: str) ->
     assert body.count('class="active"') == 1
 
 
+def test_an_idle_installation_has_no_strip_in_the_top_bar(tmp_path: Path) -> None:
+    """A top bar only grows when there is something in it worth crossing to."""
+    with client(tmp_path) as test_client:
+        assert 'class="queue-strip"' not in test_client.get("/").text
+
+
+@pytest.mark.parametrize("path", ["/", "/crawls", "/library", "/settings"])
+def test_a_queued_download_is_visible_from_anywhere(tmp_path: Path, path: str) -> None:
+    """The point of it: navigating away no longer means losing track."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        test_client.app.state.downloads.pause()  # type: ignore[attr-defined]
+        test_client.post("/downloads", data={"url": MEGA_URL}, follow_redirects=False)
+
+        body = test_client.get(path).text
+
+        assert 'class="queue-strip"' in body
+        assert "1 waiting" in body
+        assert "paused" in body
+
+
+def test_the_queue_page_does_not_count_itself(tmp_path: Path) -> None:
+    """A strip above the table listing the same runs is the numbers twice.
+
+    Asserted from both sides on purpose. The chrome and the queue page each
+    hand the layout something about the queue, and a name they shared would
+    make one of them silently win — which looks like a missing strip from here
+    and like an empty one from the page.
+    """
+    with client(tmp_path, provider=make_provider()) as test_client:
+        test_client.app.state.downloads.pause()  # type: ignore[attr-defined]
+        test_client.post("/downloads", data={"url": MEGA_URL}, follow_redirects=False)
+
+        body = test_client.get("/downloads").text
+
+        assert 'class="queue-strip"' not in body
+        assert "Waiting" in body  # the queue's own table, still built from its own context
+
+
+def test_the_strip_leads_to_the_queue(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        test_client.app.state.downloads.pause()  # type: ignore[attr-defined]
+        test_client.post("/downloads", data={"url": MEGA_URL}, follow_redirects=False)
+
+        assert '<a class="queue-strip" href="/downloads">' in test_client.get("/").text
+
+
 def test_the_layout_carries_the_version(tmp_path: Path) -> None:
     with client(tmp_path) as test_client:
         assert __version__ in test_client.get("/").text
@@ -929,6 +975,113 @@ def test_the_link_table_puts_mega_above_the_generic_links(tmp_path: Path) -> Non
     assert links.index(">mega</td>") < links.index(">generic</td>")
 
 
+# --- what the report already knows about a link -------------------------------
+
+
+def link_rows_of(body: str) -> list[str]:
+    """Return the rows of the discovered-link table, as HTML."""
+    return body.split("Discovered links", 1)[1].split("<tbody>", 1)[1].split("</tr>")
+
+
+def row_of(body: str, url: str) -> str:
+    """Return the one row of the link table that shows *url*.
+
+    Unpacked rather than indexed, so a URL that turned out to name two rows
+    fails here instead of quietly asserting about whichever came first.
+    """
+    (row,) = [row for row in link_rows_of(body) if url in row]
+    return row
+
+
+def test_a_link_nothing_is_known_about_is_marked_new(tmp_path: Path) -> None:
+    """Every row says something. A blank cell would be a third meaning."""
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = wait_until_finished(test_client, start(test_client, base))
+
+    links = body.split("Discovered links", 1)[1]
+    headings = links.split("<thead>", 1)[1].split("</thead>", 1)[0]
+    assert "State" in headings
+    assert links.count(">new</span>") == 3
+
+
+def test_a_link_whose_file_is_stored_says_so(tmp_path: Path) -> None:
+    """The point of the whole sprint: a second crawl shows what you already have."""
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        finished_download(test_client, f"{base}/a")
+        body = test_client.get(f"/crawls/{job_id}").text
+
+    assert ">in library</span>" in row_of(body, f"{base}/a")
+    assert ">new</span>" in row_of(body, f"{base}/i.png")
+
+
+def test_a_link_waiting_to_be_fetched_says_that_instead(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        test_client.app.state.downloads.pause()  # type: ignore[attr-defined]
+        test_client.post("/downloads", data={"url": f"{base}/a"}, follow_redirects=False)
+        body = test_client.get(f"/crawls/{job_id}").text
+
+    assert ">in queue</span>" in row_of(body, f"{base}/a")
+    assert ">new</span>" in row_of(body, f"{base}/i.png")
+
+
+def test_the_states_are_offered_as_chips_over_the_whole_crawl(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        finished_download(test_client, f"{base}/a")
+        body = test_client.get(f"/crawls/{job_id}").text
+
+    chips = body.split("Discovered links", 1)[1].split("<details", 1)[0]
+    assert "state=%28new%29" in chips
+    assert "state=library" in chips
+
+
+def test_a_report_can_be_narrowed_to_what_is_not_known_yet(tmp_path: Path) -> None:
+    """One click from "here is everything" to "here is what is left"."""
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        finished_download(test_client, f"{base}/a")
+        body = test_client.get(f"/crawls/{job_id}?state=%28new%29").text
+
+    assert f"{base}/i.png" in body
+    assert ">in library</span>" not in body
+
+
+def test_a_report_can_be_narrowed_to_what_is_already_stored(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        finished_download(test_client, f"{base}/a")
+        body = test_client.get(f"/crawls/{job_id}?state=library").text
+
+    assert ">in library</span>" in body
+    assert f"{base}/i.png" not in body.split("Discovered links", 1)[1].split("<tbody>", 1)[1]
+
+
+def test_a_state_this_installation_cannot_answer_filters_nothing(tmp_path: Path) -> None:
+    """A stale bookmark must not render "this crawl found nothing"."""
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        body = test_client.get(f"/crawls/{job_id}?state=checksum").text
+
+    assert body.split("Discovered links", 1)[1].count(">new</span>") == 3
+
+
+def test_the_state_filter_survives_a_search(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        body = test_client.get(f"/crawls/{job_id}?state=library").text
+
+    assert '<input type="hidden" name="state" value="library">' in body
+
+
 # --- navigating the report ---------------------------------------------------
 
 
@@ -956,7 +1109,108 @@ def test_the_breakdowns_fold_away(tmp_path: Path) -> None:
         body = wait_until_finished(test_client, start(test_client, base))
 
     assert "<summary>How links were written</summary>" in body
-    assert "<script" not in body
+    # The folding is <details>, and nothing scripts it open. Named rather than
+    # asserted as "no script at all", which stopped meaning that when the link
+    # table grew an extra of its own: the list is what says which one is here.
+    assert re.findall(r'<script src="([^"]+)"', body) == ["/static/select.js"]
+
+
+def headings_of(body: str) -> str:
+    """Return the link table's own heading row.
+
+    Split at the panel first: the page table above it has a ``<thead>`` too, and
+    reaching for the first one on the page finds that one.
+    """
+    links = body.split("Discovered links", 1)[1]
+    return links.split("<thead>", 1)[1].split("</thead>", 1)[0]
+
+
+def test_what_a_link_was_written_as_is_its_own_column(tmp_path: Path) -> None:
+    """One line per row where it used to be two, and turned off in one click."""
+    site = Site()
+    site.add_html("/", '<a href="/A?b=1">a</a>')
+    site.add_html("/A", "<p>x</p>")
+
+    with recording_client(tmp_path) as test_client, serve(site) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        shown = test_client.get(f"/crawls/{job_id}").text
+        hidden = test_client.get(f"/crawls/{job_id}?hide=raw").text
+
+    assert "as written:" not in shown  # the old second line is gone
+    assert "As written" in headings_of(shown)
+    # Gone from the table, and still offered back by the Columns control --
+    # a toggle that vanished with the column would be a one-way door.
+    assert "As written" not in headings_of(hidden)
+    assert "As written" in hidden.split('<details class="toggles">', 1)[1]
+
+
+def test_a_url_nobody_rewrote_says_so_in_that_column(tmp_path: Path) -> None:
+    """A blank would be the reader's job to interpret; the em dash is not."""
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        body = test_client.get(f"/crawls/{job_id}").text
+
+    assert '<td class="url muted small">—</td>' in body
+
+
+def test_a_panel_can_be_folded_away_and_stays_folded(tmp_path: Path) -> None:
+    """The point of the URL rather than a <details>: it survives the next click."""
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        body = test_client.get(f"/crawls/{job_id}?shut=pages").text
+
+    assert "<th>Title</th>" not in body  # the page table's own heading row
+    assert '<section class="panel" id="pages">' in body  # but the panel is still there
+    assert "Discovered links" in body
+
+
+def test_a_folded_panel_keeps_its_heading_and_its_count(tmp_path: Path) -> None:
+    """Otherwise folding it would be hiding what is in there rather than the rows."""
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        body = test_client.get(f"/crawls/{job_id}?shut=links").text
+
+    links = body.split('id="links"', 1)[1]
+    assert "3 unique" in links
+    assert ">Expand</a>" in links
+    assert "Queue selected" not in body
+
+
+def test_folding_a_panel_leaves_the_filter_beside_it_alone(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        body = test_client.get(f"/crawls/{job_id}?plugin=mega").text
+
+    found = re.search(r'<a class="fold-panel" href="([^"]+)">Collapse</a>', body)
+    assert found is not None
+    assert "plugin=mega" in found.group(1)
+
+
+def test_the_fold_of_every_panel_travels_in_one_parameter(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        response = test_client.get(f"/crawls/{job_id}?shut=summary,pages,links")
+
+    assert response.status_code == 200
+    assert "Pages read" not in response.text
+    assert "<th>Title</th>" not in response.text
+    assert "Queue selected" not in response.text
+
+
+def test_a_panel_nobody_recognises_is_ignored(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        body = test_client.get(f"/crawls/{job_id}?shut=nonsense").text
+
+    assert "Discovered links" in body
+    assert "Pages read" in body
 
 
 def test_a_report_can_be_filtered_by_plugin(tmp_path: Path) -> None:
@@ -1173,7 +1427,11 @@ def test_a_finished_crawl_offers_no_stop_button(tmp_path: Path) -> None:
         body = wait_until_finished(test_client, start(test_client, base))
 
     assert "Stop</button>" not in body
-    assert "<script" not in body
+    # And nothing live behind it: no stream to reconnect to, and nothing that
+    # would. The link table's own extra is not that, which is why this names
+    # what must be absent rather than forbidding scripts outright.
+    assert 'id="crawl-live"' not in body
+    assert "/static/crawl.js" not in body
 
 
 def test_a_crawl_that_recorded_nothing_says_so_rather_than_showing_nothing(

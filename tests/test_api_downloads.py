@@ -85,6 +85,7 @@ def registry(
 
 
 THIRD_URL = f"https://mega.nz/file/IiJjKkLl#{KEY}"
+FOURTH_URL = f"https://mega.nz/file/MmNnOoPp#{KEY}"
 
 
 def bare(url: str) -> str:
@@ -279,6 +280,137 @@ def test_the_run_never_learns_the_key(tmp_path: Path) -> None:
     assert run.url == "https://mega.nz/file/AaBbCcDd"
     assert KEY not in json.dumps(download_payload(snapshot))
     assert KEY not in repr(snapshot)
+
+
+# --- which of these URLs is in the queue ---------------------------------------
+
+
+def test_a_waiting_request_puts_its_url_in_the_queue(tmp_path: Path) -> None:
+    with paused(tmp_path) as runs:
+        runs.submit(FILE_URL)
+
+        assert runs.pending([FILE_URL, OTHER_URL]) == frozenset({FILE_URL})
+
+
+def test_the_running_transfer_counts_as_queued_too(tmp_path: Path) -> None:
+    """Being worked on is not having left the line; it is the front of it."""
+    provider = BlockingProvider()
+    with registry(tmp_path, provider) as runs:
+        runs.submit(FILE_URL)
+        assert provider.transferring.wait(timeout=10.0)
+
+        assert runs.pending([FILE_URL]) == frozenset({FILE_URL})
+
+        provider.release.set()
+
+
+def test_a_finished_transfer_has_left_the_queue(tmp_path: Path) -> None:
+    """It is in the library now, which is a different state and a different mark."""
+    with registry(tmp_path) as runs:
+        run = runs.submit(FILE_URL)
+        wait_for(run)
+
+        assert runs.pending([FILE_URL]) == frozenset()
+
+
+def test_the_url_comes_back_with_the_key_it_arrived_with(tmp_path: Path) -> None:
+    """A run is stored without a fragment; the caller's link still needs one."""
+    with paused(tmp_path) as runs:
+        runs.submit(FILE_URL)
+
+        assert runs.pending([FILE_URL]) == frozenset({FILE_URL})
+        assert KEY in next(iter(runs.pending([FILE_URL])))
+
+
+def test_the_same_file_under_a_different_key_is_still_the_queued_one(tmp_path: Path) -> None:
+    with paused(tmp_path) as runs:
+        runs.submit(FILE_URL)
+        asked = f"{bare(FILE_URL)}#Zz{KEY[2:]}"
+
+        assert runs.pending([asked]) == frozenset({asked})
+
+
+def test_asking_about_nothing_asks_the_queue_nothing(tmp_path: Path) -> None:
+    with paused(tmp_path) as runs:
+        runs.submit(FILE_URL)
+
+        assert runs.pending([]) == frozenset()
+
+
+# --- counting without looking at everything ------------------------------------
+
+
+def test_an_idle_queue_has_nothing_worth_saying(tmp_path: Path) -> None:
+    with registry(tmp_path) as runs:
+        tally = runs.tally()
+
+        assert tally.remaining == 0
+        assert tally.is_busy is False
+        assert tally.is_worth_saying is False
+
+
+def test_waiting_requests_are_counted(tmp_path: Path) -> None:
+    with paused(tmp_path) as runs:
+        runs.submit(FILE_URL)
+        runs.submit(OTHER_URL)
+
+        tally = runs.tally()
+
+        assert (tally.waiting, tally.running) == (2, 0)
+        assert tally.remaining == 2
+        assert tally.is_worth_saying is True
+
+
+def test_the_running_one_is_counted_apart_from_the_waiting(tmp_path: Path) -> None:
+    provider = BlockingProvider()
+    with registry(tmp_path, provider) as runs:
+        runs.submit(FILE_URL)
+        assert provider.transferring.wait(timeout=10.0)
+        runs.submit(OTHER_URL)
+
+        tally = runs.tally()
+
+        assert (tally.running, tally.waiting) == (1, 1)
+        assert tally.remaining == 2
+
+        provider.release.set()
+
+
+def test_a_failure_is_counted_after_the_queue_is_empty_again(tmp_path: Path) -> None:
+    """Which is the whole reason a page elsewhere mentions the queue at all."""
+    with registry(tmp_path, StubProvider("mega", url_prefix="https://mega.nz/")) as runs:
+        wait_for(runs.submit(FILE_URL))
+
+        tally = runs.tally()
+
+        assert tally.failed == 1
+        assert tally.is_busy is False
+        assert tally.is_worth_saying is True
+
+
+def test_a_paused_queue_is_worth_saying_even_with_nothing_in_it(tmp_path: Path) -> None:
+    """It is the answer to "why is nothing happening", asked of an empty queue."""
+    with paused(tmp_path) as runs:
+        assert runs.tally().is_worth_saying is True
+
+
+def test_the_tally_and_the_snapshot_never_disagree(tmp_path: Path) -> None:
+    """Two readings of one queue is one bug waiting for a slow afternoon."""
+    provider = BlockingProvider()
+    with registry(tmp_path, provider) as runs:
+        runs.submit(FILE_URL)
+        assert provider.transferring.wait(timeout=10.0)
+        runs.submit(OTHER_URL)
+
+        tally = runs.tally()
+        snapshot = runs.snapshot()
+
+        assert tally.remaining == snapshot.remaining
+        assert tally.waiting == len(snapshot.waiting)
+        assert tally.failed == snapshot.failed
+        assert tally.is_paused == snapshot.is_paused
+
+        provider.release.set()
 
 
 # --- watching it --------------------------------------------------------------
@@ -727,6 +859,153 @@ def test_a_queue_that_never_downloads_starts_no_thread(tmp_path: Path) -> None:
         assert {thread.name for thread in enumerate_threads()} == before
     finally:
         runs.shutdown()
+
+
+# --- totals that outlive the rows they were counted from -----------------------
+
+
+def drain(runs: TransferQueue, *urls: str) -> None:
+    """Put each URL through the queue, one after the other."""
+    for url in urls:
+        wait_for(runs.submit(url))
+
+
+def test_a_total_survives_the_rows_it_was_counted_from(tmp_path: Path) -> None:
+    """Eviction must not quietly reset a number nobody asked it to reset."""
+    with registry(tmp_path, retain=1) as runs:
+        drain(runs, FILE_URL, OTHER_URL, THIRD_URL, FOURTH_URL)
+
+        snapshot = runs.snapshot()
+
+    assert len(snapshot.finished) == 2  # what is left to look at
+    assert snapshot.succeeded == 4  # what actually happened
+    assert snapshot.done == 4
+    assert snapshot.known == 4
+    assert snapshot.bytes_written == 4 * len(PAYLOAD)
+
+
+def test_the_tally_counts_failures_whose_rows_are_gone(tmp_path: Path) -> None:
+    """The top bar says "4 failed" or it is not worth putting on every page."""
+    provider = StubProvider("mega", url_prefix="https://mega.nz/")
+    with registry(tmp_path, provider, retain=1) as runs:
+        drain(runs, FILE_URL, OTHER_URL, THIRD_URL, FOURTH_URL)
+
+        assert runs.tally().failed == 4
+
+
+def test_what_is_still_to_come_is_counted_in_as_well(tmp_path: Path) -> None:
+    with paused(tmp_path) as runs:
+        runs.submit(FILE_URL)
+        runs.submit(OTHER_URL)
+
+        snapshot = runs.snapshot()
+
+    assert (snapshot.done, snapshot.known) == (0, 2)
+
+
+def test_time_spent_waiting_is_not_time_spent_transferring(tmp_path: Path) -> None:
+    """A queue that sat paused overnight did not get slower while it was paused."""
+    provider = BlockingProvider()
+    with registry(tmp_path, provider) as runs:
+        running = runs.submit(FILE_URL)
+        assert provider.transferring.wait(timeout=10)
+        runs.submit(OTHER_URL)
+        sleep(0.05)
+
+        snapshot = runs.snapshot()
+
+        assert snapshot.active is not None
+        assert snapshot.transfer_seconds == pytest.approx(snapshot.active.elapsed_seconds)
+
+        provider.release.set()
+        wait_for(running)
+
+
+# --- trying everything again, and forgetting it --------------------------------
+
+
+def test_everything_that_did_not_arrive_is_queued_again_at_once(tmp_path: Path) -> None:
+    with paused(tmp_path) as runs:
+        first = runs.submit(FILE_URL)
+        second = runs.submit(OTHER_URL)
+        runs.cancel(first.id)
+        runs.cancel(second.id)
+
+        accepted = runs.retry_all()
+
+        assert accepted.queued == 2
+        # Oldest first, so what comes back keeps the order it had.
+        assert waiting_urls(runs) == [bare(FILE_URL), bare(OTHER_URL)]
+
+
+def test_a_stopped_request_is_one_of_the_things_that_did_not_arrive(tmp_path: Path) -> None:
+    """The same set the rows offer: in all of them the file is not there."""
+    with registry(tmp_path) as runs:
+        drain(runs, FILE_URL)
+        runs.pause()
+        removed = runs.submit(OTHER_URL)
+        runs.cancel(removed.id)
+
+        accepted = runs.retry_all()
+
+    assert accepted.queued == 1
+    assert accepted.runs[0].url == bare(OTHER_URL)
+
+
+def test_trying_everything_again_takes_what_fits_and_says_what_did_not(
+    tmp_path: Path,
+) -> None:
+    with paused(tmp_path, limit=2) as runs:
+        first = runs.submit(FILE_URL)
+        second = runs.submit(OTHER_URL)
+        runs.cancel(first.id)
+        runs.cancel(second.id)
+        runs.submit(THIRD_URL)
+
+        accepted = runs.retry_all()
+
+    assert accepted.queued == 1
+    assert accepted.no_room == 1
+
+
+def test_clearing_the_history_leaves_the_work_alone(tmp_path: Path) -> None:
+    with paused(tmp_path) as runs:
+        removed = runs.submit(FILE_URL)
+        runs.cancel(removed.id)
+        still_waiting = runs.submit(OTHER_URL)
+
+        forgotten = runs.forget_finished()
+        snapshot = runs.snapshot()
+
+    assert forgotten == 1
+    assert snapshot.finished == ()
+    assert [item.download_id for item in snapshot.waiting] == [still_waiting.id]
+
+
+def test_a_running_transfer_is_not_history(tmp_path: Path) -> None:
+    provider = BlockingProvider()
+    with registry(tmp_path, provider) as runs:
+        running = runs.submit(FILE_URL)
+        assert provider.transferring.wait(timeout=10)
+
+        assert runs.forget_finished() == 0
+        assert runs.snapshot().active is not None
+
+        provider.release.set()
+        wait_for(running)
+
+
+def test_clearing_the_history_clears_the_totals_over_it(tmp_path: Path) -> None:
+    """A readout saying "four stored" above an empty list describes nothing."""
+    with registry(tmp_path, retain=1) as runs:
+        drain(runs, FILE_URL, OTHER_URL, THIRD_URL, FOURTH_URL)
+
+        runs.forget_finished()
+        snapshot = runs.snapshot()
+
+    assert (snapshot.done, snapshot.known) == (0, 0)
+    assert snapshot.succeeded == 0
+    assert snapshot.bytes_written == 0
 
 
 # --- a batch at once -----------------------------------------------------------

@@ -339,8 +339,8 @@ become the primary one.
 ## ADR-023: Server-rendered HTML, and no build system
 
 Starlette and Jinja2 render the pages. There is no React, no bundler, no npm and
-no TypeScript; the browser loads one stylesheet and one script, both written by
-hand and served out of the package.
+no TypeScript; the browser loads one stylesheet and a handful of small scripts,
+all written by hand and served out of the package.
 
 That follows from what the thing is. This is an operator's console — tables,
 counters, a progress line, a report — closer to Grafana or Proxmox than to an
@@ -364,6 +364,11 @@ htmx was considered and its licence (0BSD) checked. It is deliberately not
 vendored yet: the routes already render standalone fragments, which is the
 expensive half of adopting it, and the cheap half can be added the day filters
 and sorting need it.
+
+ADR-038 revisits both paragraphs. A script replaces a region of the queue page
+now rather than only numbers inside it, which needs the rule stated as what a
+script may *not* do rather than as how little it does — and the htmx accounting
+is worth redoing once the cheap half has actually been paid for.
 
 ## ADR-024: A crawl the browser starts is a background job
 
@@ -1050,3 +1055,160 @@ installation fetch arbitrary files at all?"*, which an installation is entitled
 to decide in one place, and it withholds the transport rather than removing the
 provider so a registry keeps its shape. What keeps a download off this machine
 and this network is the private-network rule, which applies either way.
+
+## ADR-037: The library index is a cache, and only set questions may use it
+
+ADR-010 made the file system the authority and said an index might follow as a
+cache. It has, and the reason is a measurement rather than a preference: every
+listing read one metadata document per stored resource — about 0.3 seconds for
+two thousand entries warm, and roughly sixteen the first time a virus scanner
+saw them.
+
+`SQLiteLibraryIndex` is that cache. What keeps it from quietly becoming a second
+library is two rules, and both are enforced above it rather than inside it.
+
+**Only *set* questions may be answered from it.** A listing, and "is this URL
+among them?" — which is what the report's *in library* mark asks. A single entry
+is still read from its own directory. That is the whole of the safety argument:
+a stale row can delay a listing by one refresh and can never serve the wrong
+file, because nothing ever hands back a file on the strength of a row.
+
+**A row is trusted only while the document it was read from has the same
+modification time and size.** Every entry is `stat`-ed on every listing; only
+the documents that changed are parsed again. So the index is not a claim about
+what the library holds, it is a memory of what was read last time — and a
+library edited with a text editor, restored from a backup or repaired by hand
+corrects it on the next listing without anybody being told to rebuild anything.
+
+**The verbatim document is stored beside the extracted columns.** Extracting
+every member would mean the adapter knowing what a metadata document contains,
+which is the library's business and changes when it does (ADR-013). A document
+kept whole survives a release that adds a member, because the layer that
+understands it is the layer that reads it back.
+
+### `entry_id` exists and is deliberately empty
+
+The column is reserved so that writing an identity later is a write rather than
+a migration — `CREATE TABLE IF NOT EXISTS` does nothing at all to a table that
+already exists, so a column added after a release needs the appended-column
+handling `maxicrawler.database.crawls` shows.
+
+It is not written, and that was decided rather than deferred. A library entry
+already has a stable identity: `resource_key` is derived from the reference
+alone, never from a name, a size or a timestamp, so an entry keeps its place
+across renames, re-inspections and restarts. What a separate identity would add
+is *independence from the address* — one file reached through two share links, a
+provider that changes how it composes a resource id — and that is a feature
+nobody has designed here yet.
+
+A **random** identity would buy that independence at a price this design cannot
+pay: it would live only inside the metadata document, and it is therefore the
+one piece of state in the library that cannot be recomputed from the file
+system. A library restored from a backup would come back with different ids, and
+everything pointing at the old ones would dangle. That is exactly the property
+ADR-010 exists to prevent. It would also need a read before every write, because
+`DownloadManager` rebuilds the record on each status change — and an id that is
+re-minted whenever that read fails was not stable in the first place.
+
+A **derived** identity costs none of that and buys none of the independence
+either: derived from the same reference, it is a second name for the identity
+`resource_key` already is.
+
+The case that motivates the column is duplicates, and the natural anchor for
+duplicates is the **checksum** — which is address-independent *and* recomputable
+from the file, so it is ADR-010-shaped where a random id is not. `ContentRecord`
+records checksums already and the index has a column for one. So the column
+stays empty until the question that needs it is asked, and that question gets to
+choose the answer.
+
+## ADR-038: JavaScript is an extra, and what it is not allowed to decide
+
+ADR-023 said the interface is complete without JavaScript and that a script only
+saves you reloading. That held while there was one script writing numbers into a
+page. There are four now, and one of them replaces a whole region of the queue
+page, so "an extra" needs a sharper edge than a statement about how much code
+there is.
+
+**The rule is that a script decides nothing and formats nothing.**
+
+*Formats nothing*: every value written into a page was formatted by the same
+server code that rendered the page. `stream.download_payload` is literally
+`views.download_view` — the event frame carries "1 min 23 s" rather than 83,
+precisely so that there is no second implementation of that phrase living in
+JavaScript and free to disagree with the one a reload produces. The one number a
+script composes itself is the count in `select.js`, and it is admissible because
+the page size is fixed at two hundred: it can never reach the width at which the
+rest of the interface would group digits and this would not.
+
+*Decides nothing*: where to look next is written by the server into a data
+attribute. `download.js` reads three of them — which stream to listen to, where
+to ask when that stream ends, and where the answer goes — and the difference
+between the queue page and one download's page is which of them the server
+renders. The script does not know there are two pages.
+
+**A control that would not work is not rendered as if it would.** `copy.js` and
+`select.js` render their controls hidden and reveal them; a Copy button that
+copies nothing and a header checkbox that ticks nothing are worse than neither.
+
+**And nothing is reachable only through a script.** Every batch is a form, every
+reorder is a form, every fold is a link. What the scripts remove is two hundred
+clicks and two hundred page loads, not the two hundredth way of doing it.
+
+### Why still not htmx
+
+Its licence (0BSD) was checked and it was considered again here, because a
+fragment swap is exactly what it is for. The accounting came out the same way.
+
+- The expensive half of adopting it — routes that render standalone fragments —
+  was already done and remains done. `/downloads?part=queue` answers with the
+  same partial the page includes.
+- The cheap half cost about forty lines and no dependency, and those forty lines
+  hold something htmx would not have given for free: the three-state answer to
+  *what is left to follow*, where a missing stream between two transfers means
+  "ask again" rather than "stop".
+- Its server-sent-events support has already broken once between major versions
+  and now lives in a separately released repository, while `EventSource` is a
+  browser standard that will behave the same in ten years.
+
+The point at which this is worth reopening is filtering and sorting the crawl
+list, where the number of places that would each need their own small script
+starts to exceed the number of kilobytes htmx costs.
+
+## ADR-039: The way back from a batch
+
+Queueing a set from a report used to answer with the queue. That is the right
+answer to *"what did I just start?"* and the wrong one to what the person is
+actually doing, which is working through a filtered report — and losing the
+filter, the sort, the page and the columns in order to be told that forty things
+were queued is a worse trade than not being told at all.
+
+So a batch comes back to where it was queued from. The two controls arrive at
+that differently, and the asymmetry is the decision.
+
+**"Queue every fetchable match" rebuilds the way back on the server.** The
+filter it acts on is already in the form's action, and the filter that says
+*what* to queue is the same filter that says *which report* to return to. Two
+copies of one filter are two things that can disagree, and the copy a browser
+holds is the one that could be made to point somewhere else.
+
+**"Queue selected" is told, because it cannot be asked.** It posts a set of
+ticked URLs with no query string of its own, so the form carries a `back` field
+— and everything that comes back from a browser goes through `_our_path`, which
+accepts a path of ours and nothing else. A leading `//` is rejected along with
+everything that is not a path, because a browser reads `//elsewhere.test/` as
+another host, which is the one way a "go back afterwards" parameter turns into
+an open redirect.
+
+**The ticks do not come back, and are deliberately not restored.** The only way
+to carry them would be to put the URLs in a query string, which is the one place
+a share link's key must never go (ADR-020). What comes back instead is the rows
+saying *in queue* — the same information without the credential, and true of the
+ones somebody else queued too.
+
+**The confirmation lives in the URL and lasts exactly one page.** What a batch
+did is written into the redirect rather than kept in a session, because a
+redirect is the whole of what this server remembers between two requests — and
+because a confirmation that survived a reload would outlive being true. The
+parameters that carry it are named in `views.TRANSIENT_PARAMS` and dropped by
+the same function that carries every other parameter forward, so nothing has to
+remember that it has already shown one.

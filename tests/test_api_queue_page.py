@@ -106,6 +106,98 @@ def test_a_quiet_queue_streams_nothing(tmp_path: Path) -> None:
     assert "download.js" not in body
 
 
+# --- following a batch without reloading a page --------------------------------
+
+
+def test_the_panels_can_be_asked_for_without_the_page_around_them(tmp_path: Path) -> None:
+    """What makes following two hundred files cost two hundred small answers."""
+    with paused(tmp_path) as test_client:
+        submit(test_client, FIRST)
+
+        response = test_client.get("/downloads?part=queue")
+
+    assert response.status_code == 200
+    assert "Left to do" in response.text
+    assert waiting_labels(response.text) == ["https://mega.nz/file/AaBbCcDd"]
+    # No chrome, because the page it is going into already has all of it.
+    assert "<!DOCTYPE" not in response.text
+    assert "<nav>" not in response.text
+
+
+def test_the_panels_are_the_same_whether_they_arrive_alone_or_in_the_page(
+    tmp_path: Path,
+) -> None:
+    """One template, so a swapped page and a reloaded one cannot drift apart."""
+    with paused(tmp_path) as test_client:
+        submit(test_client, FIRST)
+
+        panels = test_client.get("/downloads?part=queue").text
+        whole = test_client.get("/downloads").text
+
+    assert panels.strip() in whole
+
+
+def test_the_panels_are_never_served_from_a_cache(tmp_path: Path) -> None:
+    """The one answer here asked for repeatedly at one URL while it changes."""
+    with paused(tmp_path) as test_client:
+        response = test_client.get("/downloads?part=queue")
+
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_a_part_nobody_knows_is_read_as_a_request_for_the_page(tmp_path: Path) -> None:
+    """Read leniently, the way every parameter of this interface is."""
+    with paused(tmp_path) as test_client:
+        body = test_client.get("/downloads?part=sideways").text
+
+    assert "<!DOCTYPE" in body
+    assert "Left to do" in body
+
+
+def test_the_running_page_says_where_to_ask_and_where_the_answer_goes(
+    tmp_path: Path,
+) -> None:
+    """Decided by the server. The script reads three attributes and no more."""
+    provider = BlockingProvider()
+    with client(tmp_path, provider=provider) as test_client:
+        submit(test_client, FIRST)
+        assert provider.transferring.wait(timeout=10)
+
+        body = test_client.get("/downloads").text
+        provider.release.set()
+
+    assert 'id="queue"' in body
+    assert 'data-swap="/downloads?part=queue"' in body
+    assert 'data-into="queue"' in body
+    assert "data-stream=" in body
+
+
+def test_a_downloads_own_page_asks_for_itself_rather_than_for_the_panels(
+    tmp_path: Path,
+) -> None:
+    """Where the file went and the way to the library are worth a page load."""
+    provider = BlockingProvider()
+    with client(tmp_path, provider=provider) as test_client:
+        download_id = submit(test_client, FIRST)
+        assert provider.transferring.wait(timeout=10)
+
+        body = test_client.get(f"/downloads/{download_id}").text
+        provider.release.set()
+
+    assert 'id="download-live"' in body
+    assert "data-swap" not in body
+
+
+def test_a_drained_queue_stops_watching_itself(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        submit(test_client, FIRST)
+
+        body = wait_until_quiet(test_client)
+
+    assert 'id="download-live"' not in body
+    assert "download.js" not in body
+
+
 def test_the_page_counts_what_is_left_and_what_arrived(tmp_path: Path) -> None:
     with client(tmp_path, provider=make_provider()) as test_client:
         submit(test_client, FIRST)
@@ -142,6 +234,117 @@ def test_the_navigation_names_the_queue_and_marks_it(tmp_path: Path) -> None:
         body = test_client.get("/downloads").text
 
     assert '<a href="/downloads" class="active">Downloads</a>' in body
+
+
+# --- how far along the whole queue is ------------------------------------------
+
+
+def test_the_page_says_how_much_of_the_queue_is_behind_it(tmp_path: Path) -> None:
+    with paused(tmp_path) as test_client:
+        submit(test_client, FIRST)
+        removed = submit(test_client, SECOND)
+        test_client.post(f"/downloads/{removed}/stop?back=/downloads")
+
+        body = test_client.get("/downloads").text
+
+    assert "1 of 2 finished" in body
+
+
+def test_a_queue_nobody_has_used_shows_no_bar(tmp_path: Path) -> None:
+    with client(tmp_path) as test_client:
+        body = test_client.get("/downloads").text
+
+    assert "finished" not in body
+    assert 'class="progress"' not in body
+
+
+def test_the_page_offers_no_estimate_of_how_much_longer(tmp_path: Path) -> None:
+    """A waiting request is uninspected: its size is not known, so no time is."""
+    with paused(tmp_path) as test_client:
+        submit(test_client, FIRST)
+        submit(test_client, SECOND)
+
+        body = test_client.get("/downloads").text
+
+    assert "0 of 2 finished" in body
+    # The one word the running transfer's own readout uses for an estimate.
+    assert "Remaining" not in body
+
+
+# --- the whole history at once -------------------------------------------------
+
+
+def stop_all(test_client: TestClient, *urls: str) -> list[str]:
+    """Queue each URL and take it straight back out, so the history has rows."""
+    identifiers = [submit(test_client, url) for url in urls]
+    for download_id in identifiers:
+        test_client.post(f"/downloads/{download_id}/stop?back=/downloads")
+    return identifiers
+
+
+def test_two_things_left_to_try_are_offered_in_one_button(tmp_path: Path) -> None:
+    with paused(tmp_path) as test_client:
+        stop_all(test_client, FIRST, SECOND)
+
+        body = test_client.get("/downloads").text
+
+    assert "Try all 2 again" in body
+    assert "/downloads/retry?back=/downloads" in body
+
+
+def test_one_thing_left_to_try_is_left_to_its_own_row(tmp_path: Path) -> None:
+    with paused(tmp_path) as test_client:
+        stop_all(test_client, FIRST)
+
+        body = test_client.get("/downloads").text
+
+    assert "Try all" not in body
+    assert "Try again" in body
+
+
+def test_trying_everything_again_puts_it_all_back_in_order(tmp_path: Path) -> None:
+    with paused(tmp_path) as test_client:
+        stop_all(test_client, FIRST, SECOND)
+
+        response = test_client.post("/downloads/retry?back=/downloads")
+
+        assert response.url.path == "/downloads"
+        assert waiting_labels(response.text) == [
+            "https://mega.nz/file/AaBbCcDd",
+            "https://mega.nz/file/EeFfGgHh",
+        ]
+
+
+def test_trying_everything_again_with_nothing_to_try_says_so(tmp_path: Path) -> None:
+    """Only reachable from a page that has since gone stale, and it answers."""
+    with paused(tmp_path) as test_client:
+        response = test_client.post("/downloads/retry?back=/downloads")
+
+    assert response.status_code == 409
+    assert "ended without the file arriving" in response.text
+
+
+def test_clearing_the_list_empties_the_history_and_its_counters(tmp_path: Path) -> None:
+    with paused(tmp_path) as test_client:
+        stop_all(test_client, FIRST, SECOND)
+
+        response = test_client.post("/downloads/clear?back=/downloads")
+
+    assert response.url.path == "/downloads"
+    assert "Finished" not in response.text
+    assert "Stopped" not in response.text
+
+
+def test_clearing_the_list_leaves_what_is_waiting_where_it_was(tmp_path: Path) -> None:
+    """The list got long; the work did not change."""
+    with paused(tmp_path) as test_client:
+        stop_all(test_client, FIRST)
+        submit(test_client, SECOND)
+
+        response = test_client.post("/downloads/clear?back=/downloads")
+
+    assert waiting_labels(response.text) == ["https://mega.nz/file/EeFfGgHh"]
+    assert "Try again" not in response.text
 
 
 # --- the ends of the line ------------------------------------------------------

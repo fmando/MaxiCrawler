@@ -16,8 +16,17 @@
     <span class="count">
       {% if pages.is_filtered %}{{ pages.total }} of {{ pages.recorded }}{% else %}{{ pages.recorded }}{% endif %}
     </span>
+    {#
+      Folded away, this heading and its count are all that is left -- which is
+      the whole point: the table above the one you are working in becomes a
+      line, and stays a line through every filter and every page turn.
+    #}
+    {% if panels %}
+      <a class="fold-panel" href="{{ panels.pages.url }}">{{ panels.pages.label }}</a>
+    {% endif %}
   </h2>
 
+  {% if not panels or panels.pages.is_open %}
   {% if pages.has_any %}
     <form class="filters" method="get" action="{{ pages.action }}">
       <label class="wide">
@@ -95,5 +104,6 @@
     </p>
   {% else %}
     <p class="empty">No pages were read.</p>
+  {% endif %}
   {% endif %}
 </section>

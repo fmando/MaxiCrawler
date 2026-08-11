@@ -13,7 +13,7 @@ to put on such a page.
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
@@ -156,10 +156,31 @@ def page(
         name=template,
         context={
             "navigation": _navigation(request, section),
+            # Not "queue": that name belongs to the queue page's own context,
+            # which is merged in below and would quietly win. A key the chrome
+            # shares with a page is a key one of them silently loses.
+            "queue_strip": _queue_strip(request, section),
             "version": __version__,
             **(context or {}),
         },
     )
+
+
+def _queue_strip(request: Request, section: str) -> dict[str, Any] | None:
+    """Return what the top bar says about the queue, on the pages that say it.
+
+    Every page but the queue's own, where a strip counting what the table below
+    already lists would be the same numbers twice — and the one place somebody
+    is certainly not about to lose track of a transfer.
+
+    Read on every render rather than streamed. A count a few seconds stale still
+    answers the question the strip is for, and a top bar that reconnected an
+    event source on every page would be a lot of machinery for a number that
+    changes when a file finishes.
+    """
+    if section == "downloads":
+        return None
+    return views.queue_strip(downloads_of(request).tally())
 
 
 def fragment(request: Request, template: str, context: dict[str, Any]) -> Response:
@@ -216,7 +237,10 @@ async def crawl_detail(request: Request) -> Response:
     job = jobs_of(request).get(request.path_params["job_id"])
     if job is None:
         return _recorded_crawl(request)
-    context: dict[str, Any] = {"crawl": views.progress_view(job.snapshot())}
+    context: dict[str, Any] = {
+        "crawl": views.progress_view(job.snapshot()),
+        "panels": _panels(request, f"/crawls/{job.id}"),
+    }
     report = job.report
     if report is not None:
         context["report"] = views.report_view(report)
@@ -299,19 +323,36 @@ async def downloads(request: Request) -> Response:
     order right. Every control on it is a form, so it works with scripting off.
 
     Live without a stream of its own. The running transfer's own event stream
-    is embedded, and ``download.js`` reloads the page when that transfer ends —
-    which is exactly when the rest of this page changes. A queue nobody is
-    draining has nothing to stream, and a page that reloaded on a timer would
-    fight whoever is reading it.
+    is embedded, and when that transfer ends the panels below are asked for
+    again — which is exactly when they change. A queue nobody is draining has
+    nothing to stream, and a page that reloaded on a timer would fight whoever
+    is reading it.
+
+    Answers with those panels alone when ``part`` asks for them, from the same
+    snapshot and the same template the page is built from. That is the whole of
+    what makes following a batch cost one small answer per file rather than one
+    page per file. Anything else in ``part`` is read as a request for the page,
+    the way every other parameter of this interface is read leniently.
     """
     queue = downloads_of(request)
     snapshot = queue.snapshot()
-    return page(
-        request,
-        "downloads.html",
-        {"queue": views.queue_view(snapshot, limit=queue.limit)},
-        section="downloads",
-    )
+    context = {"queue": views.queue_view(snapshot, limit=queue.limit)}
+    if request.query_params.get("part") == views.QUEUE_PART:
+        return _queue_panels(request, context)
+    return page(request, "downloads.html", context, section="downloads")
+
+
+def _queue_panels(request: Request, context: dict[str, Any]) -> Response:
+    """Answer with the queue's panels, for a page that already has the rest.
+
+    ``no-store`` because this is the one answer here that a browser is asked
+    for repeatedly at the same URL while the thing it describes changes under
+    it. A reload cannot be served stale; a fetch can, and a queue page showing
+    a cached copy of two files ago would be worse than one that never moved.
+    """
+    response = fragment(request, "_queue_panels.html", context)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 async def start_download(request: Request) -> Response:
@@ -347,11 +388,23 @@ async def queue_selection(request: Request) -> Response:
     Partial by design. A selection where two links are malformed is not a
     refusal of the other ninety-eight — the queue takes what it can and the
     page says what it did.
+
+    Lands back where the ticking happened when the form said where that was.
+    The ticks themselves are gone, and deliberately not restored: the only way
+    to carry them would be to put the URLs in a query string, which is the one
+    place a share link's key must never go (ADR-020). What comes back instead
+    is the rows saying *in queue*, which is the same information without the
+    key — and is true of the ones somebody else queued too.
     """
     form = await read_forms(request)
     accepted = downloads_of(request).submit_all(form.get("url", ()))
     if accepted.queued == 0 and not accepted.is_whole:
         return _refuse_download(request, _nothing_queued(accepted), status=409)
+    back = _one(form, "back")
+    if back:
+        return RedirectResponse(
+            url=_with_outcome(_our_path(back, "/downloads"), accepted), status_code=303
+        )
     return RedirectResponse(url=_queued_url(accepted), status_code=303)
 
 
@@ -365,6 +418,12 @@ async def queue_matches(request: Request) -> Response:
     Nothing but the query travels. The browser sends the filter it is looking
     at, the server resolves it against what the crawl recorded, and the URLs —
     decryption keys and all — never leave this process.
+
+    And nothing has to say where to go afterwards, because the filter that says
+    *what* to queue is the same filter that says *which report* to come back to.
+    Rebuilt here rather than sent along: two copies of one filter is two things
+    that can disagree, and the copy a browser holds is the one that could be
+    made to point somewhere else.
     """
     session_id = request.path_params["job_id"]
     downloads = downloads_of(request)
@@ -374,15 +433,64 @@ async def queue_matches(request: Request) -> Response:
     if not matches.urls:
         return _refuse_download(request, _nothing_matched(matches), status=409)
     accepted = downloads.submit_all(matches.urls)
-    return RedirectResponse(url=_queued_url(accepted), status_code=303)
+    return RedirectResponse(
+        url=_with_outcome(_report_url(request, session_id), accepted, no_room=matches.left_over),
+        status_code=303,
+    )
+
+
+def _report_url(request: Request, session_id: str) -> str:
+    """Return the report this filter was read off, at its link table.
+
+    The query string is copied whole rather than rebuilt field by field, so a
+    parameter the link table gained since is carried without this function
+    learning its name. It cannot escape the path: whatever it holds lands after
+    the ``?`` of a path this builds itself.
+    """
+    query = request.url.query
+    return f"/crawls/{session_id}{'?' if query else ''}{query}#links"
+
+
+def _with_outcome(url: str, accepted: Accepted, *, no_room: int = 0) -> str:
+    """Return *url* with what the batch did written into it.
+
+    Written into the URL rather than kept in a session, because a redirect is
+    the whole of what this server remembers between two requests — and because
+    a confirmation that survives a reload is one that outlives being true.
+
+    *no_room* is passed separately for the filter, where the cut happened before
+    the queue was asked: :meth:`~maxicrawler.app.DiscoveryService.fetchable` is
+    given the room there is, so what did not fit never became a rejection.
+    """
+    counts = {
+        "queued": accepted.queued,
+        "bad": accepted.rejected,
+        "full": no_room + accepted.no_room,
+    }
+    path, _, fragment = url.partition("#")
+    written = urlencode(
+        {name: value for name, value in counts.items() if value or name == "queued"}
+    )
+    separator = "&" if "?" in path else "?"
+    return f"{path}{separator}{written}" + (f"#{fragment}" if fragment else "")
+
+
+def _one(form: dict[str, list[str]], name: str) -> str:
+    """Return the last value submitted under *name*, or the empty string."""
+    return form.get(name, [""])[-1]
 
 
 def _queued_url(accepted: Accepted) -> str:
-    """Return where to land after queueing a batch.
+    """Return where to land after queueing a batch that said nothing about where.
 
     One link goes to its own page, because that is what somebody who queued one
     link wants to watch. Several go to the queue, because that is the thing they
     just changed.
+
+    Only reached when the form named no way back — which the report's own two
+    buttons always do. What is left here is the batch nobody sent from a report,
+    and answering it the way this has always been answered beats inventing a
+    report to return to.
     """
     if accepted.queued == 1 and accepted.is_whole:
         return f"/downloads/{accepted.runs[0].id}"
@@ -404,6 +512,38 @@ def _nothing_matched(matches: Matches) -> str:
             "Let some finish, or cancel what you no longer want."
         )
     return "nothing this filter matches can be downloaded by the providers installed here"
+
+
+async def retry_all_downloads(request: Request) -> Response:
+    """Queue everything in the history that did not arrive, and show the queue.
+
+    The same set the rows offer one at a time, in one click. Which is where it
+    belongs: the history is the list this acts on, and a request evicted from it
+    has no URL left to try again.
+    """
+    accepted = downloads_of(request).retry_all()
+    if accepted.queued == 0:
+        return _refuse_download(request, _nothing_retried(accepted), status=409)
+    return RedirectResponse(url=_back_to(request, "/downloads"), status_code=303)
+
+
+def _nothing_retried(accepted: Accepted) -> str:
+    """Return why trying everything again produced no downloads at all."""
+    if accepted.no_room:
+        return f"the queue had no room for any of the {accepted.no_room} requests in the history"
+    return "nothing in this queue's history ended without the file arriving"
+
+
+async def clear_history(request: Request) -> Response:
+    """Forget the downloads that are over, and show the queue again.
+
+    The rows and the counters above them together, because the counters are
+    totals over those rows. What was actually downloaded is in the library and
+    is not touched — the footnote under the table says so, which is why this
+    button can be a plain form with nothing asking twice.
+    """
+    downloads_of(request).forget_finished()
+    return RedirectResponse(url=_back_to(request, "/downloads"), status_code=303)
 
 
 async def download_detail(request: Request) -> Response:
@@ -508,10 +648,20 @@ def _back_to(request: Request, default: str) -> str:
 
     A parameter on the action rather than the ``Referer`` header: the same
     button sits on the queue and on one download's page, and a header a browser
-    may withhold is not a thing to route on. Only paths of our own are honoured,
-    so this cannot be turned into an open redirect.
+    may withhold is not a thing to route on.
     """
-    asked = request.query_params.get("back", "")
+    return _our_path(request.query_params.get("back", ""), default)
+
+
+def _our_path(asked: str, default: str) -> str:
+    """Return *asked* when it is a path of ours, and *default* when it is not.
+
+    Everything that comes back from a browser goes through here, whether it
+    arrived in a query string or in a form field. A leading ``//`` is rejected
+    along with everything that is not a path at all, because a browser reads
+    ``//elsewhere.test/`` as another host — which is the one way a "go back
+    afterwards" parameter turns into an open redirect.
+    """
     return asked if asked.startswith("/") and not asked.startswith("//") else default
 
 
@@ -775,6 +925,7 @@ def _recorded_crawl(request: Request) -> Response:
         {
             "crawl": views.stored_view(stored),
             "links": _link_table(request, job_id, discovered=stored.links_discovered),
+            "panels": _panels(request, f"/crawls/{job_id}"),
         },
         section="crawls",
     )
@@ -801,7 +952,36 @@ def _link_table(request: Request, session_id: str, *, discovered: int) -> dict[s
         hidden=_hidden_columns(request),
         carry=_carry(request, views.LINK_PARAMS),
         downloads_everything=downloads_of(request).service.downloads_ordinary_urls(),
+        queued=_queued_outcome(request),
     )
+
+
+def _queued_outcome(request: Request) -> views.QueuedBatch | None:
+    """Return what the batch that redirected here did, if one did.
+
+    Absent unless ``queued`` is present, so a report reached any other way says
+    nothing. Every number is read leniently, the same way the filters are: these
+    arrive in a URL somebody may have bookmarked, edited or truncated, and a
+    strip reading "0 links queued" is a better answer to nonsense than a refusal
+    to render the report underneath it.
+    """
+    values = request.query_params
+    if "queued" not in values:
+        return None
+    return views.QueuedBatch(
+        queued=_count(values.get("queued")),
+        rejected=_count(values.get("bad")),
+        no_room=_count(values.get("full")),
+    )
+
+
+def _count(value: str | None) -> int:
+    """Return a whole number that is not negative, or zero for anything else."""
+    try:
+        number = int(value or "")
+    except ValueError:
+        return 0
+    return max(0, number)
 
 
 def _page_table(request: Request, report: CrawlReport) -> dict[str, Any]:
@@ -837,9 +1017,15 @@ def _carry(request: Request, owned: frozenset[str]) -> dict[str, str]:
     own parameters *plus* whatever the other left there. Without this, filtering
     the pages would quietly discard the link filter on screen — and a filter
     that undoes another filter is one nobody keeps using.
+
+    What neither table carries is :data:`~maxicrawler.api.views.TRANSIENT_PARAMS`,
+    which is how a confirmation lasts one page: it belongs to the click that
+    just happened rather than to the report.
     """
     return {
-        name: value for name, value in request.query_params.items() if name not in owned and value
+        name: value
+        for name, value in request.query_params.items()
+        if name not in owned and name not in views.TRANSIENT_PARAMS and value
     }
 
 
@@ -851,6 +1037,12 @@ def _link_query(request: Request) -> LinkQuery:
         plugin=values.get("plugin") or None,
         category=values.get("category") or None,
         target=_target(values.get("target")),
+        # Read as written rather than parsed into a state. The sentinel for
+        # "in none of them" is not a member, and a value naming a state this
+        # installation cannot answer is handled by the service — which filters
+        # nothing rather than everything, so a bookmark that predates a resolver
+        # shows the crawl instead of an empty table.
+        state=values.get("state") or None,
         downloadable=_downloadable(values.get("dl")),
         normalized_only=values.get("norm") == "1",
         sort=LinkSort.parse(values.get("sort"), default=LinkQuery().sort),
@@ -877,6 +1069,31 @@ def _downloadable(value: str | None) -> bool | None:
     if value == "yes":
         return True
     return False if value == "no" else None
+
+
+def _panels(request: Request, base: str) -> dict[str, dict[str, Any]]:
+    """Return the fold state of a report's panels, and the links that flip it.
+
+    *carry* is everything in the query string but the fold state itself, so
+    folding a panel keeps the filter, the sort, the page and the columns exactly
+    as they were — the same rule each table already follows about the other.
+    """
+    return views.panel_view(
+        _shut_panels(request),
+        base=base,
+        carry=_carry(request, frozenset({views.SHUT_PARAM})),
+    )
+
+
+def _shut_panels(request: Request) -> frozenset[str]:
+    """Return which panels this request wants folded away.
+
+    Unknown names are dropped rather than refused, exactly as
+    :func:`_hidden_columns` drops them, and for the same reason: the list is
+    written by our own links, so anything else is a stale bookmark.
+    """
+    asked = request.query_params.get(views.SHUT_PARAM, "")
+    return frozenset(name for name in asked.split(",") if name in views.PANELS)
 
 
 def _hidden_columns(request: Request) -> frozenset[str]:

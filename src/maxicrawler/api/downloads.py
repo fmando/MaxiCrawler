@@ -360,6 +360,44 @@ class Accepted:
 
 
 @dataclass(frozen=True, slots=True)
+class Departed:
+    """What the queue has forgotten the details of, kept as numbers.
+
+    A finished run is evicted once there are more of them than the queue keeps,
+    and every count a page is built from is a sum over the runs it still holds.
+    Without this, a queue draining two hundred files would quietly reset "fifty
+    stored" to "one stored" at the fifty-first — a counter that resets itself
+    when nobody asked is worse than no counter at all.
+
+    So what is dropped is added here first. The row is gone and the number is
+    not, which is the honest shape: the history is a list of what can still be
+    looked at, and the readout above it is a total.
+    """
+
+    count: int = 0
+    """How many runs this stands for, whatever became of them."""
+
+    succeeded: int = 0
+    failed: int = 0
+    stopped: int = 0
+    bytes_written: int = 0
+    seconds: float = 0.0
+    """How long those runs spent transferring, added up."""
+
+    def including(self, snapshot: DownloadSnapshot) -> "Departed":
+        """Return these numbers with one more finished run folded into them."""
+        status = snapshot.status
+        return Departed(
+            count=self.count + 1,
+            succeeded=self.succeeded + (1 if status.is_success else 0),
+            failed=self.failed + (1 if status is DownloadStatus.FAILED else 0),
+            stopped=self.stopped + (1 if status is DownloadStatus.CANCELLED else 0),
+            bytes_written=self.bytes_written + snapshot.progress.bytes_written,
+            seconds=self.seconds + snapshot.elapsed_seconds,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class QueueSnapshot:
     """What the queue holds at the moment it was asked."""
 
@@ -369,6 +407,8 @@ class QueueSnapshot:
     """Newest first, which is the order somebody checking on them reads."""
 
     is_paused: bool = False
+    departed: Departed = Departed()
+    """The runs this queue counted and no longer holds."""
 
     @property
     def remaining(self) -> int:
@@ -383,23 +423,104 @@ class QueueSnapshot:
     @property
     def succeeded(self) -> int:
         """Return how many finished downloads the library has something from."""
-        return sum(1 for run in self.finished if run.status.is_success)
+        return self.departed.succeeded + sum(1 for run in self.finished if run.status.is_success)
 
     @property
     def failed(self) -> int:
         """Return how many finished downloads ended in a failure."""
-        return sum(1 for run in self.finished if run.status is DownloadStatus.FAILED)
+        return self.departed.failed + sum(
+            1 for run in self.finished if run.status is DownloadStatus.FAILED
+        )
 
     @property
     def stopped(self) -> int:
         """Return how many were cancelled, in the queue or during the transfer."""
-        return sum(1 for run in self.finished if run.status is DownloadStatus.CANCELLED)
+        return self.departed.stopped + sum(
+            1 for run in self.finished if run.status is DownloadStatus.CANCELLED
+        )
+
+    @property
+    def done(self) -> int:
+        """Return how many downloads have reached an end, however they ended.
+
+        Counted rather than added up out of the three verdicts, so a status
+        added later cannot make this quietly disagree with the number of things
+        that actually happened.
+        """
+        return self.departed.count + len(self.finished)
+
+    @property
+    def known(self) -> int:
+        """Return how many downloads this queue is counting in total.
+
+        What "forty-three of two hundred" is measured against. It grows when
+        somebody queues more, and that is not a flaw in it: there is no batch
+        here, only a queue, and the honest denominator is everything asked for
+        so far rather than a total somebody has to have committed to.
+        """
+        return self.done + self.remaining
 
     @property
     def bytes_written(self) -> int:
         """Return how many bytes this queue has moved, the running one included."""
         written = sum(run.progress.bytes_written for run in self.finished)
-        return written + (0 if self.active is None else self.active.progress.bytes_written)
+        return (
+            self.departed.bytes_written
+            + written
+            + (0 if self.active is None else self.active.progress.bytes_written)
+        )
+
+    @property
+    def transfer_seconds(self) -> float:
+        """Return how long this queue has spent actually moving bytes.
+
+        The transfers added together, not the wall clock. A queue that sat
+        paused overnight did not get slower while it was paused, and a rate
+        divided by the hours nobody was downloading would say it did.
+        """
+        spent = sum(run.elapsed_seconds for run in self.finished)
+        return (
+            self.departed.seconds
+            + spent
+            + (0.0 if self.active is None else self.active.elapsed_seconds)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class QueueTally:
+    """How much the queue has left, and how much of it went wrong.
+
+    The counts of :class:`QueueSnapshot` without the runs behind them, for the
+    pages whose whole interest in the queue is one line at the top. Kept apart
+    rather than added as more properties on the snapshot, because what makes it
+    worth having is precisely what it does *not* build.
+    """
+
+    running: int
+    waiting: int
+    failed: int
+    is_paused: bool = False
+
+    @property
+    def remaining(self) -> int:
+        """Return how many downloads have still to happen, the running one included."""
+        return self.running + self.waiting
+
+    @property
+    def is_busy(self) -> bool:
+        """Return whether there is anything left to do."""
+        return self.remaining > 0
+
+    @property
+    def is_worth_saying(self) -> bool:
+        """Return whether a page elsewhere in the interface should mention this.
+
+        A paused queue counts even when it is empty. Somebody who paused it an
+        hour ago and queues forty links now is owed the reason nothing starts,
+        and a silence that is only broken once there is work to do would break
+        exactly too late.
+        """
+        return self.is_busy or self.failed > 0 or self.is_paused
 
 
 class TransferQueue:
@@ -432,6 +553,7 @@ class TransferQueue:
         self._waiting: list[str] = []
         self._targets: dict[str, str] = {}
         self._active: DownloadRun | None = None
+        self._departed = Departed()
         self._paused = False
         self._closed = False
         self._worker: Thread | None = None
@@ -519,6 +641,31 @@ class TransferQueue:
         with self._condition:
             return self._active
 
+    def pending(self, urls: Iterable[str]) -> frozenset[str]:
+        """Return which of *urls* are waiting or being fetched right now.
+
+        Written to the shape of
+        :data:`~maxicrawler.app.discovery.StateResolver`, so a report can mark
+        its rows without knowing there is a queue behind the answer.
+
+        Waiting and running, and deliberately nothing else. A finished transfer
+        has left the queue for the library, and a failed one is not in a line —
+        both are states of their own to answer elsewhere, and calling either
+        "queued" would put a mark on a row that no longer earns it.
+
+        Fragments are stripped to compare, because a run is stored without one
+        (ADR-020), and kept in the answer, because the caller's URL is the one
+        that still carries the key.
+        """
+        asked = tuple(urls)
+        if not asked:
+            return frozenset()
+        with self._condition:
+            queued = {self._runs[run_id].url for run_id in self._waiting}
+            if self._active is not None:
+                queued.add(self._active.url)
+        return frozenset(url for url in asked if strip_fragment(url) in queued)
+
     def position_of(self, download_id: str) -> int | None:
         """Return where a waiting request sits, counting from one.
 
@@ -529,6 +676,41 @@ class TransferQueue:
             if download_id not in self._waiting:
                 return None
             return self._waiting.index(download_id) + 1
+
+    def tally(self) -> QueueTally:
+        """Return the queue's counts, without a snapshot of every run in it.
+
+        What a page whose interest in the queue is one line needs.
+        :meth:`snapshot` builds a :class:`DownloadSnapshot` per waiting request
+        as well, and a full queue is five hundred of them — a cost worth paying
+        to render the queue's own table and worth not paying on every other page
+        in the interface.
+
+        The failures are counted from the runs that are neither waiting nor
+        running, which is bounded by how many finished ones the queue retains,
+        plus the ones already evicted. Counted through the same snapshot the
+        tables read rather than from a second reading of the same fields: a
+        tally that could disagree with the page it sits above would be worse
+        than no tally.
+        """
+        with self._condition:
+            queued = set(self._waiting)
+            waiting = len(self._waiting)
+            active = self._active
+            paused = self._paused
+            departed = self._departed
+            done = [
+                run for key, run in self._runs.items() if key not in queued and run is not active
+            ]
+        # Outside the lock: each run guards its own fields, and holding the
+        # queue's condition while asking fifty of them is a wait nobody needs.
+        failed = sum(1 for run in done if run.snapshot().status is DownloadStatus.FAILED)
+        return QueueTally(
+            running=1 if active is not None else 0,
+            waiting=waiting,
+            failed=departed.failed + failed,
+            is_paused=paused,
+        )
 
     def snapshot(self) -> QueueSnapshot:
         """Return what the queue holds right now.
@@ -546,11 +728,13 @@ class TransferQueue:
                 if run is not active and run.id not in self._waiting
             )
             paused = self._paused
+            departed = self._departed
         return QueueSnapshot(
             active=None if active is None else active.snapshot(),
             waiting=tuple(run.snapshot() for run in waiting),
             finished=tuple(run.snapshot() for run in finished),
             is_paused=paused,
+            departed=departed,
         )
 
     def pause(self) -> None:
@@ -631,6 +815,60 @@ class TransferQueue:
             if run is None or target is None or not run.snapshot().is_finished:
                 return None
         return self.submit(target)
+
+    def retry_all(self) -> Accepted:
+        """Queue every finished request that did not arrive, oldest first.
+
+        What the history already offers row by row, in one click. Which is why
+        it takes the same set those rows do — everything that ended without the
+        file being stored, a removed request included. Somebody who stopped
+        twenty downloads and has thought better of it is asking exactly this,
+        and a button that quietly skipped them would be a different button from
+        the twenty beside it.
+
+        Oldest first, so what comes back keeps the order it had. Bounded by what
+        this process still holds: a run evicted an hour ago has no URL left to
+        retry, which is the same reason its row is not on the page either.
+        """
+        with self._condition:
+            targets = [
+                target
+                for key, run in self._runs.items()
+                if key not in self._waiting
+                and run is not self._active
+                and (target := self._targets.get(key)) is not None
+                and _is_unarrived(run)
+            ]
+        # Outside the lock: `submit` takes the same condition, and asking for it
+        # while holding it is the one way this deadlocks.
+        return self.submit_all(targets)
+
+    def forget_finished(self) -> int:
+        """Drop every finished run, and return how many rows that was.
+
+        Nothing waiting or running is touched. This is about a list that has got
+        long enough to stop being readable, not about the work — and the files
+        are in the library either way, which is what the footnote under the table
+        says.
+
+        The counters go with the rows, deliberately. They are totals *over* this
+        list, and a readout saying "43 stored" above an empty history would be
+        describing something nobody can look at. Clearing is the one way they
+        reset, which is what makes them trustworthy the rest of the time.
+        """
+        with self._condition:
+            keys = [
+                key
+                for key, run in self._runs.items()
+                if key not in self._waiting
+                and run is not self._active
+                and run.snapshot().is_finished
+            ]
+            for key in keys:
+                del self._runs[key]
+                self._targets.pop(key, None)
+            self._departed = Departed()
+        return len(keys)
 
     def move(self, download_id: str, where: Move) -> bool:
         """Move a waiting request within the queue, and say whether it moved.
@@ -728,13 +966,18 @@ class TransferQueue:
         Callers hold the condition. A waiting or running download is never
         evicted, because the queue is how a request finds it again — and its
         target goes with it, which is what bounds how long a credential is held.
+
+        What each dropped run counted for is kept, in :class:`Departed`. This is
+        the one place a run leaves without being asked to, so it is the one
+        place that has to say so before the numbers go with it.
         """
         finished = [
-            key
+            (key, snapshot)
             for key, run in self._runs.items()
-            if key not in self._waiting and run.snapshot().is_finished
+            if key not in self._waiting and (snapshot := run.snapshot()).is_finished
         ]
-        for key in finished[: max(0, len(finished) - self._retain)]:
+        for key, snapshot in finished[: max(0, len(finished) - self._retain)]:
+            self._departed = self._departed.including(snapshot)
             del self._runs[key]
             self._targets.pop(key, None)
 
@@ -746,6 +989,17 @@ A bound rather than a promise. The transfer is asked to stop and does so within
 a chunk; this is what keeps a provider that has stopped answering from holding
 the whole process open.
 """
+
+
+def _is_unarrived(run: DownloadRun) -> bool:
+    """Return whether *run* is over and left nothing in the library.
+
+    The same question the history's own "Try again" asks of one row: a dead
+    share, a broken transfer, and a stop somebody has since reconsidered are one
+    set, because in all three the file is not there.
+    """
+    snapshot = run.snapshot()
+    return snapshot.is_finished and not snapshot.status.is_success
 
 
 def _moved_to(index: int, where: Move, total: int) -> int:

@@ -28,15 +28,35 @@ unbounded number of URLs.
 as a callable rather than a :class:`~maxicrawler.app.downloading.DownloadService`
 this module constructs, for two reasons. It keeps the provider registry a
 composition-root decision — the one that is built once and cached lives in the
-service the queue already downloads through. And it is the seam a later
-*"already in the library"* filter goes through unchanged: that answer comes from
-:class:`~maxicrawler.app.library.LibraryService`, has exactly this shape, and
-should not require this module to learn a third collaborator.
+service the queue already downloads through. And it was the seam an
+*"already in the library"* filter was meant to go through unchanged. It now
+does; see below.
+
+**What is already known about a link is a set of states, not a flag.**
+:class:`LinkState` is what a report says about a URL beyond what the crawl found:
+that the library holds something fetched from it, that the queue is about to.
+Each state is answered by one callable of the same shape as the downloadable
+resolver, and they arrive as a mapping — so a state this release has not thought
+of is an enum member, a resolver and a label, and no signature anywhere changes.
+
+That generality is the point rather than a flourish. Two of the states already
+on the roadmap do not fit a boolean: *the same content is here under a different
+URL*, which SHA-256 answers, and *this file is reachable from another source
+too*, which is one URL standing for several. Both are "what is known about this
+link", both belong in the same row of the same table, and neither should cost a
+migration of the vocabulary to add.
+
+**A state is a claim about the URL, never about completeness.** A share that
+names a folder is recorded by every file inside it — the entries carry the
+container's URL (that is what makes the question answerable at all) — so
+:attr:`LinkState.IN_LIBRARY` means *something* fetched from here is stored, not
+that all of it is. The wording that reaches a person has to leave room for that,
+which is why these are states with names rather than sentences with verbs.
 """
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from math import ceil
 from typing import Any
@@ -69,6 +89,52 @@ The parentheses are not decoration: this value travels in a query string beside
 real plugin names, and a plugin is free to call itself anything. A name no
 plugin registry would accept is what keeps the sentinel from being shadowed.
 """
+
+UNTRACKED = "(new)"
+"""What a URL in no state at all is called, as a facet and as a filter value.
+
+The same shape as :data:`UNRESOLVED`, and parenthesised for the same reason: it
+travels in a query string beside real state names, and a state added later must
+not be able to collide with it.
+
+It is a sentinel rather than a :class:`LinkState` member on purpose. "In none of
+the states" is not a state — it is the absence of all of them, and it stays
+correct when a fourth state is added, which an enum member spelled ``NEW`` would
+quietly stop being.
+"""
+
+
+class LinkState(StrEnum):
+    """Something known about a URL beyond the fact that a crawl found it.
+
+    Deliberately open. Adding *the same content is already here under another
+    URL*, or *this file is reachable from a second source*, means adding a member
+    and a resolver — not changing how a report asks, filters, counts or renders.
+    """
+
+    IN_LIBRARY = "library"
+    """Something fetched from this URL is stored.
+
+    Not "this link has been downloaded", and the difference is real: a share
+    naming a folder is recorded by each file inside it under the container's own
+    URL, so one stored file is enough to put the folder link in this state.
+    """
+
+    IN_QUEUE = "queue"
+    """This URL is waiting to be fetched, or is being fetched right now."""
+
+    @classmethod
+    def parse(cls, value: str | None) -> "LinkState | None":
+        """Return the state *value* names, or ``None`` when it names none.
+
+        Lenient like :meth:`LinkSort.parse`, and for the same reason: the value
+        arrives in a query string, where a bookmark that predates a state being
+        renamed is ordinary.
+        """
+        try:
+            return cls(value or "")
+        except ValueError:
+            return None
 
 
 class LinkSort(StrEnum):
@@ -186,6 +252,14 @@ class LinkQuery:
     downloadable: bool | None = None
     """``True`` for only what can be fetched, ``False`` for only what cannot."""
 
+    state: str | None = None
+    """A :class:`LinkState` value, or :data:`UNTRACKED` for what is in none.
+
+    One value rather than a set, the way the plugin and category filters are one
+    value: these arrive from a chip that carries its own count, and "how many of
+    these are there" is most of what decides whether you want only those.
+    """
+
     normalized_only: bool = False
     """Only URLs that differ from the way they were written.
 
@@ -209,6 +283,7 @@ class LinkQuery:
             or self.category is not None
             or self.target is not None
             or self.downloadable is not None
+            or self.state is not None
             or self.normalized_only
         )
 
@@ -254,6 +329,7 @@ class LinkPage:
     plugins: tuple[LinkFacet, ...] = ()
     categories: tuple[LinkFacet, ...] = ()
     targets: tuple[LinkFacet, ...] = ()
+    states: tuple[LinkFacet, ...] = ()
     """What is present in the whole crawl, whatever the query asked for.
 
     Counted over every recorded URL rather than over the matches, the same way
@@ -263,6 +339,15 @@ class LinkPage:
 
     downloadable: frozenset[str] = frozenset()
     """Which of :attr:`items` some provider here could fetch."""
+
+    known: Mapping[LinkState, frozenset[str]] = field(default_factory=dict)
+    """Which of :attr:`items` are in each state, for the states that were asked.
+
+    A mapping rather than a member per state, so that rendering a row means
+    walking what is there. A state nobody supplied a resolver for is absent
+    rather than empty: *"we did not ask"* and *"we asked and the answer was
+    none"* are different, and only one of them should put a column on a page.
+    """
 
     @property
     def hidden(self) -> int:
@@ -304,6 +389,19 @@ the answer costs a plugin resolution and a registry lookup each, and a report
 would otherwise ask it a thousand times over.
 """
 
+StateResolver = Callable[[Iterable[str]], AbstractSet[str]]
+"""Answers which of some URLs are in one :class:`LinkState`.
+
+The same shape as :data:`DownloadableResolver`, deliberately: one question, one
+callable, asked in bulk, answered without contacting anything. Satisfied today by
+:meth:`~maxicrawler.app.library.LibraryService.stored` and by the queue's own
+membership, and by whatever answers *"is this the same content?"* later.
+
+Returning the URLs *as they were asked* matters, and is the resolver's job
+rather than this module's. A library records a share link without its fragment
+while a report holds it with one, and only the side that knows why can strip it.
+"""
+
 
 class DiscoveryService:
     """Everything a client needs to read a crawl's findings, and nothing about showing them."""
@@ -314,11 +412,13 @@ class DiscoveryService:
         *,
         repository: SQLiteDiscoveryRepository | None = None,
         downloadable: DownloadableResolver | None = None,
+        states: Mapping[LinkState, StateResolver] | None = None,
     ) -> None:
         self._settings = settings
         self._injected_repository = repository
         self._cached_repository: SQLiteDiscoveryRepository | None = None
         self._downloadable = downloadable
+        self._states: Mapping[LinkState, StateResolver] = dict(states or {})
 
     @property
     def settings(self) -> Settings:
@@ -351,7 +451,12 @@ class DiscoveryService:
         """
         asked = query if query is not None else LinkQuery()
         recorded = self.links(session_id)
-        matching = tuple(item for item in recorded if _matches(item, asked))
+        # Over every recorded URL rather than over the matches, because the same
+        # answer serves three purposes: the filter, the counts on the chips, and
+        # the marks on the rows. Resolving it once is also what keeps the cost one
+        # question per state instead of one per state per use.
+        known = self._known(recorded)
+        matching = tuple(item for item in recorded if _matches(item, asked, known))
         fetchable = self._resolve(matching) if asked.downloadable is not None else None
         if fetchable is not None:
             matching = tuple(
@@ -374,6 +479,11 @@ class DiscoveryService:
             plugins=_plugin_facets(recorded),
             categories=_category_facets(recorded),
             targets=_target_facets(recorded),
+            states=_state_facets(recorded, known),
+            known={
+                state: frozenset(item.url for item in shown if item.url in urls)
+                for state, urls in known.items()
+            },
             # Already known when the filter forced the whole candidate set to be
             # resolved; asked only about this page when it did not.
             downloadable=(
@@ -410,7 +520,10 @@ class DiscoveryService:
         # discard all of it.
         if asked.downloadable is False:
             return Matches(urls=(), total=0)
-        matching = tuple(item for item in self.links(session_id) if _matches(item, asked))
+        recorded = self.links(session_id)
+        matching = tuple(
+            item for item in recorded if _matches(item, asked, self._known(recorded, asked))
+        )
         fetchable = self._resolve(matching)
         wanted = tuple(item.url for item in _ordered(matching, asked) if item.url in fetchable)
         return Matches(urls=wanted[:limit], total=len(wanted))
@@ -420,6 +533,34 @@ class DiscoveryService:
         if self._downloadable is None:
             return frozenset()
         return frozenset(self._downloadable(item.url for item in items))
+
+    def _known(
+        self, items: Iterable[LinkItem], query: LinkQuery | None = None
+    ) -> dict[LinkState, frozenset[str]]:
+        """Return which of *items* are in each state worth asking about.
+
+        Every configured state when *query* is absent, because a report counts
+        them all whether or not it filters by one. Only what the filter needs
+        when *query* is given: *"queue every match"* has no chips to fill in, and
+        asking the library about a state nobody filtered by would be one full
+        question per click for an answer nothing reads.
+
+        A state whose resolver is not configured is absent from the result rather
+        than empty — see :attr:`LinkPage.known`.
+        """
+        wanted = self._wanted(query)
+        if not wanted:
+            return {}
+        urls = tuple(item.url for item in items)
+        return {state: frozenset(self._states[state](urls)) for state in wanted}
+
+    def _wanted(self, query: LinkQuery | None) -> tuple[LinkState, ...]:
+        """Return the states that have to be resolved to answer *query*."""
+        if query is None or query.state == UNTRACKED:
+            # "In none of them" is only answerable by asking all of them.
+            return tuple(self._states)
+        asked = LinkState.parse(query.state)
+        return (asked,) if asked is not None and asked in self._states else ()
 
     def _repository(self) -> SQLiteDiscoveryRepository:
         """Return where discovered URLs are read from, creating the tables once.
@@ -451,12 +592,18 @@ def _item(stored: StoredUrl, position: int) -> LinkItem:
     )
 
 
-def _matches(item: LinkItem, query: LinkQuery) -> bool:
+def _matches(item: LinkItem, query: LinkQuery, known: Mapping[LinkState, frozenset[str]]) -> bool:
     """Return whether *item* belongs in the answer to *query*.
 
     Everything except downloadability, which needs the whole candidate set at
     once and is applied by the caller.
+
+    *known* is the same resolution the page is built from, passed in rather than
+    asked for here: it costs a question per state, and a predicate called once
+    per recorded URL is the last place that should be asking one.
     """
+    if not _matches_state(item, query.state, known):
+        return False
     if query.plugin is not None and item.facet != query.plugin:
         return False
     if query.category is not None and (item.category or "") != query.category:
@@ -470,6 +617,26 @@ def _matches(item: LinkItem, query: LinkQuery) -> bool:
     needle = query.search.casefold()
     haystack = (item.url, item.raw_url, item.source_url or "")
     return any(needle in value.casefold() for value in haystack)
+
+
+def _matches_state(
+    item: LinkItem, wanted: str | None, known: Mapping[LinkState, frozenset[str]]
+) -> bool:
+    """Return whether *item* is in the state *wanted* names.
+
+    A filter naming a state nothing answered matches everything rather than
+    nothing. The alternative is an empty table for a bookmark that predates a
+    resolver being configured, which reads as *"this crawl found nothing"* — the
+    one thing a report must never say when it is not true.
+    """
+    if wanted is None:
+        return True
+    if wanted == UNTRACKED:
+        return not any(item.url in urls for urls in known.values())
+    state = LinkState.parse(wanted)
+    if state is None or state not in known:
+        return True
+    return item.url in known[state]
 
 
 def _ordered(items: tuple[LinkItem, ...], query: LinkQuery) -> tuple[LinkItem, ...]:
@@ -536,6 +703,40 @@ def _category_facets(items: Iterable[LinkItem]) -> tuple[LinkFacet, ...]:
             counts[item.category] = counts.get(item.category, 0) + 1
     ordered = sorted(counts.items(), key=lambda entry: (-entry[1], entry[0]))
     return tuple(LinkFacet(value=value, count=count) for value, count in ordered)
+
+
+def _state_facets(
+    items: Iterable[LinkItem], known: Mapping[LinkState, frozenset[str]]
+) -> tuple[LinkFacet, ...]:
+    """Return what is known about these URLs, the ones not yet known first.
+
+    Nothing at all when no state was resolved. A row of chips claiming every URL
+    is new would be a claim this installation did not make: *"nobody asked"* and
+    *"the answer was none"* look identical once counted, and only one of them is
+    something to put on a page.
+
+    :data:`UNTRACKED` leads because it is the one people reach for — a second
+    crawl of a site is run to find what the first one did not have. The states
+    themselves follow in the order they are declared rather than by count, for
+    the reason :func:`_target_facets` gives.
+
+    A state nothing is in is left out, the same way an absent target kind is. A
+    filter that can only produce an empty table is not worth a chip.
+    """
+    if not known:
+        return ()
+    urls = tuple(item.url for item in items)
+    counts = {
+        state: sum(1 for url in urls if url in matched)
+        for state, matched in known.items()
+        if state in LinkState
+    }
+    untracked = sum(1 for url in urls if not any(url in matched for matched in known.values()))
+    facets = [LinkFacet(value=UNTRACKED, count=untracked)] if untracked else []
+    facets.extend(
+        LinkFacet(value=str(state), count=counts[state]) for state in LinkState if counts.get(state)
+    )
+    return tuple(facets)
 
 
 def _target_facets(items: Iterable[LinkItem]) -> tuple[LinkFacet, ...]:

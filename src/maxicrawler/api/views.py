@@ -23,9 +23,10 @@ from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlencode
 
-from maxicrawler.api.downloads import DownloadSnapshot, QueueSnapshot
+from maxicrawler.api.downloads import DownloadSnapshot, QueueSnapshot, QueueTally
 from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.app import (
+    UNTRACKED,
     DownloadProgress,
     DownloadSummary,
     LibraryItem,
@@ -36,6 +37,7 @@ from maxicrawler.app import (
     LinkPage,
     LinkQuery,
     LinkSort,
+    LinkState,
     PageQuery,
     PageSlice,
     PageState,
@@ -324,14 +326,22 @@ def queue_view(snapshot: QueueSnapshot, *, limit: int) -> dict[str, Any]:
     here rendered in full — it is the only one with something to report — so it
     goes through :func:`download_view` and everything else through a row
     builder that answers only what its table asks.
+
+    There is a bar across the whole queue and deliberately no estimate under it.
+    A waiting request has not been inspected: nothing here knows what it points
+    at, how many files it will turn out to be or how large they are, so "about
+    twelve minutes left" would be a number invented rather than measured. What
+    can be measured is what has already happened, and that is what is shown.
     """
     waiting = tuple(
         _waiting_row(item, position, last=position == len(snapshot.waiting))
         for position, item in enumerate(snapshot.waiting, start=1)
     )
+    unarrived = sum(1 for item in snapshot.finished if not item.status.is_success)
     return {
         "is_paused": snapshot.is_paused,
         "is_busy": snapshot.is_busy,
+        "follow": queue_follow(snapshot),
         "active": None if snapshot.active is None else download_view(snapshot.active),
         "waiting": waiting,
         "finished": tuple(_finished_row(item) for item in snapshot.finished),
@@ -343,11 +353,39 @@ def queue_view(snapshot: QueueSnapshot, *, limit: int) -> dict[str, Any]:
         "stopped": format_number(snapshot.stopped),
         "has_failures": snapshot.failed > 0,
         "bytes_written": format_size(snapshot.bytes_written),
+        # How far along the whole queue is, which the per-file bar cannot say.
+        "done": format_number(snapshot.done),
+        "known": format_number(snapshot.known),
+        "progress_percent": _queue_percent(snapshot),
+        "has_progress": snapshot.known > 0,
+        # An average over the time actually spent transferring, and said to be
+        # one. It is not what the line is doing this second, and a page that let
+        # it be read that way would be lying quietly rather than loudly.
+        "rate": _rate(snapshot.bytes_written, snapshot.transfer_seconds),
+        # Counted off the rows on the page rather than from the totals, because
+        # this is the label on a button that acts on exactly those rows: the
+        # ones already evicted have no URL left to try again.
+        "unarrived": format_number(unarrived),
+        # One, and the row's own button is beside it already. A second button
+        # doing the same thing as the one next to it teaches nothing.
+        "can_retry_all": unarrived > 1,
+        "has_history": bool(snapshot.finished),
         # Named rather than implied, so a refusal is not the first time somebody
         # learns there is a ceiling at all.
         "limit": format_number(limit),
         "is_nearly_full": len(snapshot.waiting) >= limit * NEARLY_FULL,
     }
+
+
+def _queue_percent(snapshot: QueueSnapshot) -> int:
+    """Return how much of what is known has been got through, as a percentage.
+
+    Rounded down, so a queue with anything left in it never reads as a hundred
+    per cent. The last file finishing is what puts it there, not arithmetic.
+    """
+    if snapshot.known == 0:
+        return 0
+    return int(snapshot.done * 100 / snapshot.known)
 
 
 NEARLY_FULL = 0.9
@@ -356,6 +394,80 @@ NEARLY_FULL = 0.9
 Late enough not to nag over an ordinary afternoon, early enough that a refusal
 is not a surprise.
 """
+
+QUEUE_PART = "queue"
+"""What ``part`` has to say for the queue's panels to be answered on their own."""
+
+QUEUE_FRAGMENT_URL = f"/downloads?part={QUEUE_PART}"
+"""Where the panels of the queue page are, without the page around them."""
+
+QUEUE_REGION = "queue"
+"""The element on the queue page that holds everything a transfer changes."""
+
+
+def queue_follow(snapshot: QueueSnapshot) -> dict[str, Any] | None:
+    """Return what the queue page has left to watch, or ``None``.
+
+    Three answers rather than two, and the third is what this exists for. There
+    is a transfer to listen to; there is nothing left to do at all; and there is
+    the moment *between* two transfers, where the queue is busy and the worker
+    has not picked the next one up. A page that read the third as the second
+    would stop following a batch of two hundred at whichever file lost that
+    race — which over two hundred files is not a rare event, it is an expected
+    one. So the third is answered with somewhere to ask again and nothing to
+    listen to, and the browser asks again.
+
+    A paused queue is not busy in the sense this means. Nothing will be taken
+    off it until somebody presses Resume, and that press is a page load.
+
+    Both URLs are written here rather than in the template because they are the
+    same decision: *where the answer is* and *where it goes* belong to whoever
+    decided there was something to ask for.
+    """
+    if not snapshot.is_busy or snapshot.is_paused:
+        return None
+    active = snapshot.active
+    running = None if active is None or active.is_finished else active
+    return {
+        "stream": None if running is None else f"/downloads/{running.download_id}/events",
+        "swap": QUEUE_FRAGMENT_URL,
+        "into": QUEUE_REGION,
+    }
+
+
+QUEUE_STRIP_URL = "/downloads"
+"""Where the strip in the top bar leads. The queue is the only detail it has."""
+
+
+def queue_strip(tally: QueueTally) -> dict[str, Any] | None:
+    """Return the queue's line for the top bar, or ``None`` when it has none.
+
+    Counts and nothing else. The line that names the running file already
+    exists on the two pages that have room for it; this one is on *every* page,
+    which is a different job and has to be a different sentence — otherwise the
+    dashboard says the same thing twice in two shapes.
+
+    A part is written only when it is not zero, so an idle installation has an
+    unchanged top bar and a busy one gains exactly as much as it has to say.
+    Read once per page render from :meth:`~maxicrawler.api.downloads.TransferQueue.tally`,
+    which is why it is counts: a strip is not worth a snapshot of five hundred
+    waiting requests.
+    """
+    if not tally.is_worth_saying:
+        return None
+    parts = []
+    if tally.running:
+        parts.append({"text": f"{format_number(tally.running)} downloading", "tone": "busy"})
+    if tally.waiting:
+        parts.append({"text": f"{format_number(tally.waiting)} waiting", "tone": "idle"})
+    if tally.failed:
+        parts.append({"text": f"{format_number(tally.failed)} failed", "tone": "bad"})
+    if tally.is_paused:
+        # Last, and said even with nothing in the queue: it is the answer to
+        # "why is nothing happening", which is a question asked about an empty
+        # queue as often as about a full one.
+        parts.append({"text": "paused", "tone": "warn"})
+    return {"parts": tuple(parts), "url": QUEUE_STRIP_URL}
 
 
 def _waiting_row(snapshot: DownloadSnapshot, position: int, *, last: bool) -> dict[str, Any]:
@@ -678,6 +790,71 @@ silently throw away the link filter you were looking at, which is the kind of
 thing that teaches somebody to stop using the filters.
 """
 
+SHUT_PARAM = "shut"
+"""Which query parameter names the collapsed panels; see :func:`panel_view`."""
+
+PANELS: tuple[str, ...] = ("summary", "pages", "links")
+"""The parts of a report that can be folded away, in the order they appear.
+
+Named here rather than discovered from the templates, because the value in the
+query string is one of these words and a report has to be able to ignore a word
+that is not.
+"""
+
+
+def panel_view(
+    shut: Container[str], *, base: str, carry: Mapping[str, str] = MappingProxyType({})
+) -> dict[str, dict[str, Any]]:
+    """Return, for each panel, whether it is open and the link that flips it.
+
+    A link and a query parameter rather than a ``<details>`` element, which is
+    what the three breakdowns inside the summary still are — and the difference
+    is what this exists for. A ``<details>`` forgets on every click, which is
+    right for a breakdown you open to read once and wrong for a table you are
+    keeping out of your way while you work the one below it. Filtering, sorting,
+    paging and choosing columns all already survive a click by living in the
+    URL; this was the only part of *how you have the report set up* that did not.
+
+    The cost is a page load to fold something, and it is the right way round:
+    you pay it once and every reload afterwards is the shorter page.
+
+    Each link carries the rest of the query string untouched, so folding the
+    page table cannot disturb the link filter beside it, and lands on the panel
+    it just changed rather than at the top — a control that scrolls away from
+    itself is one nobody uses twice.
+    """
+    closed = frozenset(name for name in PANELS if name in shut)
+    return {
+        name: {
+            "is_open": name not in closed,
+            "label": "Expand" if name in closed else "Collapse",
+            "url": _panel_url(base, carry, closed ^ {name}, at=name),
+        }
+        for name in PANELS
+    }
+
+
+def _panel_url(base: str, carry: Mapping[str, str], closed: Container[str], *, at: str) -> str:
+    """Return the report URL with *closed* the set of folded panels."""
+    written = dict(carry)
+    value = ",".join(name for name in PANELS if name in closed)
+    if value:
+        written[SHUT_PARAM] = value
+    return f"{base}?{urlencode(written)}#{at}" if written else f"{base}#{at}"
+
+
+TRANSIENT_PARAMS = frozenset({"queued", "bad", "full"})
+"""What a report says once and then stops saying.
+
+The outcome of the batch that sent you back here. Neither table owns these and
+*both* have to drop them: a confirmation is about the click that just happened,
+and carrying it forward would make it a claim about every click after — you
+would change the filter and still be told twelve links were queued.
+
+Dropping them is all it takes to make the strip disappear on the next click,
+which is why nothing anywhere has to remember having shown it.
+"""
+
 
 def page_view(
     slice: PageSlice, *, base: str, carry: Mapping[str, str] = MappingProxyType({})
@@ -756,18 +933,56 @@ class LinkColumn:
 
 
 LINK_COLUMNS: tuple[LinkColumn, ...] = (
+    LinkColumn("state", "State"),
     LinkColumn("plugin", "Plugin", LinkSort.PLUGIN),
     LinkColumn("category", "Category"),
     LinkColumn("target", "Type"),
     LinkColumn("url", "URL", LinkSort.URL),
+    LinkColumn("raw", "As written"),
     LinkColumn("source", "Found on", LinkSort.SOURCE),
 )
 """The columns a reader can turn off, in the order they are read.
 
-``category`` and ``target`` are not sortable, and deliberately have no ordering
-of their own: both are short labels with a handful of values, and grouping by
-them is what the facet chips already do in one click.
+``state`` leads, next to the checkboxes, because it is the column a person is
+reading *in order to* tick a box. Everything else in the row describes what the
+URL is; this one is the only thing that says whether you already have it.
+
+``raw`` is a column rather than the second line under the URL it used to be. On
+a crawl where most URLs were rewritten that line doubled the height of the whole
+table, and a reader who does not care what a link said before normalisation had
+no way to say so. As a column it is one line either way and turns off like the
+rest — which is the point: the same rows, on half the screen.
+
+``state``, ``raw``, ``category`` and ``target`` are not sortable, and
+deliberately have no ordering of their own. The first three are short labels
+with a handful of values, and grouping by them is what the facet chips already
+do in one click; the last would order almost exactly as ``url`` does, and a
+second heading that sorts the same way is a heading that teaches nothing.
 """
+
+STATE_COLUMN = "state"
+"""The one column that is not always there; see :func:`link_view`."""
+
+LINK_STATE_LABELS: dict[str, str] = {
+    UNTRACKED: "new",
+    LinkState.IN_LIBRARY: "in library",
+    LinkState.IN_QUEUE: "in queue",
+}
+"""What each state is called, keyed the way a query string spells it.
+
+Nouns rather than sentences. *"In library"* is true of a folder share the moment
+one file inside it is stored; *"downloaded"* would not be, and a wording that
+becomes a lie as soon as containers exist is not a wording to build a filter on.
+"""
+
+LINK_STATE_TONES: dict[str, str] = {
+    UNTRACKED: "idle",
+    LinkState.IN_LIBRARY: "good",
+    LinkState.IN_QUEUE: "busy",
+}
+"""Which badge colour each state wears. "New" is the quiet one deliberately: on
+a first crawl it is every row, and a table shouting at all three thousand of
+them draws the eye to nothing."""
 
 REQUIRED_COLUMN = "url"
 """The one column that cannot be hidden.
@@ -813,9 +1028,53 @@ DOWNLOADABLE_CHOICES: tuple[tuple[str, str], ...] = (
 
 
 LINK_PARAMS = frozenset(
-    {"q", "plugin", "category", "target", "dl", "norm", "sort", "dir", "page", "hide"}
+    {"q", "plugin", "category", "target", "state", "dl", "norm", "sort", "dir", "page", "hide"}
 )
 """Which query parameters the link table owns; see :data:`PAGE_PARAMS`."""
+
+
+@dataclass(frozen=True, slots=True)
+class QueuedBatch:
+    """What a batch of links did to the queue, on the way back to the report."""
+
+    queued: int
+    rejected: int = 0
+    """How many were not links this installation could have fetched."""
+
+    no_room: int = 0
+    """How many matched or were selected and did not fit."""
+
+
+def _queued_notice(batch: QueuedBatch) -> dict[str, Any]:
+    """Return the strip a report shows about the batch that just left it.
+
+    Three numbers rather than one, because the interesting outcome is the
+    partial one: a selection of two hundred where the queue took a hundred and
+    fifty is a job mostly done, and a page saying only *"150 links queued"*
+    leaves somebody to discover the other fifty by counting.
+
+    The remainder is not restated as an instruction. What to do about a full
+    queue is on the queue's own page, which the strip links to, and a report
+    that started giving advice about a queue would be the second place to
+    maintain the same sentence.
+    """
+    notes = []
+    if batch.no_room:
+        notes.append(f"{format_number(batch.no_room)} did not fit — the queue is full.")
+    if batch.rejected:
+        notes.append(
+            f"{format_number(batch.rejected)} could not be fetched by the providers installed here."
+        )
+    return {"sentence": _queued_sentence(batch.queued), "notes": tuple(notes)}
+
+
+def _queued_sentence(queued: int) -> str:
+    """Return what the strip leads with, counted rather than pluralised badly."""
+    if queued == 0:
+        return "Nothing was queued."
+    if queued == 1:
+        return "1 link queued."
+    return f"{format_number(queued)} links queued."
 
 
 def link_view(
@@ -825,6 +1084,7 @@ def link_view(
     hidden: Container[str] = (),
     carry: Mapping[str, str] = MappingProxyType({}),
     downloads_everything: bool = False,
+    queued: QueuedBatch | None = None,
 ) -> dict[str, Any]:
     """Return the link table, its filters, its facets and its paging.
 
@@ -846,23 +1106,33 @@ def link_view(
     The parameter, rather than a guess from the rows on screen: one page of a
     crawl is not evidence about the crawl, and it is the installation that
     decides this, not the links.
+
+    The state column is withdrawn the same way, but on evidence the page
+    carries: :attr:`~maxicrawler.app.LinkPage.known` is empty exactly when
+    nothing was asked, and a column of badges reading "new" against a question
+    nobody put would be a claim rather than an answer.
+
+    *queued* is what a batch did on its way back here, and is absent on every
+    other view of the report. It has no effect on the links this builds, which
+    is what makes the confirmation last exactly one page: nothing carries it
+    forward, so nothing has to remember having shown it.
     """
     query = page.query
     rows = link_rows(page)
-    shown = frozenset(
-        column.name for column in LINK_COLUMNS if column.name not in hidden
-    ) | frozenset({REQUIRED_COLUMN})
+    columns = tuple(column for column in LINK_COLUMNS if column.name != STATE_COLUMN or page.known)
+    shown = frozenset(column.name for column in columns if column.name not in hidden) | frozenset(
+        {REQUIRED_COLUMN}
+    )
     return {
         "rows": rows,
         "shown": shown,
         "headers": tuple(
             _link_header(column, query, base=base, hidden=hidden, carry=carry)
-            for column in LINK_COLUMNS
+            for column in columns
             if column.name in shown
         ),
         "toggles": tuple(
-            _link_toggle(column, query, base=base, hidden=hidden, carry=carry)
-            for column in LINK_COLUMNS
+            _link_toggle(column, query, base=base, hidden=hidden, carry=carry) for column in columns
         ),
         "total": format_number(page.total),
         "recorded": format_number(page.recorded),
@@ -888,11 +1158,20 @@ def link_view(
         # is what makes this the half of the feature that cannot leak a key.
         "matches_action": _matches_action(base, query, hidden, carry),
         "match_count": format_number(page.total),
+        # Where a batch sends the browser afterwards: this report, this filter,
+        # this column layout, at the table rather than at the top of the page.
+        # Only the selection needs telling — the filter form's action already
+        # carries the query, and the server rebuilds the way back from it rather
+        # than trusting a second copy that could disagree with the first.
+        "return_to": _link_url(base, query, hidden, carry),
+        # What the batch that sent you back here did, said once.
+        "queued": None if queued is None else _queued_notice(queued),
         # What the filter form shows as its current state.
         "search": query.search,
         "plugin": query.plugin or "",
         "category": query.category or "",
         "target": "" if query.target is None else str(query.target),
+        "state": query.state or "",
         "downloadable": _downloadable_value(query.downloadable),
         "normalized_only": query.normalized_only,
         "downloadable_choices": () if downloads_everything else DOWNLOADABLE_CHOICES,
@@ -1037,6 +1316,7 @@ def _link_facets(
             lambda value: TARGET_LABELS[TargetKind(value)],
         ),
         ("Category", page.categories, "category", query.category, lambda value: value),
+        ("State", page.states, "state", query.state, _link_state_label),
     )
     rows = []
     for heading, facets, name, active, label_of in groups:
@@ -1066,6 +1346,18 @@ def _link_facets(
     return tuple(rows)
 
 
+def _link_state_label(value: str) -> str:
+    """Return what a state is called, or the value itself for one nobody named.
+
+    Unlike the target kinds beside it, the states are an open set on purpose:
+    the enum's own docstring promises that adding one costs a member, a resolver
+    and a label. A missing label must therefore degrade to something legible
+    rather than take the whole report down with a lookup error — the promise is
+    only kept if the render side survives being the part that lags.
+    """
+    return LINK_STATE_LABELS.get(value, value)
+
+
 def _hide_value(hidden: Container[str]) -> str:
     """Return the hidden columns as the query string writes them."""
     return ",".join(name for name in _column_names() if name in hidden)
@@ -1092,6 +1384,7 @@ def _link_url(
         "plugin": changes.get("plugin", query.plugin) or "",
         "category": changes.get("category", query.category) or "",
         "target": "" if target is None else str(target),
+        "state": changes.get("state", query.state) or "",
         "dl": _downloadable_value(downloadable),
         "norm": "1" if changes.get("normalized_only", query.normalized_only) else "",
         "sort": str(changes.get("sort", query.sort)),
@@ -1374,10 +1667,40 @@ def _page_row(page: PageOutcome) -> dict[str, Any]:
 
 def link_rows(page: LinkPage) -> tuple[dict[str, Any], ...]:
     """Return one row per URL on *page*, in the order the service put them in."""
-    return tuple(_link_row(item, downloadable=page.downloadable) for item in page.items)
+    return tuple(
+        _link_row(item, downloadable=page.downloadable, known=page.known) for item in page.items
+    )
 
 
-def _link_row(item: LinkItem, *, downloadable: Container[str] = ()) -> dict[str, Any]:
+def _state_marks(url: str, known: Mapping[LinkState, frozenset[str]]) -> tuple[dict[str, str], ...]:
+    """Return the badges one row wears, or the one that says it wears none.
+
+    Empty when nothing was asked, which is what withdraws the column entirely.
+    Otherwise never empty: a row in no state gets the "new" badge rather than a
+    blank cell. A blank would be the third meaning of an empty cell in this
+    table — beside "the URL did not say" and "no plugin claimed it" — and the
+    one thing a reader must be able to trust here is that no mark and *new* are
+    the same sentence.
+
+    Declared order rather than resolver order, so two reports of the same crawl
+    put the same badges in the same places.
+    """
+    if not known:
+        return ()
+    marks = tuple(
+        {"label": _link_state_label(str(state)), "tone": LINK_STATE_TONES.get(str(state), "")}
+        for state in LinkState
+        if url in known.get(state, frozenset())
+    )
+    return marks or ({"label": _link_state_label(UNTRACKED), "tone": LINK_STATE_TONES[UNTRACKED]},)
+
+
+def _link_row(
+    item: LinkItem,
+    *,
+    downloadable: Container[str] = (),
+    known: Mapping[LinkState, frozenset[str]] = MappingProxyType({}),
+) -> dict[str, Any]:
     """Return one recorded URL as a table row.
 
     ``plugin`` and ``category`` are where a URL nothing claimed gets its
@@ -1408,6 +1731,11 @@ def _link_row(item: LinkItem, *, downloadable: Container[str] = ()) -> dict[str,
         # as "is it notable": a host-specific plugin can classify a link whose
         # provider cannot transfer anything.
         "can_download": item.url in downloadable,
+        # What is known about this URL beyond the crawl having found it. A row
+        # can wear several: a folder with one file stored and another queued is
+        # in both states, and showing one of them would be choosing which half
+        # of the truth to tell.
+        "states": _state_marks(item.url, known),
     }
 
 

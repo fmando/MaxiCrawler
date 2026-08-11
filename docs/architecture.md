@@ -661,8 +661,12 @@ rejected:
 
 1. **The file system is the source of truth.** Every entry describes itself, so
    a library survives losing a database, can be moved with `rsync`, and stays
-   readable with a text editor. An index may be added later as a cache, never
-   as the authority.
+   readable with a text editor. There is an index now, and it is a cache rather
+   than the authority: `LibraryService` answers *set* questions from it — a
+   listing, and soon "is this URL among them?" — and reads a single entry from
+   its own directory, so a stale row can delay a listing and can never serve the
+   wrong file. Every entry is `stat`-ed on every listing, and only the documents
+   that changed are read again.
 2. **The payload and the metadata cannot collide.** A provider is free to name
    a file `metadata.json`; putting the payload in its own directory makes that
    harmless instead of destructive.
@@ -1364,7 +1368,7 @@ maxicrawler.api ─┘
 | `downloads` | *"What is transferring?"* A queue of requests, drained one at a time by a worker thread. |
 | `stream` | *"What has changed?"* Snapshots from a worker thread to an `EventSource`, for either of the two. |
 | `errors` | *"What is missing?"* Imports nothing, so it can be read by an installation that cannot import the rest. |
-| `templates/`, `static/` | The pages, one stylesheet, one script. |
+| `templates/`, `static/` | The pages, one stylesheet, and four small scripts. |
 
 Starlette rather than FastAPI. FastAPI earns its weight through request-model
 validation and a generated OpenAPI document, and this serves HTML with three
@@ -1387,8 +1391,17 @@ crawl, and it does not render one.
 | `GET /crawls/{id}.json` | The same crawl as `crawl --json` prints it, from the same function. |
 | `GET /crawls/{id}/events` | The progress stream. |
 | `POST /crawls/{id}/stop` | The same request to stop that Ctrl-C makes. |
+| `POST /crawls/{id}/downloads` | Queue every fetchable link this crawl's current filter matches. Addressed against the crawl, because the crawl is what the filter is re-run over. |
+| `GET /downloads` | The whole queue: running, waiting, and what became of the rest. With `?part=queue`, the panels alone, for a page that already has the rest. |
 | `POST /downloads` | Start one download, from a form field holding the link. |
+| `POST /downloads/selection` | Queue the links that were ticked, from repeated fields in the body. |
+| `POST /downloads/pause` | Hold the queue, or let it go. A field says which, so a stale page cannot pause what somebody resumed. |
+| `POST /downloads/retry` | Queue everything in the history that ended without the file arriving. |
+| `POST /downloads/clear` | Forget the finished rows, and the counters over them. |
 | `GET /downloads/{id}` | One transfer, live or finished. |
+| `POST /downloads/{id}/stop` | Stop a transfer, or take a waiting one out of the line. One button for one intention. |
+| `POST /downloads/{id}/retry` | Queue the same link again, as a new request rather than a reset of the old one. |
+| `POST /downloads/{id}/move` | Move one waiting request within the queue. |
 | `GET /downloads/{id}/events` | Its progress stream. |
 | `GET /library` | What has been downloaded, searched, filtered, sorted and paged. |
 | `GET /library/{provider}/{key}` | One stored file, and everything known about it. |
@@ -1429,10 +1442,23 @@ the traffic is one-directional, and a reconnect is the browser's problem.
 
 ### Without JavaScript
 
-Every page is complete from the server. The live view replaces numbers that are
-already rendered, and reloading asks for the same numbers again. With scripting
-off the interface still works; it stops updating by itself, which is all the
-script does.
+Every page is complete from the server, and nothing is reachable only through a
+script: every batch is a form, every reorder is a form, every fold is a link.
+With scripting off the interface still works; it stops sparing you the
+reloading.
+
+Two things a script may not do, and they are the whole rule (ADR-038). It
+**formats nothing** — every value it writes was formatted by the same server
+code that rendered the page, which is why an event frame carries "1 min 23 s"
+rather than 83. And it **decides nothing** — where to look next is written by
+the server into a data attribute. `download.js` reads three of them: which
+stream to listen to, where to ask when that stream ends, and where the answer
+goes. Which of them the server renders is the only difference between the queue
+page and one download's page, and the script does not know there are two.
+
+That last part is what turned following a batch from one page load per file
+into one small answer per file: when a transfer ends, the queue page asks for
+`/downloads?part=queue` and replaces the panels rather than itself.
 
 Nothing on a page is loaded from another host. There is no CDN, no web font and
 no analytics — an interface that needed the internet to draw itself would be a

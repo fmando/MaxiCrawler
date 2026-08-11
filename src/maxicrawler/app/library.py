@@ -6,17 +6,39 @@ this service reads it, and is where searching, filtering, sorting and paging
 live so that a browser and a future ``library list`` command cannot disagree
 about what "sorted by name" means.
 
-**The file system is the index.** Every entry describes itself (ADR-010), so a
-query reads one small document per stored resource and no database. That is a
-deliberate cost, and it is measured rather than assumed: on the machine this was
-written on, two thousand entries take about 0.3 seconds once the directory is
-warm in the operating system's cache, and roughly sixteen seconds the very first
-time — the antivirus scanner reads every file before Python does. Paging does not
-help, because searching and sorting need every record. What would help is an
-index kept as a *cache*, invalidated by modification time, and ADR-010 already
-says that is allowed while making the file system the authority. It is not built
-yet because a library of a few dozen entries does not notice, and a cache nobody
-needs is a source of stale answers.
+**The file system is the authority; the index is a cache in front of it.** Every
+entry describes itself (ADR-010), and reading one small document per stored
+resource is what a listing used to cost. That cost was measured rather than
+assumed: on the machine this was written on, two thousand entries take about 0.3
+seconds once the directory is warm in the operating system's cache, and roughly
+sixteen seconds the very first time — the antivirus scanner reads every file
+before Python does. Paging does not help, because searching and sorting need
+every record.
+
+So a listing now consults
+:class:`~maxicrawler.database.library.SQLiteLibraryIndex` and reads only the
+documents that changed. Every entry is still *stat*-ed on every listing, which is
+what makes the cache safe to believe: a row is trusted only while the document it
+came from has the same modification time and size. The saving is the parse, not
+the walk.
+
+Three rules keep the cache from quietly becoming the authority, and each of them
+is a property this module can be read for:
+
+* **Only set questions go through it.** :meth:`LibraryService.browse` does;
+  :meth:`LibraryService.item` and :meth:`LibraryService.payload` do not, and read
+  the entry's own directory as they always have. A stale row can therefore delay
+  a listing and can never serve the wrong file.
+* **A database that cannot be used is not an error.** Every failure of the index
+  falls back to reading the file system, which is the behaviour this service had
+  before the index existed and still has when none is supplied.
+* **It is built here, not by a client.** The cache lives in the metadata
+  database the settings already name, and it is assembled by this service for
+  the same reason
+  :meth:`~maxicrawler.app.discovery.DiscoveryService._repository` assembles its
+  own: a client that built one would be building a second object graph, which
+  ``tests/test_api_boundaries.py`` forbids by name. An index may still be handed
+  in, which is how a test points one at a database of its own.
 
 **A damaged entry is skipped, never raised.** One directory holding unreadable
 JSON must not be able to empty the page that would have shown the other nine
@@ -25,7 +47,9 @@ at the directory; what it buys is that a library stays browsable while it is
 being repaired.
 """
 
-from collections.abc import Callable, Iterator
+import json
+import sqlite3
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -35,8 +59,10 @@ from typing import Any
 
 from maxicrawler.app.viewing import MediaVerdict, verdict_for
 from maxicrawler.config import Settings
+from maxicrawler.database import IndexedEntry, SQLiteDatabase, SQLiteLibraryIndex
 from maxicrawler.domain import DownloadStatus
 from maxicrawler.library import Library, LibraryEntry, LibraryError, ResourceRecord
+from maxicrawler.utils import strip_fragment
 
 DEFAULT_PER_PAGE = 50
 """How many stored resources one page of the library shows."""
@@ -198,9 +224,19 @@ class LibraryPage:
 class LibraryService:
     """Everything a client needs to browse the library, and nothing about showing it."""
 
-    def __init__(self, settings: Settings, *, library: Library | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        library: Library | None = None,
+        index: SQLiteLibraryIndex | None = None,
+    ) -> None:
         self._settings = settings
         self._library = library if library is not None else Library(settings.library_path)
+        self._injected_index = index
+        self._cached_index: SQLiteLibraryIndex | None = None
+        self._index_unavailable = False
+        self._root_key = _root_key(self._library.root)
 
     @property
     def settings(self) -> Settings:
@@ -273,12 +309,165 @@ class LibraryService:
             media=verdict_for(item.filename, size, max_bytes=self._settings.max_view_bytes),
         )
 
+    def stored(self, urls: Iterable[str]) -> frozenset[str]:
+        """Return which of *urls* the library holds something fetched from.
+
+        The answer a report marks its rows with, and the shape
+        :data:`~maxicrawler.app.discovery.StateResolver` asks for: a set of the
+        URLs *as they were given*, so the caller can match them against what it
+        already has.
+
+        Fragments are stripped before comparing and kept in the answer. A share
+        link carries its decryption key there, a stored record never does
+        (ADR-020), and the two would otherwise never compare equal — while a
+        caller handed back a key-less URL would have lost the only thing that
+        makes the link usable.
+
+        This is a claim about the URL, not about completeness: a share naming a
+        folder is recorded by each file inside it, under the container's URL, so
+        one stored file puts the container in this answer. What that is called
+        where somebody reads it is the caller's decision, and
+        :class:`~maxicrawler.app.discovery.LinkState` is where it is made.
+
+        Asked in bulk because the cost is one pass over the library, not one per
+        URL — and the cost of a pass is what the index exists to keep small: the
+        source URLs are a column on it, so this reads no metadata document at all.
+        """
+        asked = tuple(urls)
+        if not asked:
+            return frozenset()
+        known = self._source_urls()
+        return frozenset(url for url in asked if strip_fragment(url) in known)
+
+    def _source_urls(self) -> frozenset[str]:
+        """Return every URL the library has stored something from.
+
+        Off the index's own column where there is one, which reads no document
+        and parses no JSON, and off the entries themselves where there is not.
+        """
+        index = self._index()
+        if index is not None:
+            try:
+                rows = self._synchronize(index)
+            except sqlite3.Error:
+                pass
+            else:
+                return frozenset(row.source_url for row in rows if row.source_url)
+        return frozenset(item.source_url for item in self._read_entries())
+
     def _items(self) -> Iterator[LibraryItem]:
-        """Yield every entry that describes itself readably."""
+        """Yield every entry that describes itself readably.
+
+        Through the index when there is one, and straight off the file system
+        when there is not — or when the database refuses, which is not a failure
+        anybody should have to see. A cache is allowed to be unavailable.
+        """
+        index = self._index()
+        if index is None:
+            yield from self._read_entries()
+            return
+        try:
+            cached = self._synchronize(index)
+        except sqlite3.Error:
+            yield from self._read_entries()
+            return
+        for row in cached:
+            item = self._item_of(row)
+            if item is not None:
+                yield item
+
+    def _index(self) -> SQLiteLibraryIndex | None:
+        """Return the cache to consult, building it once, or ``None``.
+
+        Built here rather than handed in by the web application, for the reason
+        :meth:`~maxicrawler.app.discovery.DiscoveryService._repository` is: the
+        clients may not assemble an object graph of their own, and
+        ``tests/test_api_boundaries.py`` enforces that by name. Cached rather
+        than rebuilt per call, so the ``CREATE TABLE IF NOT EXISTS`` happens once
+        instead of on every request.
+
+        A database that cannot be opened at all disables the cache for the life
+        of this service instead of being retried on every listing. The library
+        is still fully readable without it; that is the point of it being a
+        cache, and a page that stalls on a broken database every time it is
+        loaded would be a worse failure than the slow listing it replaced.
+        """
+        if self._injected_index is not None:
+            return self._injected_index
+        if self._index_unavailable:
+            return None
+        if self._cached_index is None:
+            index = SQLiteLibraryIndex(SQLiteDatabase(self._settings.database_path))
+            try:
+                index.initialize()
+            except sqlite3.Error:
+                self._index_unavailable = True
+                return None
+            self._cached_index = index
+        return self._cached_index
+
+    def _read_entries(self) -> Iterator[LibraryItem]:
+        """Yield every entry, reading each document from its own directory."""
         for entry in self._library.entries():
             item = _item(entry)
             if item is not None:
                 yield item
+
+    def _synchronize(self, index: SQLiteLibraryIndex) -> tuple[IndexedEntry, ...]:
+        """Bring the cache level with the directories, and return what it holds.
+
+        One pass over the entries, one ``stat`` each, and a read only where the
+        document is new or has changed since it was cached. Entries whose
+        directory has gone are dropped in the same transaction as the additions,
+        so no listing sees a resource in two places at once.
+
+        The walk itself is not saved and is not meant to be: it reads directory
+        names only (ADR-010), and it is what keeps the answer true when somebody
+        adds a library entry with ``rsync`` rather than with a download.
+        """
+        cached = index.entries(self._root_key)
+        present: set[tuple[str, str]] = set()
+        updated: list[IndexedEntry] = []
+        for entry in self._library.entries():
+            stamp = _stamp(entry.metadata_path)
+            if stamp is None:
+                # No metadata document at all: a directory somebody created by
+                # hand is not an entry, which is the rule `_item` already keeps.
+                continue
+            identity = (entry.provider, entry.key)
+            present.add(identity)
+            known = cached.get(identity)
+            if known is not None and known.describes(*stamp):
+                continue
+            fresh = _indexed(entry, stamp)
+            if fresh is None:
+                continue
+            cached[identity] = fresh
+            updated.append(fresh)
+        removed = tuple(identity for identity in cached if identity not in present)
+        for identity in removed:
+            del cached[identity]
+        if updated or removed:
+            index.refresh(self._root_key, updated=updated, removed=removed)
+        return tuple(cached.values())
+
+    def _item_of(self, row: IndexedEntry) -> LibraryItem | None:
+        """Return one cached row as a listed item, or ``None`` when it says nothing.
+
+        The document is parsed here rather than in the adapter, because what a
+        metadata document means is this layer's business and changes when the
+        library's schema does. A row that cannot be parsed is skipped exactly as
+        an unreadable file is: see the module docstring.
+        """
+        record = _record_of(row.document)
+        if record is None:
+            return None
+        return _item_from_record(
+            record,
+            directory=row.directory,
+            key=row.key,
+            path=self._library.root / row.directory / row.key,
+        )
 
 
 def _item(entry: LibraryEntry) -> LibraryItem | None:
@@ -294,17 +483,31 @@ def _item(entry: LibraryEntry) -> LibraryItem | None:
         return None
     if record is None:
         return None
+    return _item_from_record(record, directory=entry.provider, key=entry.key, path=entry.path)
+
+
+def _item_from_record(
+    record: ResourceRecord, *, directory: str, key: str, path: Path
+) -> LibraryItem:
+    """Return the item *record* describes, given where its entry lives.
+
+    Split from :func:`_item` so that a record read from a directory and one read
+    from the index become the same listed row. The three arguments are what the
+    document itself does not say: a record names its provider but not the
+    directory that provider was written to, and knows nothing about where the
+    library it is in has been mounted.
+    """
     content = record.content
     return LibraryItem(
         provider=record.provider,
-        directory=entry.provider,
-        key=entry.key,
-        name=_name(record, entry),
+        directory=directory,
+        key=key,
+        name=_name(record, key),
         status=record.status,
         source_url=record.source_url,
         filename=None if content is None else content.filename,
         size=None if content is None else content.size,
-        path=None if content is None else entry.path / content.path,
+        path=None if content is None else path / content.path,
         checksum=None if content is None else content.checksum("sha256"),
         discovered_at=record.discovered_at,
         downloaded_at=record.downloaded_at,
@@ -313,7 +516,7 @@ def _item(entry: LibraryEntry) -> LibraryItem | None:
     )
 
 
-def _name(record: ResourceRecord, entry: LibraryEntry) -> str:
+def _name(record: ResourceRecord, key: str) -> str:
     """Return what to call this resource.
 
     The recorded name, then the stored file name, then the entry key. A share
@@ -324,7 +527,90 @@ def _name(record: ResourceRecord, entry: LibraryEntry) -> str:
         return record.name
     if record.content is not None and record.content.filename:
         return record.content.filename
-    return entry.key
+    return key
+
+
+def _root_key(root: Path) -> str:
+    """Return what addresses one library inside the shared cache table.
+
+    Resolved, so a library reached as ``library`` and as ``./library`` is one
+    library rather than two sets of rows that each look complete. Not resolved
+    strictly: the directory does not have to exist to be named, and a library
+    that has not been created yet is an ordinary state.
+    """
+    try:
+        return str(root.resolve(strict=False))
+    except OSError:
+        return str(root)
+
+
+def _stamp(path: Path) -> tuple[int, int] | None:
+    """Return the modification time and size of *path*, or ``None``.
+
+    The whole basis for believing a cached row, and deliberately two values
+    rather than one: a modification time has a resolution, and a document
+    rewritten within it is caught by its length changing.
+    """
+    try:
+        status = path.stat()
+    except OSError:
+        return None
+    return (status.st_mtime_ns, status.st_size)
+
+
+def _indexed(entry: LibraryEntry, stamp: tuple[int, int]) -> IndexedEntry | None:
+    """Return the cache row for *entry*, or ``None`` when it cannot be read.
+
+    A document that reads but does not parse still becomes a row, with its
+    columns left empty. That looks odd until you consider the alternative: no
+    row means it is read again on every listing, forever, and a library with one
+    corrupt entry would pay for it on every page. Stored, it is skipped once per
+    change rather than once per request — and :meth:`LibraryService._item_of`
+    leaves it out of the listing either way.
+    """
+    document = _read_document(entry.metadata_path)
+    if document is None:
+        return None
+    record = _record_of(document)
+    content = None if record is None else record.content
+    return IndexedEntry(
+        directory=entry.provider,
+        key=entry.key,
+        mtime_ns=stamp[0],
+        size=stamp[1],
+        document=document,
+        source_url="" if record is None else record.source_url,
+        status="" if record is None else record.status.value,
+        checksum=None if content is None else content.checksum("sha256"),
+    )
+
+
+def _read_document(path: Path) -> str | None:
+    """Return the text of *path*, or ``None`` when it cannot be read."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _record_of(document: str) -> ResourceRecord | None:
+    """Return the record *document* describes, or ``None`` when it describes none.
+
+    Every way of being unreadable answers the same way, for the reason
+    :meth:`LibraryService.item` gives: a caller has one thing to say about a
+    document that is not JSON, one that is JSON but not an object, and one
+    written by a release this one does not understand.
+    """
+    try:
+        parsed = json.loads(document)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    try:
+        return ResourceRecord.from_document(parsed)
+    except LibraryError:
+        return None
 
 
 def _matches(item: LibraryItem, query: LibraryQuery) -> bool:

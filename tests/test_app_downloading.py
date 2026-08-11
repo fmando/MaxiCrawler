@@ -291,7 +291,10 @@ def test_a_download_is_visible_to_the_service_that_reads_the_library(tmp_path: P
     """
     service, library = make_service(tmp_path)
     summary = service.download(FILE_URL)
-    reader = LibraryService(Settings(library_path=library.root), library=library)
+    reader = LibraryService(
+        Settings(library_path=library.root, database_path=tmp_path / "maxicrawler.db"),
+        library=library,
+    )
 
     (item,) = reader.browse().items
 
