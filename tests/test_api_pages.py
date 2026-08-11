@@ -1115,6 +1115,104 @@ def test_the_breakdowns_fold_away(tmp_path: Path) -> None:
     assert re.findall(r'<script src="([^"]+)"', body) == ["/static/select.js"]
 
 
+def headings_of(body: str) -> str:
+    """Return the link table's own heading row.
+
+    Split at the panel first: the page table above it has a ``<thead>`` too, and
+    reaching for the first one on the page finds that one.
+    """
+    links = body.split("Discovered links", 1)[1]
+    return links.split("<thead>", 1)[1].split("</thead>", 1)[0]
+
+
+def test_what_a_link_was_written_as_is_its_own_column(tmp_path: Path) -> None:
+    """One line per row where it used to be two, and turned off in one click."""
+    site = Site()
+    site.add_html("/", '<a href="/A?b=1">a</a>')
+    site.add_html("/A", "<p>x</p>")
+
+    with recording_client(tmp_path) as test_client, serve(site) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        shown = test_client.get(f"/crawls/{job_id}").text
+        hidden = test_client.get(f"/crawls/{job_id}?hide=raw").text
+
+    assert "as written:" not in shown  # the old second line is gone
+    assert "As written" in headings_of(shown)
+    # Gone from the table, and still offered back by the Columns control --
+    # a toggle that vanished with the column would be a one-way door.
+    assert "As written" not in headings_of(hidden)
+    assert "As written" in hidden.split('<details class="toggles">', 1)[1]
+
+
+def test_a_url_nobody_rewrote_says_so_in_that_column(tmp_path: Path) -> None:
+    """A blank would be the reader's job to interpret; the em dash is not."""
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        body = test_client.get(f"/crawls/{job_id}").text
+
+    assert '<td class="url muted small">—</td>' in body
+
+
+def test_a_panel_can_be_folded_away_and_stays_folded(tmp_path: Path) -> None:
+    """The point of the URL rather than a <details>: it survives the next click."""
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        body = test_client.get(f"/crawls/{job_id}?shut=pages").text
+
+    assert "<th>Title</th>" not in body  # the page table's own heading row
+    assert '<section class="panel" id="pages">' in body  # but the panel is still there
+    assert "Discovered links" in body
+
+
+def test_a_folded_panel_keeps_its_heading_and_its_count(tmp_path: Path) -> None:
+    """Otherwise folding it would be hiding what is in there rather than the rows."""
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        body = test_client.get(f"/crawls/{job_id}?shut=links").text
+
+    links = body.split('id="links"', 1)[1]
+    assert "3 unique" in links
+    assert ">Expand</a>" in links
+    assert "Queue selected" not in body
+
+
+def test_folding_a_panel_leaves_the_filter_beside_it_alone(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        body = test_client.get(f"/crawls/{job_id}?plugin=mega").text
+
+    found = re.search(r'<a class="fold-panel" href="([^"]+)">Collapse</a>', body)
+    assert found is not None
+    assert "plugin=mega" in found.group(1)
+
+
+def test_the_fold_of_every_panel_travels_in_one_parameter(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        response = test_client.get(f"/crawls/{job_id}?shut=summary,pages,links")
+
+    assert response.status_code == 200
+    assert "Pages read" not in response.text
+    assert "<th>Title</th>" not in response.text
+    assert "Queue selected" not in response.text
+
+
+def test_a_panel_nobody_recognises_is_ignored(tmp_path: Path) -> None:
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        job_id = start(test_client, base)
+        wait_until_finished(test_client, job_id)
+        body = test_client.get(f"/crawls/{job_id}?shut=nonsense").text
+
+    assert "Discovered links" in body
+    assert "Pages read" in body
+
+
 def test_a_report_can_be_filtered_by_plugin(tmp_path: Path) -> None:
     with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
         body = finished_report(test_client, base, plugin="mega")

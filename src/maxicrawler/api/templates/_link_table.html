@@ -16,7 +16,17 @@
     <span class="count">
       {% if links.is_filtered %}{{ links.total }} of {{ links.recorded }}{% else %}{{ links.recorded }} unique{% endif %}
     </span>
+    {#
+      Absent where nothing supplied the fold state, which is any rendering of
+      this partial outside a report page. The table is the thing there, and a
+      control that folded it away would have nothing left to show.
+    #}
+    {% if panels %}
+      <a class="fold-panel" href="{{ panels.links.url }}">{{ panels.links.label }}</a>
+    {% endif %}
   </h2>
+
+  {% if not panels or panels.links.is_open %}
 
   {#
     What the batch that sent you back here did. Rendered from the URL and
@@ -230,12 +240,16 @@
               {% if "target" in links.shown %}
                 <td{% if not link.target_is_stated %} class="muted"{% endif %}>{{ link.target }}</td>
               {% endif %}
-              <td class="url">
-                {{ link.url }}
-                {% if link.was_normalized %}
-                  <div class="muted small">as written: {{ link.raw_url }}</div>
-                {% endif %}
-              </td>
+              <td class="url">{{ link.url }}</td>
+              {#
+                What the page actually said, where that differs. An em dash
+                where it does not, the same way the source column marks a URL
+                nobody found on a page -- a blank would be the reader's job to
+                interpret.
+              #}
+              {% if "raw" in links.shown %}
+                <td class="url muted small">{{ link.raw_url if link.was_normalized else "—" }}</td>
+              {% endif %}
               {% if "source" in links.shown %}
                 <td class="url muted small">{{ link.source_url or "—" }}</td>
               {% endif %}
@@ -294,5 +308,6 @@
       This crawl found {{ links.discovered }} unique URLs but recorded none of them:
       it ran without persistence. The counts above are still what it saw.
     </p>
+  {% endif %}
   {% endif %}
 </section>

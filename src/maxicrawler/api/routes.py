@@ -237,7 +237,10 @@ async def crawl_detail(request: Request) -> Response:
     job = jobs_of(request).get(request.path_params["job_id"])
     if job is None:
         return _recorded_crawl(request)
-    context: dict[str, Any] = {"crawl": views.progress_view(job.snapshot())}
+    context: dict[str, Any] = {
+        "crawl": views.progress_view(job.snapshot()),
+        "panels": _panels(request, f"/crawls/{job.id}"),
+    }
     report = job.report
     if report is not None:
         context["report"] = views.report_view(report)
@@ -873,6 +876,7 @@ def _recorded_crawl(request: Request) -> Response:
         {
             "crawl": views.stored_view(stored),
             "links": _link_table(request, job_id, discovered=stored.links_discovered),
+            "panels": _panels(request, f"/crawls/{job_id}"),
         },
         section="crawls",
     )
@@ -1016,6 +1020,31 @@ def _downloadable(value: str | None) -> bool | None:
     if value == "yes":
         return True
     return False if value == "no" else None
+
+
+def _panels(request: Request, base: str) -> dict[str, dict[str, Any]]:
+    """Return the fold state of a report's panels, and the links that flip it.
+
+    *carry* is everything in the query string but the fold state itself, so
+    folding a panel keeps the filter, the sort, the page and the columns exactly
+    as they were — the same rule each table already follows about the other.
+    """
+    return views.panel_view(
+        _shut_panels(request),
+        base=base,
+        carry=_carry(request, frozenset({views.SHUT_PARAM})),
+    )
+
+
+def _shut_panels(request: Request) -> frozenset[str]:
+    """Return which panels this request wants folded away.
+
+    Unknown names are dropped rather than refused, exactly as
+    :func:`_hidden_columns` drops them, and for the same reason: the list is
+    written by our own links, so anything else is a stale bookmark.
+    """
+    asked = request.query_params.get(views.SHUT_PARAM, "")
+    return frozenset(name for name in asked.split(",") if name in views.PANELS)
 
 
 def _hidden_columns(request: Request) -> frozenset[str]:

@@ -20,6 +20,7 @@ from maxicrawler.api.views import (
     LINK_STATE_LABELS,
     LINK_STATE_TONES,
     PAGE_PARAMS,
+    PANELS,
     STATE_LABELS,
     STATE_TONES,
     TRANSIENT_PARAMS,
@@ -36,6 +37,7 @@ from maxicrawler.api.views import (
     link_view,
     page_rows,
     page_view,
+    panel_view,
     plugin_shares,
     progress_view,
     queue_strip,
@@ -859,6 +861,24 @@ def test_clicking_the_active_column_reverses_it() -> None:
     assert "dir=desc" in header["url"]
 
 
+def test_what_a_link_was_written_as_is_a_column_of_its_own() -> None:
+    """It was a second line under the URL, which doubled the height of the table."""
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
+    toggles = {toggle["name"]: toggle for toggle in view["toggles"]}
+
+    assert "raw" in view["shown"]
+    assert toggles["raw"]["label"] == "As written"
+    assert "hide=raw" in toggles["raw"]["url"]
+
+
+def test_the_raw_column_cannot_be_ordered_by() -> None:
+    """It would order almost exactly as the URL beside it already does."""
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
+    (header,) = [header for header in view["headers"] if header["name"] == "raw"]
+
+    assert header["url"] is None
+
+
 def test_every_column_but_the_url_can_be_turned_off() -> None:
     view = make_link_view(make_link_page([make_link("https://example.test/a")]))
     toggles = {toggle["name"]: toggle for toggle in view["toggles"]}
@@ -879,6 +899,7 @@ def test_a_hidden_column_is_left_out_and_offered_back() -> None:
         "category",
         "target",
         "url",
+        "raw",
     ]
     assert toggles["source"]["shown"] is False
     assert "hide=" not in toggles["source"]["url"]
@@ -1063,6 +1084,57 @@ def test_a_state_nobody_named_is_shown_as_itself() -> None:
     (group,) = [row for row in view["facets"] if row["heading"] == "State"]
 
     assert group["chips"][0]["label"] == "hash"
+
+
+# --- folding a panel away ------------------------------------------------------
+
+
+def test_every_panel_starts_open() -> None:
+    panels = panel_view(frozenset(), base=BASE)
+
+    assert set(panels) == set(PANELS)
+    assert all(panel["is_open"] for panel in panels.values())
+    assert all(panel["label"] == "Collapse" for panel in panels.values())
+
+
+def test_a_folded_panel_says_so_and_offers_the_way_back() -> None:
+    panels = panel_view(frozenset({"pages"}), base=BASE)
+
+    assert panels["pages"]["is_open"] is False
+    assert panels["pages"]["label"] == "Expand"
+    assert panels["pages"]["url"] == f"{BASE}#pages"
+    assert panels["links"]["url"] == f"{BASE}?shut=pages%2Clinks#links"
+
+
+def test_folding_a_panel_leaves_everything_else_where_it_was() -> None:
+    """Filtering, sorting, paging and columns all outlive a fold."""
+    panels = panel_view(
+        frozenset(), base=BASE, carry={"plugin": "mega", "sort": "url", "hide": "source"}
+    )
+
+    assert panels["pages"]["url"] == (f"{BASE}?plugin=mega&sort=url&hide=source&shut=pages#pages")
+
+
+def test_a_link_lands_on_the_panel_it_just_changed() -> None:
+    """A control that scrolls away from itself is one nobody uses twice."""
+    panels = panel_view(frozenset(), base=BASE)
+
+    for name, panel in panels.items():
+        assert panel["url"].endswith(f"#{name}")
+
+
+def test_an_untouched_report_writes_no_fold_state() -> None:
+    """The default is nothing in the URL, the same way every other default is."""
+    panels = panel_view(frozenset({"summary"}), base=BASE)
+
+    assert panels["summary"]["url"] == f"{BASE}#summary"
+
+
+def test_the_panels_are_written_in_the_order_they_appear() -> None:
+    """So one report has one URL, whichever order the folds were clicked in."""
+    panels = panel_view(frozenset({"links", "summary"}), base=BASE)
+
+    assert "shut=summary%2Cpages%2Clinks" in panels["pages"]["url"]
 
 
 # --- what the top bar says about the queue ------------------------------------

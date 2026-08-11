@@ -714,6 +714,59 @@ silently throw away the link filter you were looking at, which is the kind of
 thing that teaches somebody to stop using the filters.
 """
 
+SHUT_PARAM = "shut"
+"""Which query parameter names the collapsed panels; see :func:`panel_view`."""
+
+PANELS: tuple[str, ...] = ("summary", "pages", "links")
+"""The parts of a report that can be folded away, in the order they appear.
+
+Named here rather than discovered from the templates, because the value in the
+query string is one of these words and a report has to be able to ignore a word
+that is not.
+"""
+
+
+def panel_view(
+    shut: Container[str], *, base: str, carry: Mapping[str, str] = MappingProxyType({})
+) -> dict[str, dict[str, Any]]:
+    """Return, for each panel, whether it is open and the link that flips it.
+
+    A link and a query parameter rather than a ``<details>`` element, which is
+    what the three breakdowns inside the summary still are — and the difference
+    is what this exists for. A ``<details>`` forgets on every click, which is
+    right for a breakdown you open to read once and wrong for a table you are
+    keeping out of your way while you work the one below it. Filtering, sorting,
+    paging and choosing columns all already survive a click by living in the
+    URL; this was the only part of *how you have the report set up* that did not.
+
+    The cost is a page load to fold something, and it is the right way round:
+    you pay it once and every reload afterwards is the shorter page.
+
+    Each link carries the rest of the query string untouched, so folding the
+    page table cannot disturb the link filter beside it, and lands on the panel
+    it just changed rather than at the top — a control that scrolls away from
+    itself is one nobody uses twice.
+    """
+    closed = frozenset(name for name in PANELS if name in shut)
+    return {
+        name: {
+            "is_open": name not in closed,
+            "label": "Expand" if name in closed else "Collapse",
+            "url": _panel_url(base, carry, closed ^ {name}, at=name),
+        }
+        for name in PANELS
+    }
+
+
+def _panel_url(base: str, carry: Mapping[str, str], closed: Container[str], *, at: str) -> str:
+    """Return the report URL with *closed* the set of folded panels."""
+    written = dict(carry)
+    value = ",".join(name for name in PANELS if name in closed)
+    if value:
+        written[SHUT_PARAM] = value
+    return f"{base}?{urlencode(written)}#{at}" if written else f"{base}#{at}"
+
+
 TRANSIENT_PARAMS = frozenset({"queued", "bad", "full"})
 """What a report says once and then stops saying.
 
@@ -809,6 +862,7 @@ LINK_COLUMNS: tuple[LinkColumn, ...] = (
     LinkColumn("category", "Category"),
     LinkColumn("target", "Type"),
     LinkColumn("url", "URL", LinkSort.URL),
+    LinkColumn("raw", "As written"),
     LinkColumn("source", "Found on", LinkSort.SOURCE),
 )
 """The columns a reader can turn off, in the order they are read.
@@ -817,9 +871,17 @@ LINK_COLUMNS: tuple[LinkColumn, ...] = (
 reading *in order to* tick a box. Everything else in the row describes what the
 URL is; this one is the only thing that says whether you already have it.
 
-``state``, ``category`` and ``target`` are not sortable, and deliberately have no
-ordering of their own: each is a short label with a handful of values, and
-grouping by them is what the facet chips already do in one click.
+``raw`` is a column rather than the second line under the URL it used to be. On
+a crawl where most URLs were rewritten that line doubled the height of the whole
+table, and a reader who does not care what a link said before normalisation had
+no way to say so. As a column it is one line either way and turns off like the
+rest — which is the point: the same rows, on half the screen.
+
+``state``, ``raw``, ``category`` and ``target`` are not sortable, and
+deliberately have no ordering of their own. The first three are short labels
+with a handful of values, and grouping by them is what the facet chips already
+do in one click; the last would order almost exactly as ``url`` does, and a
+second heading that sorts the same way is a heading that teaches nothing.
 """
 
 STATE_COLUMN = "state"

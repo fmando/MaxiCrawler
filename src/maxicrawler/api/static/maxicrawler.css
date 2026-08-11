@@ -290,6 +290,18 @@ footer {
 }
 .aside:hover { text-decoration: none; border-color: var(--accent); }
 
+/* Folds one panel of a report away. Last in the heading, after whatever
+   already claims the right edge -- the count on a table, the JSON link or the
+   stop button on the summary -- so nothing that was there moves. Quiet, because
+   it is on every panel and none of them is where the eye should land. */
+.fold-panel {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.fold-panel:hover { color: var(--text); text-decoration: none; }
+
 .panel > h2 .count {
   margin-left: auto;
   font-family: var(--mono);

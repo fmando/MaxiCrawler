@@ -16,12 +16,14 @@
 {% endblock %}
 
 {% block content %}
-<section class="panel">
+<section class="panel" id="summary">
   <h2>
     <span class="badge {{ crawl.state_tone }}">{{ crawl.state_label }}</span>
     <span class="url">{{ crawl.seed_url }}</span>
+    <a class="fold-panel" href="{{ panels.summary.url }}">{{ panels.summary.label }}</a>
   </h2>
 
+  {% if panels.summary.is_open %}
   <div class="body">
     <p class="muted">{{ crawl.options }}</p>
 
@@ -69,6 +71,7 @@
       that ran it held in memory.
     </p>
   </div>
+  {% endif %}
 </section>
 
 {% include "_link_table.html" %}
