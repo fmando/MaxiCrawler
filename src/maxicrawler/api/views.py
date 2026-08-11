@@ -680,6 +680,18 @@ silently throw away the link filter you were looking at, which is the kind of
 thing that teaches somebody to stop using the filters.
 """
 
+TRANSIENT_PARAMS = frozenset({"queued", "bad", "full"})
+"""What a report says once and then stops saying.
+
+The outcome of the batch that sent you back here. Neither table owns these and
+*both* have to drop them: a confirmation is about the click that just happened,
+and carrying it forward would make it a claim about every click after — you
+would change the filter and still be told twelve links were queued.
+
+Dropping them is all it takes to make the strip disappear on the next click,
+which is why nothing anywhere has to remember having shown it.
+"""
+
 
 def page_view(
     slice: PageSlice, *, base: str, carry: Mapping[str, str] = MappingProxyType({})
@@ -849,6 +861,50 @@ LINK_PARAMS = frozenset(
 """Which query parameters the link table owns; see :data:`PAGE_PARAMS`."""
 
 
+@dataclass(frozen=True, slots=True)
+class QueuedBatch:
+    """What a batch of links did to the queue, on the way back to the report."""
+
+    queued: int
+    rejected: int = 0
+    """How many were not links this installation could have fetched."""
+
+    no_room: int = 0
+    """How many matched or were selected and did not fit."""
+
+
+def _queued_notice(batch: QueuedBatch) -> dict[str, Any]:
+    """Return the strip a report shows about the batch that just left it.
+
+    Three numbers rather than one, because the interesting outcome is the
+    partial one: a selection of two hundred where the queue took a hundred and
+    fifty is a job mostly done, and a page saying only *"150 links queued"*
+    leaves somebody to discover the other fifty by counting.
+
+    The remainder is not restated as an instruction. What to do about a full
+    queue is on the queue's own page, which the strip links to, and a report
+    that started giving advice about a queue would be the second place to
+    maintain the same sentence.
+    """
+    notes = []
+    if batch.no_room:
+        notes.append(f"{format_number(batch.no_room)} did not fit — the queue is full.")
+    if batch.rejected:
+        notes.append(
+            f"{format_number(batch.rejected)} could not be fetched by the providers installed here."
+        )
+    return {"sentence": _queued_sentence(batch.queued), "notes": tuple(notes)}
+
+
+def _queued_sentence(queued: int) -> str:
+    """Return what the strip leads with, counted rather than pluralised badly."""
+    if queued == 0:
+        return "Nothing was queued."
+    if queued == 1:
+        return "1 link queued."
+    return f"{format_number(queued)} links queued."
+
+
 def link_view(
     page: LinkPage,
     *,
@@ -856,6 +912,7 @@ def link_view(
     hidden: Container[str] = (),
     carry: Mapping[str, str] = MappingProxyType({}),
     downloads_everything: bool = False,
+    queued: QueuedBatch | None = None,
 ) -> dict[str, Any]:
     """Return the link table, its filters, its facets and its paging.
 
@@ -882,6 +939,11 @@ def link_view(
     carries: :attr:`~maxicrawler.app.LinkPage.known` is empty exactly when
     nothing was asked, and a column of badges reading "new" against a question
     nobody put would be a claim rather than an answer.
+
+    *queued* is what a batch did on its way back here, and is absent on every
+    other view of the report. It has no effect on the links this builds, which
+    is what makes the confirmation last exactly one page: nothing carries it
+    forward, so nothing has to remember having shown it.
     """
     query = page.query
     rows = link_rows(page)
@@ -924,6 +986,14 @@ def link_view(
         # is what makes this the half of the feature that cannot leak a key.
         "matches_action": _matches_action(base, query, hidden, carry),
         "match_count": format_number(page.total),
+        # Where a batch sends the browser afterwards: this report, this filter,
+        # this column layout, at the table rather than at the top of the page.
+        # Only the selection needs telling — the filter form's action already
+        # carries the query, and the server rebuilds the way back from it rather
+        # than trusting a second copy that could disagree with the first.
+        "return_to": _link_url(base, query, hidden, carry),
+        # What the batch that sent you back here did, said once.
+        "queued": None if queued is None else _queued_notice(queued),
         # What the filter form shows as its current state.
         "search": query.search,
         "plugin": query.plugin or "",

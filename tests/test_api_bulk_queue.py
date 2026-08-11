@@ -309,6 +309,133 @@ def test_the_action_carries_the_state_that_was_on_screen(tmp_path: Path) -> None
         assert matches_action(filtered) == f"/crawls/{job_id}/downloads?state=%28new%29"
 
 
+# --- the way back --------------------------------------------------------------
+
+
+def narrow_to(test_client: TestClient, limit: int) -> None:
+    """Leave the application with a queue that has room for exactly *limit*."""
+    was = queue_of(test_client)
+    smaller = TransferQueue(was.service, limit=limit)
+    smaller.pause()
+    test_client.app.state.downloads = smaller  # type: ignore[attr-defined]
+    was.shutdown(wait=False)
+
+
+def test_a_selection_lands_back_at_the_table_it_was_ticked_on(tmp_path: Path) -> None:
+    """The click this sprint exists to remove: the trip to the queue and back."""
+    with report(tmp_path) as (test_client, job_id, _):
+        response = test_client.post(
+            "/downloads/selection",
+            data={"url": [MEGA_LINK], "back": f"/crawls/{job_id}?plugin=mega#links"},
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 303
+        location = response.headers["location"]
+        assert location.startswith(f"/crawls/{job_id}?plugin=mega")
+        assert location.endswith("#links")
+
+
+def test_the_form_offers_the_filter_that_is_on_screen_as_the_way_back(tmp_path: Path) -> None:
+    with report(tmp_path) as (test_client, job_id, _):
+        body = test_client.get(f"/crawls/{job_id}?plugin=mega").text
+
+        assert f'name="back" value="/crawls/{job_id}?plugin=mega#links"' in body
+
+
+def test_queueing_every_match_lands_back_at_the_same_filter(tmp_path: Path) -> None:
+    """Rebuilt from the filter that was queued, so the two cannot disagree."""
+    with report(tmp_path) as (test_client, job_id, _):
+        response = test_client.post(
+            matches_action(only_mega(test_client, job_id)), follow_redirects=False
+        )
+
+        location = response.headers["location"]
+        assert location.startswith(f"/crawls/{job_id}?plugin=mega")
+        assert location.endswith("#links")
+
+
+def test_the_report_says_how_many_it_queued(tmp_path: Path) -> None:
+    with report(tmp_path) as (test_client, job_id, _):
+        response = test_client.post(
+            "/downloads/selection",
+            data={"url": [MEGA_LINK, SECOND_LINK], "back": f"/crawls/{job_id}#links"},
+            follow_redirects=False,
+        )
+        body = test_client.get(response.headers["location"]).text
+
+        assert "2 links queued." in body
+        assert 'href="/downloads">Watch the queue' in body
+
+
+def test_one_queued_link_is_not_called_links(tmp_path: Path) -> None:
+    with report(tmp_path) as (test_client, job_id, _):
+        body = test_client.get(f"/crawls/{job_id}?queued=1").text
+
+        assert "1 link queued." in body
+
+
+def test_the_report_names_what_did_not_fit(tmp_path: Path) -> None:
+    """A job mostly done is not a job done, and the difference is the remainder."""
+    with report(tmp_path) as (test_client, job_id, _):
+        narrow_to(test_client, 2)
+
+        response = test_client.post(f"/crawls/{job_id}/downloads", follow_redirects=False)
+        body = test_client.get(response.headers["location"]).text
+
+        assert "2 links queued." in body
+        assert "1 did not fit — the queue is full." in body
+
+
+def test_the_confirmation_is_gone_the_moment_anything_else_is_clicked(tmp_path: Path) -> None:
+    """It is about the click that just happened, not about the report."""
+    with report(tmp_path) as (test_client, job_id, _):
+        body = test_client.get(f"/crawls/{job_id}?queued=2").text
+
+        assert "2 links queued." in body
+        assert "queued=" not in body.split("Discovered links", 1)[1]
+
+
+def test_the_confirmation_survives_neither_a_filter_nor_the_other_table(tmp_path: Path) -> None:
+    with report(tmp_path) as (test_client, job_id, _):
+        body = test_client.get(f"/crawls/{job_id}?queued=2&pstate=visited").text
+
+        assert "queued=" not in body
+
+
+def test_a_way_back_to_another_host_is_refused(tmp_path: Path) -> None:
+    """A browser reads "//elsewhere.test/" as another host, so a path is checked."""
+    with report(tmp_path) as (test_client, _, _):
+        response = test_client.post(
+            "/downloads/selection",
+            data={"url": [MEGA_LINK], "back": "//elsewhere.test/"},
+            follow_redirects=False,
+        )
+
+        assert response.headers["location"].startswith("/downloads")
+
+
+def test_a_batch_that_named_no_way_back_still_goes_to_the_queue(tmp_path: Path) -> None:
+    """Nothing in the report posts without one; what is left is everything else."""
+    with report(tmp_path) as (test_client, _, _):
+        response = test_client.post(
+            "/downloads/selection",
+            data={"url": [MEGA_LINK, SECOND_LINK]},
+            follow_redirects=False,
+        )
+
+        assert response.headers["location"] == "/downloads"
+
+
+def test_a_nonsense_count_renders_the_report_rather_than_refusing_it(tmp_path: Path) -> None:
+    with report(tmp_path) as (test_client, job_id, _):
+        response = test_client.get(f"/crawls/{job_id}?queued=lots&full=-3")
+
+        assert response.status_code == 200
+        assert "Nothing was queued." in response.text
+        assert "did not fit" not in response.text
+
+
 # --- the key -------------------------------------------------------------------
 
 
@@ -316,6 +443,26 @@ def test_the_filter_action_carries_no_key(tmp_path: Path) -> None:
     """It is a URL a browser puts in its history and a proxy writes down."""
     with report(tmp_path) as (_, _, body):
         assert KEY not in matches_action(body)
+
+
+def test_the_way_back_carries_no_key_either(tmp_path: Path) -> None:
+    """It is built from the filter, which holds no URL and so can hold no key."""
+    with report(tmp_path) as (_, _, body):
+        found = re.search(r'name="back" value="([^"]+)"', body)
+
+        assert found is not None
+        assert KEY not in found.group(1)
+
+
+def test_the_redirect_back_to_the_report_carries_no_key(tmp_path: Path) -> None:
+    with report(tmp_path) as (test_client, job_id, _):
+        response = test_client.post(
+            "/downloads/selection",
+            data={"url": [MEGA_LINK], "back": f"/crawls/{job_id}#links"},
+            follow_redirects=False,
+        )
+
+        assert KEY not in response.headers["location"]
 
 
 def test_queueing_a_whole_filter_still_gets_the_key_to_the_transfer(tmp_path: Path) -> None:

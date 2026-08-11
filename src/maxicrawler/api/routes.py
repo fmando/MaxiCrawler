@@ -13,7 +13,7 @@ to put on such a page.
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
@@ -347,11 +347,23 @@ async def queue_selection(request: Request) -> Response:
     Partial by design. A selection where two links are malformed is not a
     refusal of the other ninety-eight — the queue takes what it can and the
     page says what it did.
+
+    Lands back where the ticking happened when the form said where that was.
+    The ticks themselves are gone, and deliberately not restored: the only way
+    to carry them would be to put the URLs in a query string, which is the one
+    place a share link's key must never go (ADR-020). What comes back instead
+    is the rows saying *in queue*, which is the same information without the
+    key — and is true of the ones somebody else queued too.
     """
     form = await read_forms(request)
     accepted = downloads_of(request).submit_all(form.get("url", ()))
     if accepted.queued == 0 and not accepted.is_whole:
         return _refuse_download(request, _nothing_queued(accepted), status=409)
+    back = _one(form, "back")
+    if back:
+        return RedirectResponse(
+            url=_with_outcome(_our_path(back, "/downloads"), accepted), status_code=303
+        )
     return RedirectResponse(url=_queued_url(accepted), status_code=303)
 
 
@@ -365,6 +377,12 @@ async def queue_matches(request: Request) -> Response:
     Nothing but the query travels. The browser sends the filter it is looking
     at, the server resolves it against what the crawl recorded, and the URLs —
     decryption keys and all — never leave this process.
+
+    And nothing has to say where to go afterwards, because the filter that says
+    *what* to queue is the same filter that says *which report* to come back to.
+    Rebuilt here rather than sent along: two copies of one filter is two things
+    that can disagree, and the copy a browser holds is the one that could be
+    made to point somewhere else.
     """
     session_id = request.path_params["job_id"]
     downloads = downloads_of(request)
@@ -374,15 +392,64 @@ async def queue_matches(request: Request) -> Response:
     if not matches.urls:
         return _refuse_download(request, _nothing_matched(matches), status=409)
     accepted = downloads.submit_all(matches.urls)
-    return RedirectResponse(url=_queued_url(accepted), status_code=303)
+    return RedirectResponse(
+        url=_with_outcome(_report_url(request, session_id), accepted, no_room=matches.left_over),
+        status_code=303,
+    )
+
+
+def _report_url(request: Request, session_id: str) -> str:
+    """Return the report this filter was read off, at its link table.
+
+    The query string is copied whole rather than rebuilt field by field, so a
+    parameter the link table gained since is carried without this function
+    learning its name. It cannot escape the path: whatever it holds lands after
+    the ``?`` of a path this builds itself.
+    """
+    query = request.url.query
+    return f"/crawls/{session_id}{'?' if query else ''}{query}#links"
+
+
+def _with_outcome(url: str, accepted: Accepted, *, no_room: int = 0) -> str:
+    """Return *url* with what the batch did written into it.
+
+    Written into the URL rather than kept in a session, because a redirect is
+    the whole of what this server remembers between two requests — and because
+    a confirmation that survives a reload is one that outlives being true.
+
+    *no_room* is passed separately for the filter, where the cut happened before
+    the queue was asked: :meth:`~maxicrawler.app.DiscoveryService.fetchable` is
+    given the room there is, so what did not fit never became a rejection.
+    """
+    counts = {
+        "queued": accepted.queued,
+        "bad": accepted.rejected,
+        "full": no_room + accepted.no_room,
+    }
+    path, _, fragment = url.partition("#")
+    written = urlencode(
+        {name: value for name, value in counts.items() if value or name == "queued"}
+    )
+    separator = "&" if "?" in path else "?"
+    return f"{path}{separator}{written}" + (f"#{fragment}" if fragment else "")
+
+
+def _one(form: dict[str, list[str]], name: str) -> str:
+    """Return the last value submitted under *name*, or the empty string."""
+    return form.get(name, [""])[-1]
 
 
 def _queued_url(accepted: Accepted) -> str:
-    """Return where to land after queueing a batch.
+    """Return where to land after queueing a batch that said nothing about where.
 
     One link goes to its own page, because that is what somebody who queued one
     link wants to watch. Several go to the queue, because that is the thing they
     just changed.
+
+    Only reached when the form named no way back — which the report's own two
+    buttons always do. What is left here is the batch nobody sent from a report,
+    and answering it the way this has always been answered beats inventing a
+    report to return to.
     """
     if accepted.queued == 1 and accepted.is_whole:
         return f"/downloads/{accepted.runs[0].id}"
@@ -508,10 +575,20 @@ def _back_to(request: Request, default: str) -> str:
 
     A parameter on the action rather than the ``Referer`` header: the same
     button sits on the queue and on one download's page, and a header a browser
-    may withhold is not a thing to route on. Only paths of our own are honoured,
-    so this cannot be turned into an open redirect.
+    may withhold is not a thing to route on.
     """
-    asked = request.query_params.get("back", "")
+    return _our_path(request.query_params.get("back", ""), default)
+
+
+def _our_path(asked: str, default: str) -> str:
+    """Return *asked* when it is a path of ours, and *default* when it is not.
+
+    Everything that comes back from a browser goes through here, whether it
+    arrived in a query string or in a form field. A leading ``//`` is rejected
+    along with everything that is not a path at all, because a browser reads
+    ``//elsewhere.test/`` as another host — which is the one way a "go back
+    afterwards" parameter turns into an open redirect.
+    """
     return asked if asked.startswith("/") and not asked.startswith("//") else default
 
 
@@ -801,7 +878,36 @@ def _link_table(request: Request, session_id: str, *, discovered: int) -> dict[s
         hidden=_hidden_columns(request),
         carry=_carry(request, views.LINK_PARAMS),
         downloads_everything=downloads_of(request).service.downloads_ordinary_urls(),
+        queued=_queued_outcome(request),
     )
+
+
+def _queued_outcome(request: Request) -> views.QueuedBatch | None:
+    """Return what the batch that redirected here did, if one did.
+
+    Absent unless ``queued`` is present, so a report reached any other way says
+    nothing. Every number is read leniently, the same way the filters are: these
+    arrive in a URL somebody may have bookmarked, edited or truncated, and a
+    strip reading "0 links queued" is a better answer to nonsense than a refusal
+    to render the report underneath it.
+    """
+    values = request.query_params
+    if "queued" not in values:
+        return None
+    return views.QueuedBatch(
+        queued=_count(values.get("queued")),
+        rejected=_count(values.get("bad")),
+        no_room=_count(values.get("full")),
+    )
+
+
+def _count(value: str | None) -> int:
+    """Return a whole number that is not negative, or zero for anything else."""
+    try:
+        number = int(value or "")
+    except ValueError:
+        return 0
+    return max(0, number)
 
 
 def _page_table(request: Request, report: CrawlReport) -> dict[str, Any]:
@@ -837,9 +943,15 @@ def _carry(request: Request, owned: frozenset[str]) -> dict[str, str]:
     own parameters *plus* whatever the other left there. Without this, filtering
     the pages would quietly discard the link filter on screen — and a filter
     that undoes another filter is one nobody keeps using.
+
+    What neither table carries is :data:`~maxicrawler.api.views.TRANSIENT_PARAMS`,
+    which is how a confirmation lasts one page: it belongs to the click that
+    just happened rather than to the report.
     """
     return {
-        name: value for name, value in request.query_params.items() if name not in owned and value
+        name: value
+        for name, value in request.query_params.items()
+        if name not in owned and name not in views.TRANSIENT_PARAMS and value
     }
 
 

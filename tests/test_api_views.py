@@ -16,10 +16,14 @@ from maxicrawler.api.views import (
     ABANDONED_LABEL,
     KIND_LABELS,
     LINK_COLUMNS,
+    LINK_PARAMS,
     LINK_STATE_LABELS,
     LINK_STATE_TONES,
+    PAGE_PARAMS,
     STATE_LABELS,
     STATE_TONES,
+    TRANSIENT_PARAMS,
+    QueuedBatch,
     crawl_rows,
     describe_options,
     describe_scope,
@@ -1058,6 +1062,66 @@ def test_a_state_nobody_named_is_shown_as_itself() -> None:
     (group,) = [row for row in view["facets"] if row["heading"] == "State"]
 
     assert group["chips"][0]["label"] == "hash"
+
+
+# --- the way back from a batch ------------------------------------------------
+
+
+def test_a_batch_is_told_to_come_back_to_this_exact_view() -> None:
+    view = make_link_view(
+        make_link_page(query=LinkQuery(plugin="mega", search="share")), hidden=["source"]
+    )
+
+    assert view["return_to"] == f"{BASE}?q=share&plugin=mega&hide=source#links"
+
+
+def test_a_report_reached_any_other_way_says_nothing_about_a_batch() -> None:
+    assert make_link_view(make_link_page())["queued"] is None
+
+
+def test_a_batch_that_went_through_whole_says_only_that() -> None:
+    view = link_view(make_link_page(), base=BASE, queued=QueuedBatch(queued=1291))
+
+    assert view["queued"]["sentence"] == "1,291 links queued."
+    assert view["queued"]["notes"] == ()
+
+
+def test_one_link_is_not_called_links() -> None:
+    view = link_view(make_link_page(), base=BASE, queued=QueuedBatch(queued=1))
+
+    assert view["queued"]["sentence"] == "1 link queued."
+
+
+def test_a_batch_that_went_through_partly_names_the_remainder() -> None:
+    """ "150 queued" alone leaves somebody to find the other fifty by counting."""
+    view = link_view(
+        make_link_page(), base=BASE, queued=QueuedBatch(queued=150, rejected=2, no_room=48)
+    )
+
+    assert view["queued"]["sentence"] == "150 links queued."
+    assert view["queued"]["notes"] == (
+        "48 did not fit — the queue is full.",
+        "2 could not be fetched by the providers installed here.",
+    )
+
+
+def test_a_batch_that_queued_nothing_at_all_says_so() -> None:
+    view = link_view(make_link_page(), base=BASE, queued=QueuedBatch(queued=0))
+
+    assert view["queued"]["sentence"] == "Nothing was queued."
+
+
+def test_a_confirmation_is_owned_by_neither_table() -> None:
+    """Which is what makes it last one page: nothing carries it forward."""
+    assert not TRANSIENT_PARAMS & LINK_PARAMS
+    assert not TRANSIENT_PARAMS & PAGE_PARAMS
+
+
+def test_nothing_a_link_is_built_from_can_carry_a_confirmation() -> None:
+    view = make_link_view(make_link_page([make_link("https://example.test/a")]))
+    built = [view["action"], view["reset_url"], view["matches_action"], view["return_to"]]
+
+    assert all(param not in url for url in built for param in TRANSIENT_PARAMS)
 
 
 # --- the label tables --------------------------------------------------------

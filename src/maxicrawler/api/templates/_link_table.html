@@ -18,6 +18,18 @@
     </span>
   </h2>
 
+  {#
+    What the batch that sent you back here did. Rendered from the URL and
+    carried by nothing, so it is gone the moment anything else is clicked.
+  #}
+  {% if links.queued %}
+    <p class="notice">
+      {{ links.queued.sentence }}
+      {% for note in links.queued.notes %}{{ note }}{% endfor %}
+      <a href="/downloads">Watch the queue →</a>
+    </p>
+  {% endif %}
+
   {% if links.has_any %}
     <form class="filters" method="get" action="{{ links.action }}">
       <label class="wide">
@@ -127,6 +139,13 @@
     {% if links.has_downloads %}
       <form class="batch" id="link-selection" method="post" action="{{ links.selection_action }}">
         <button type="submit">Queue selected</button>
+        {#
+          Where to land afterwards. This form has no filter in its action to
+          rebuild one from -- it posts a selection, not a query -- so the way
+          back is the one thing it has to be told. The server refuses anything
+          that is not a path of ours, so it cannot be pointed elsewhere.
+        #}
+        <input type="hidden" name="back" value="{{ links.return_to }}">
       </form>
       <form class="batch" method="post" action="{{ links.matches_action }}">
         <button type="submit">Queue every fetchable match</button>
