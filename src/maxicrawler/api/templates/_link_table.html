@@ -140,6 +140,12 @@
       <form class="batch" id="link-selection" method="post" action="{{ links.selection_action }}">
         <button type="submit">Queue selected</button>
         {#
+          How many are ticked. Hidden until something is, and hidden again when
+          nothing is: the script writes the number, this holds the word. Absent
+          entirely without scripting, where a counter would say nothing true.
+        #}
+        <span class="chosen muted small" hidden><span class="num">0</span> selected</span>
+        {#
           Where to land afterwards. This form has no filter in its action to
           rebuild one from -- it posts a selection, not a query -- so the way
           back is the one thing it has to be told. The server refuses anything
@@ -163,7 +169,19 @@
       <table class="grid sticky">
         <thead>
           <tr>
-            {% if links.has_downloads %}<th class="tick"><span class="visually-hidden">Select</span></th>{% endif %}
+            {% if links.has_downloads %}
+              <th class="tick">
+                <span class="visually-hidden">Select</span>
+                {#
+                  Ticks every box on this page. No name, so it is a control and
+                  never a field: whatever it does to the boxes is what gets
+                  submitted, and it submits nothing of its own. Hidden until the
+                  script can make it work.
+                #}
+                <input type="checkbox" class="tick-all" hidden
+                       aria-label="Select every link on this page">
+              </th>
+            {% endif %}
             {% for header in links.headers %}
               <th{% if header.active %} class="sorted"{% endif %}>
                 {% if header.url %}
@@ -243,6 +261,15 @@
         </tbody>
       </table>
     </div>
+
+    {#
+      What turns the header checkbox and the counter on. Loaded only where
+      there are boxes to tick, so a report with nothing fetchable in it asks
+      the browser for nothing.
+    #}
+    {% if links.has_downloads %}
+      <script src="/static/select.js" defer></script>
+    {% endif %}
 
     <p class="paging">
       <span class="muted">{{ links.shown_range }} of {{ links.total }}</span>

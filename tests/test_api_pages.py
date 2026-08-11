@@ -1109,7 +1109,10 @@ def test_the_breakdowns_fold_away(tmp_path: Path) -> None:
         body = wait_until_finished(test_client, start(test_client, base))
 
     assert "<summary>How links were written</summary>" in body
-    assert "<script" not in body
+    # The folding is <details>, and nothing scripts it open. Named rather than
+    # asserted as "no script at all", which stopped meaning that when the link
+    # table grew an extra of its own: the list is what says which one is here.
+    assert re.findall(r'<script src="([^"]+)"', body) == ["/static/select.js"]
 
 
 def test_a_report_can_be_filtered_by_plugin(tmp_path: Path) -> None:
@@ -1326,7 +1329,11 @@ def test_a_finished_crawl_offers_no_stop_button(tmp_path: Path) -> None:
         body = wait_until_finished(test_client, start(test_client, base))
 
     assert "Stop</button>" not in body
-    assert "<script" not in body
+    # And nothing live behind it: no stream to reconnect to, and nothing that
+    # would. The link table's own extra is not that, which is why this names
+    # what must be absent rather than forbidding scripts outright.
+    assert 'id="crawl-live"' not in body
+    assert "/static/crawl.js" not in body
 
 
 def test_a_crawl_that_recorded_nothing_says_so_rather_than_showing_nothing(

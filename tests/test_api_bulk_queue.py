@@ -134,6 +134,54 @@ def test_a_report_with_nothing_fetchable_offers_no_batch_at_all(tmp_path: Path) 
         assert "Queue every fetchable match" not in body
 
 
+def test_the_header_offers_to_tick_every_row_and_starts_hidden(tmp_path: Path) -> None:
+    """A checkbox that ticks nothing is worse than no checkbox (ADR-023)."""
+    with report(tmp_path) as (_, _, body):
+        found = re.search(r'<input type="checkbox" class="tick-all"[^>]*>', body)
+
+        assert found is not None
+        assert "hidden" in found.group(0)
+        assert 'aria-label="Select every link on this page"' in found.group(0)
+
+
+def test_the_header_checkbox_is_a_control_and_never_a_field(tmp_path: Path) -> None:
+    """It has no name, so whatever it does to the rows is all that is submitted."""
+    with report(tmp_path) as (_, _, body):
+        found = re.search(r'<input type="checkbox" class="tick-all"[^>]*>', body)
+
+        assert found is not None
+        assert "name=" not in found.group(0)
+        assert "form=" not in found.group(0)
+
+
+def test_the_counter_starts_hidden_and_at_nothing(tmp_path: Path) -> None:
+    with report(tmp_path) as (_, _, body):
+        assert '<span class="chosen muted small" hidden><span class="num">0</span> selected' in body
+
+
+def test_the_script_is_asked_for_only_where_there_are_boxes(tmp_path: Path) -> None:
+    site = Site()
+    site.add_html("/", '<a href="/a">a</a>')
+    site.add_html("/a", "<p>x</p>")
+
+    with report(tmp_path, site, direct_downloads=False) as (_, _, body):
+        assert "/static/select.js" not in body
+        assert 'class="tick-all"' not in body
+
+
+def test_the_script_is_asked_for_where_there_are(tmp_path: Path) -> None:
+    with report(tmp_path) as (_, _, body):
+        assert '<script src="/static/select.js" defer></script>' in body
+
+
+def test_the_selection_script_is_served(tmp_path: Path) -> None:
+    with report(tmp_path) as (test_client, _, _):
+        response = test_client.get("/static/select.js")
+
+        assert response.status_code == 200
+        assert "link-selection" in response.text
+
+
 def test_the_checkboxes_belong_to_a_form_they_are_not_inside(tmp_path: Path) -> None:
     """Forms cannot nest, and every downloadable row already has one."""
     with report(tmp_path) as (_, _, body):
