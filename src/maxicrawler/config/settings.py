@@ -57,6 +57,15 @@ class Settings:
     workflows an installation mostly serves is an installation's business.
     """
 
+    crawl_below_seed: bool = False
+    """Whether a crawl stays at or below the place the start URL names.
+
+    Off, for the same reason ``crawl_same_domain`` is: the narrower rule breaks
+    the share-link workflow outright. On, it supersedes ``crawl_same_domain``
+    — an installation whose work is walking one section of one site sets this
+    and stops ticking a box on every crawl.
+    """
+
     respect_robots: bool = True
     """Whether a crawl obeys the ``/robots.txt`` of the hosts it visits.
 
@@ -212,6 +221,7 @@ class Settings:
             crawl_same_domain=_bool_value(
                 app_config, "crawl_same_domain", defaults.crawl_same_domain
             ),
+            crawl_below_seed=_bool_value(app_config, "crawl_below_seed", defaults.crawl_below_seed),
             respect_robots=_bool_value(app_config, "respect_robots", defaults.respect_robots),
             robots_user_agent=_string_value(
                 app_config, "robots_user_agent", defaults.robots_user_agent
@@ -251,6 +261,7 @@ class Settings:
             f"crawl_depth = {self.crawl_depth}\n"
             f"crawl_max_pages = {self.crawl_max_pages}\n"
             f"crawl_same_domain = {str(self.crawl_same_domain).lower()}\n"
+            f"crawl_below_seed = {str(self.crawl_below_seed).lower()}\n"
             f"respect_robots = {str(self.respect_robots).lower()}\n"
             f'robots_user_agent = "{self.robots_user_agent}"\n'
             f"robots_timeout = {self.robots_timeout}\n"

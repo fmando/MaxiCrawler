@@ -260,6 +260,11 @@ def test_the_json_report_states_the_crawl_and_its_options() -> None:
         "max_pages": 50,
         "same_domain": False,
         "include_subdomains": False,
+        "below_seed": False,
+        # The three booleans as submitted, and beside them the one rule they
+        # add up to. A reader of the document should not have to re-derive the
+        # precedence to find out where the crawl was allowed to go.
+        "scope": "any domain",
     }
 
 
@@ -401,6 +406,35 @@ def test_same_domain_keeps_the_crawl_at_home() -> None:
         )
 
     assert "same domain" in result.stdout
+    assert "out of scope: 1" in result.stdout
+
+
+def test_below_seed_keeps_the_crawl_under_the_path_it_started_at() -> None:
+    """One host, two sections, and only the one that was named."""
+    site = make_site(
+        {
+            "/hr/": '<a href="/hr/thread/1">thread</a><a href="/g/">g</a>',
+            "/hr/thread/1": "<p>leaf</p>",
+            "/g/": "<p>other board</p>",
+        }
+    )
+
+    with serve(site) as base:
+        result = runner.invoke(
+            app,
+            [
+                "crawl",
+                "--allow-private",
+                f"{base}/hr/",
+                "--depth",
+                "2",
+                "--below-seed",
+                "--no-persist",
+            ],
+        )
+
+    assert "below the start URL" in result.stdout
+    assert "Pages visited: 2" in result.stdout
     assert "out of scope: 1" in result.stdout
 
 

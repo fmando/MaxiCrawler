@@ -1080,10 +1080,32 @@ on it is the point, and hunting for share links, which live on Mega,
 Pixeldrain and GoFile *by definition*. `--max-pages` and `--depth` are what
 bound a crawl instead. The default is configurable through `crawl_same_domain`.
 
+`PathPrefixPolicy` is the narrower rule, for a host that gives each section its
+own path: a forum's boards, a documentation set's versions, one user's pages on
+a site that hosts many. It admits the place the seed URL names and anything
+under it, matching by whole path segment so `/hr/` never admits `/hrx/`.
+
+It **carries the host**, so it replaces the domain rule rather than joining it —
+a path prefix matched on any host would hand the crawl to every site with a
+section of that name — and subdomains are always outside it. Its one guess is
+that a last path segment containing a dot names a file, so `/docs/guide.html`
+covers `/docs/`; a trailing slash overrules it.
+
+Which of the three rules applies is `CrawlOptions.scope`, a `CrawlScope` whose
+values are the phrase a report prints. The precedence is decided there and
+nowhere else: the engine builds its policy from it, and every renderer that
+describes a crawl reads the same answer rather than re-deriving it from the
+booleans.
+
 The engine derives the scope from the session rather than trusting its caller
 to inject a matching policy. An option that silently does nothing unless wired
 correctly would let a report and a database row claim a crawl stayed on one
 host while it wandered off it.
+
+Scope governs what is *fetched*. Every link on a page that was fetched still
+reaches the discovery pipeline and still appears in the report, out of scope or
+not — a Mega link outside the scope is discovered and classified, it is simply
+never retrieved.
 
 ### Ending, and stopping
 

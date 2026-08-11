@@ -1,7 +1,7 @@
 {#
-  What a crawl is asked for. The same four things the CLI takes, in the same
-  order, with the same defaults -- both read them from the configuration
-  through the one service, so they cannot drift apart.
+  What a crawl is asked for. The same things the CLI takes, in the same order,
+  with the same defaults -- both read them from the configuration through the
+  one service, so they cannot drift apart.
 
   On a rejected submission this renders again with what was typed still in it.
   Losing a URL somebody pasted because the depth was wrong is the kind of small
@@ -31,6 +31,18 @@
   <label class="check">
     <input type="checkbox" name="same_domain" value="1"{% if form.same_domain %} checked{% endif %}>
     <span>Same domain only</span>
+  </label>
+
+  {#
+    The narrower of the two scopes, and the one a site that gives each section
+    its own path needs. It supersedes the box above rather than adding to it:
+    a path carries its host already, so both ticked is this one, not a
+    contradiction to resolve. The label says the whole rule, because a form
+    control that needs a footnote has the wrong words on it.
+  #}
+  <label class="check">
+    <input type="checkbox" name="below_seed" value="1"{% if form.below_seed %} checked{% endif %}>
+    <span>Only below the start URL</span>
   </label>
 
   {#

@@ -143,10 +143,13 @@ def format_timestamp(moment: datetime) -> str:
 
 
 def describe_scope(options: CrawlOptions) -> str:
-    """Return what a crawl was allowed to reach, in one phrase."""
-    if not options.same_domain:
-        return "any domain"
-    return "same domain and subdomains" if options.include_subdomains else "same domain"
+    """Return what a crawl was allowed to reach, in one phrase.
+
+    The phrase *is* the scope value. Working the precedence out here as well
+    would be a second opinion on the same three booleans, and the day they
+    disagree is the day a report says one thing and the crawl did another.
+    """
+    return str(options.scope)
 
 
 def describe_options(options: CrawlOptions) -> str:
@@ -1123,6 +1126,7 @@ def _crawl_row(crawl: StoredCrawl, *, is_live: bool) -> dict[str, Any]:
         max_pages=max(1, crawl.max_pages),
         same_domain=crawl.same_domain,
         include_subdomains=crawl.include_subdomains,
+        below_seed=crawl.below_seed,
         respect_robots=crawl.respect_robots,
     )
     unfinished = crawl.finished_at is None
@@ -1217,6 +1221,11 @@ def settings_view(settings: Settings) -> tuple[dict[str, Any], ...]:
                     "crawl_same_domain",
                     _toml_bool(settings.crawl_same_domain),
                     "Off by default, so a share link to another host still works.",
+                ),
+                _setting(
+                    "crawl_below_seed",
+                    _toml_bool(settings.crawl_below_seed),
+                    "The narrower scope: the start URL's path and nothing else.",
                 ),
             ),
         },

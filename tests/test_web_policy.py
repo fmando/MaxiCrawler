@@ -12,9 +12,11 @@ from maxicrawler.web.policy import (
     AllowAllPolicy,
     CompositePolicy,
     CrawlPolicy,
+    PathPrefixPolicy,
     PolicyDecision,
     PolicyRule,
     SameDomainPolicy,
+    path_prefix,
     registrable_host,
 )
 
@@ -190,6 +192,161 @@ def test_a_seed_without_a_host_is_refused_at_construction() -> None:
 
 def test_the_policy_names_the_host_it_guards() -> None:
     assert SameDomainPolicy("https://www.example.org/").host == "example.org"
+
+
+# --- the path prefix ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://example.org/hr/", "/hr/"),
+        ("https://example.org/hr", "/hr/"),
+        ("https://example.org/", "/"),
+        ("https://example.org", "/"),
+        ("https://example.org/a/b/c/", "/a/b/c/"),
+        ("https://example.org/hr/?page=2", "/hr/"),
+        ("https://example.org/hr/#top", "/hr/"),
+        # A last segment with a dot in it is read as a file, so the place is
+        # the directory holding it.
+        ("https://example.org/docs/guide.html", "/docs/"),
+        ("https://example.org/index.html", "/"),
+        # ...and a trailing slash overrules the guess.
+        ("https://example.org/releases/v1.0/", "/releases/v1.0/"),
+    ],
+)
+def test_the_prefix_is_the_place_the_url_names(url: str, expected: str) -> None:
+    assert path_prefix(url) == expected
+
+
+def test_a_dotted_last_segment_is_read_as_a_file_even_when_it_is_not() -> None:
+    """The one guess in the module, asserted so it is a decision, not a bug.
+
+    `/releases/v1.0` is a directory to whoever wrote it and a file to this
+    rule, which widens the scope to `/releases/`. Written down here because a
+    rule that is wrong in a known case and silent about it is worse than one
+    that is wrong and says so.
+    """
+    assert path_prefix("https://example.org/releases/v1.0") == "/releases/"
+
+
+def test_the_path_prefix_policy_satisfies_the_protocol() -> None:
+    assert isinstance(PathPrefixPolicy("https://example.org/hr/"), CrawlPolicy)
+
+
+def test_the_seed_place_itself_is_inside() -> None:
+    policy = PathPrefixPolicy("https://example.org/hr/")
+
+    assert policy.may_fetch("https://example.org/hr/").allowed is True
+
+
+def test_the_place_is_the_same_written_with_or_without_a_trailing_slash() -> None:
+    """`/hr` and `/hr/` are one place, whichever of them a link was written as."""
+    for seed in ("https://example.org/hr", "https://example.org/hr/"):
+        policy = PathPrefixPolicy(seed)
+
+        assert policy.may_fetch("https://example.org/hr").allowed is True
+        assert policy.may_fetch("https://example.org/hr/").allowed is True
+
+
+def test_a_page_below_the_seed_is_inside() -> None:
+    policy = PathPrefixPolicy("https://example.org/hr/")
+
+    assert policy.may_fetch("https://example.org/hr/thread/12345").allowed is True
+
+
+def test_a_sibling_section_on_the_same_host_is_refused() -> None:
+    """The whole point: one domain, and only one of its sections wanted."""
+    policy = PathPrefixPolicy("https://example.org/hr/")
+
+    decision = policy.may_fetch("https://example.org/g/")
+
+    assert decision.allowed is False
+    assert decision.reason == "outside example.org/hr/"
+    assert decision.rule is PolicyRule.SCOPE
+
+
+def test_the_parent_of_the_seed_is_outside() -> None:
+    policy = PathPrefixPolicy("https://example.org/hr/")
+
+    assert policy.may_fetch("https://example.org/").allowed is False
+
+
+def test_a_lookalike_path_is_not_inside_the_scope() -> None:
+    """The same hole a suffix test opens in a same-domain rule.
+
+    `/hrx/` starts with `/hr` as a string and is a different section. Matching
+    is by whole segment for exactly this reason.
+    """
+    policy = PathPrefixPolicy("https://example.org/hr/")
+
+    assert policy.may_fetch("https://example.org/hrx/").allowed is False
+    assert policy.may_fetch("https://example.org/hr-archive").allowed is False
+
+
+def test_a_query_string_does_not_move_a_url_out_of_the_place() -> None:
+    policy = PathPrefixPolicy("https://example.org/hr/")
+
+    assert policy.may_fetch("https://example.org/hr/?page=2").allowed is True
+
+
+def test_another_host_is_outside_however_its_path_reads() -> None:
+    """A path without a host would admit any site that happens to have `/hr/`."""
+    policy = PathPrefixPolicy("https://example.org/hr/")
+
+    assert policy.may_fetch("https://elsewhere.test/hr/").allowed is False
+
+
+def test_a_subdomain_is_outside_a_path_scope() -> None:
+    """Not an option here: a place below `example.org/hr/` is on that host."""
+    policy = PathPrefixPolicy("https://example.org/hr/")
+
+    assert policy.may_fetch("https://docs.example.org/hr/").allowed is False
+
+
+def test_www_and_the_bare_host_are_one_site_here_too() -> None:
+    policy = PathPrefixPolicy("https://www.example.org/hr/")
+
+    assert policy.may_fetch("https://example.org/hr/thread/1").allowed is True
+
+
+def test_the_scheme_does_not_move_a_url_out_of_the_place() -> None:
+    policy = PathPrefixPolicy("https://example.org/hr/")
+
+    assert policy.may_fetch("http://example.org/hr/thread/1").allowed is True
+
+
+def test_a_seed_naming_a_document_covers_its_directory() -> None:
+    policy = PathPrefixPolicy("https://example.org/docs/guide.html")
+
+    assert policy.may_fetch("https://example.org/docs/guide.html").allowed is True
+    assert policy.may_fetch("https://example.org/docs/api.html").allowed is True
+    assert policy.may_fetch("https://example.org/blog/").allowed is False
+
+
+def test_a_seed_at_the_root_admits_the_whole_host() -> None:
+    policy = PathPrefixPolicy("https://example.org/")
+
+    assert policy.may_fetch("https://example.org/anything/at/all").allowed is True
+    assert policy.may_fetch("https://elsewhere.test/").allowed is False
+
+
+def test_a_url_without_a_host_is_refused_by_the_path_policy() -> None:
+    policy = PathPrefixPolicy("https://example.org/hr/")
+
+    assert policy.may_fetch("mailto:someone@example.org").allowed is False
+
+
+def test_a_seed_without_a_host_is_refused_at_construction_here_too() -> None:
+    with pytest.raises(ValueError, match="cannot read a host"):
+        PathPrefixPolicy("not a url")
+
+
+def test_the_path_policy_names_the_place_it_guards() -> None:
+    policy = PathPrefixPolicy("https://www.example.org/hr")
+
+    assert policy.host == "example.org"
+    assert policy.prefix == "/hr/"
 
 
 # --- the composite -----------------------------------------------------------
