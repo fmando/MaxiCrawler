@@ -43,6 +43,18 @@ class ProviderTransportError(ProviderError):
     """
 
 
+class AddressRefusedError(ProviderTransportError):
+    """Raised when a URL points inside this machine or this network.
+
+    A subclass of :class:`ProviderTransportError` because to everything that
+    catches transport failures this is one: no transfer happened. It is its own
+    class because *why* differs in a way worth acting on — a timeout is worth
+    retrying and a metadata service never will be — and because the message
+    carries a rule's own words, which belong in front of an operator rather
+    than in a log line about a network problem.
+    """
+
+
 class ProviderProtocolError(ProviderError):
     """Raised when a response cannot be understood.
 
