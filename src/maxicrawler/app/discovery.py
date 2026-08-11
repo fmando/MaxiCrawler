@@ -521,9 +521,13 @@ class DiscoveryService:
         if asked.downloadable is False:
             return Matches(urls=(), total=0)
         recorded = self.links(session_id)
-        matching = tuple(
-            item for item in recorded if _matches(item, asked, self._known(recorded, asked))
-        )
+        # Resolved once, above the loop that reads it. Asking inside the
+        # comprehension is one full pass over the library *per link*, which is
+        # the shape of question `stored` exists to be spared: a report of ten
+        # thousand made it a walk over ten thousand libraries, on the event loop,
+        # for one click. Same reason `browse` resolves it once; see `_known`.
+        known = self._known(recorded, asked)
+        matching = tuple(item for item in recorded if _matches(item, asked, known))
         fetchable = self._resolve(matching)
         wanted = tuple(item.url for item in _ordered(matching, asked) if item.url in fetchable)
         return Matches(urls=wanted[:limit], total=len(wanted))
