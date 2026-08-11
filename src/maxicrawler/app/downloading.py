@@ -60,6 +60,7 @@ from maxicrawler.downloader import (
 from maxicrawler.library import Library, provider_directory, resource_key
 from maxicrawler.plugins import PluginResolver, create_default_registry
 from maxicrawler.providers import (
+    DIRECT_PROVIDER_NAME,
     ProviderRegistry,
     RetryPolicy,
     UrllibFileTransport,
@@ -283,6 +284,26 @@ class DownloadService:
     def can_download(self, url: str) -> bool:
         """Return whether *url* is a link this installation could fetch."""
         return self._can_download(url, self._providers())
+
+    def downloads_ordinary_urls(self) -> bool:
+        """Return whether a file at a plain HTTP URL can be transferred here.
+
+        Not a question about any one URL, and that is the point: it says
+        whether *"can this be downloaded?"* is a **filter** — something that
+        separates a report into two groups — or a constant. With the direct
+        provider composed for transfer it is a constant, every recorded link
+        answers yes, and a control offering to show the ones that answer no
+        offers an empty table.
+
+        Asked of the registry rather than by classifying a made-up URL. A probe
+        would be a question about a URL nobody named, and would quietly change
+        meaning the day a plugin took an interest in whatever host it used.
+        """
+        registry = self._providers()
+        if DIRECT_PROVIDER_NAME not in registry:
+            return False
+        provider = registry.get(DIRECT_PROVIDER_NAME)
+        return provider.metadata.supports(ProviderCapability.DOWNLOAD)
 
     def _can_download(self, url: str, registry: ProviderRegistry) -> bool:
         """Return whether *registry* holds a provider that could fetch *url*."""

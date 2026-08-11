@@ -26,14 +26,22 @@
                autocomplete="off" spellcheck="false">
       </label>
 
-      <label>
-        <span>Download</span>
-        <select name="dl">
-          {% for value, label in links.downloadable_choices %}
-            <option value="{{ value }}"{% if value == links.downloadable %} selected{% endif %}>{{ label }}</option>
-          {% endfor %}
-        </select>
-      </label>
+      {#
+        Absent where every recorded link can be fetched: the control would
+        have one full bucket and one empty one, and "show me the ones that
+        cannot" would answer with an empty table. The view decides; a template
+        that counted rows would be answering about one page of a crawl.
+      #}
+      {% if links.downloadable_choices %}
+        <label>
+          <span>Download</span>
+          <select name="dl">
+            {% for value, label in links.downloadable_choices %}
+              <option value="{{ value }}"{% if value == links.downloadable %} selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      {% endif %}
 
       <label>
         <span>Order</span>

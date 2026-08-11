@@ -799,6 +799,7 @@ def _link_table(request: Request, session_id: str, *, discovered: int) -> dict[s
         base=f"/crawls/{session_id}",
         hidden=_hidden_columns(request),
         carry=_carry(request, views.LINK_PARAMS),
+        downloads_everything=downloads_of(request).service.downloads_ordinary_urls(),
     )
 
 

@@ -178,3 +178,29 @@ def test_a_page_is_downloadable_too_and_that_is_the_honest_answer(
 
     with serve(make_site()) as base:
         assert service.can_download(f"{base}{path}") is True
+
+
+# --- whether the question is a filter at all ---------------------------------
+
+
+def test_an_installation_that_fetches_anything_says_so(tmp_path: Path) -> None:
+    """What decides whether "can this be downloaded?" separates a report.
+
+    With the direct provider composed for transfer it is a constant rather than
+    a filter, and every recorded link answers yes.
+    """
+    assert make_service(tmp_path).downloads_ordinary_urls() is True
+
+
+def test_an_inspection_only_installation_says_so_too(tmp_path: Path) -> None:
+    service = make_service(tmp_path, direct_downloads=False)
+
+    assert service.downloads_ordinary_urls() is False
+    assert service.can_download("https://i.example.test/hr/1234.png") is False
+
+
+def test_turning_it_off_leaves_the_other_providers_working(tmp_path: Path) -> None:
+    """Off is not "no downloads"; it is "no downloads from anywhere at all"."""
+    service = make_service(tmp_path, direct_downloads=False)
+
+    assert service.can_download(MEGA_LINK) is True

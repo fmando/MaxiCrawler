@@ -972,6 +972,41 @@ def test_a_report_can_be_filtered_down_to_what_can_be_fetched(tmp_path: Path) ->
     assert "/i.png" not in links
 
 
+def test_the_download_filter_is_withdrawn_where_it_separates_nothing(tmp_path: Path) -> None:
+    """A control with one full bucket and one empty one is not a filter.
+
+    The facets beside it already behave this way -- a plugin nothing used is
+    not listed -- so a filter that would answer with an empty table is not
+    offered either.
+    """
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = finished_report(test_client, base)
+
+    assert 'name="dl"' not in body
+    assert "can be downloaded" not in body
+
+
+def test_the_download_filter_is_there_where_it_does_separate(tmp_path: Path) -> None:
+    with (
+        recording_client(tmp_path, direct_downloads=False) as test_client,
+        serve(findable_site()) as base,
+    ):
+        body = finished_report(test_client, base)
+
+    assert 'name="dl"' in body
+    assert "can be downloaded" in body
+
+
+def test_a_bookmarked_filter_still_works_after_it_stopped_being_offered(
+    tmp_path: Path,
+) -> None:
+    """Withdrawing a control must not break a link somebody saved."""
+    with recording_client(tmp_path) as test_client, serve(findable_site()) as base:
+        body = finished_report(test_client, base, dl="no")
+
+    assert "Nothing matches that" in body
+
+
 def test_the_fetchable_filter_matches_everything_once_ordinary_urls_count(
     tmp_path: Path,
 ) -> None:
