@@ -815,3 +815,34 @@ def test_queueing_every_match_asks_nothing_when_no_state_is_filtered_by() -> Non
     service.fetchable(SESSION, LinkQuery(), limit=10)
 
     assert asked == []
+
+
+def test_queueing_every_match_asks_once_however_many_links_it_matches() -> None:
+    """Once for the set, not once per link in it.
+
+    The test above this one cannot see the difference: with a single link,
+    "once" and "once per link" are the same number. This one is the reason that
+    matters. Every call is a full pass over the library, so asking per link
+    turned one click on a large report into a walk over as many libraries as
+    there were links -- on the event loop, which is every other page too.
+    """
+    asked: list[tuple[str, ...]] = []
+
+    def resolve(candidates: Iterable[str]) -> frozenset[str]:
+        asked.append(tuple(candidates))
+        return frozenset()
+
+    links = [make_url(f"https://mega.nz/file/{index:04d}", "mega") for index in range(25)]
+    service = DiscoveryService(
+        Settings(),
+        repository=FakeRepository(links),  # type: ignore[arg-type]
+        downloadable=lambda candidates: frozenset(candidates),
+        states={LinkState.IN_QUEUE: resolve},
+    )
+
+    matches = service.fetchable(SESSION, LinkQuery(state="queue"), limit=100)
+
+    assert len(asked) == 1
+    # And asked about all of them at once, which is what makes one pass enough.
+    assert len(asked[0]) == len(links)
+    assert matches.urls == ()
