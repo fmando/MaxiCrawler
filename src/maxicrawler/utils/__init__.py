@@ -1,5 +1,6 @@
 """Dependency-light shared utilities."""
 
+from maxicrawler.utils.addresses import PrivateNetworkRule, Resolver
 from maxicrawler.utils.formatting import SIZE_UNITS, UNKNOWN_SIZE, format_size
 from maxicrawler.utils.logging import configure_logging
 from maxicrawler.utils.urls import (
@@ -16,6 +17,8 @@ __all__ = [
     "SIZE_UNITS",
     "UNKNOWN_SIZE",
     "DuplicateDetector",
+    "PrivateNetworkRule",
+    "Resolver",
     "configure_logging",
     "format_size",
     "normalize_url",
