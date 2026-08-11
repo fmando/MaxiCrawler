@@ -366,3 +366,126 @@ def test_one_library_named_two_ways_is_one_library(tmp_path: Path) -> None:
     with sqlite3.connect(database.path) as connection:
         (rows,) = connection.execute("SELECT COUNT(*) FROM library_entries").fetchone()
     assert rows == 1
+
+
+# --- the answer a report marks its rows with ----------------------------------
+
+
+def test_a_url_the_library_holds_something_from_is_recognised(tmp_path: Path) -> None:
+    service, library, _ = make_service(tmp_path)
+    write(library, "one")
+
+    assert service.stored(["https://mega.nz/file/one"]) == frozenset({"https://mega.nz/file/one"})
+
+
+def test_a_url_the_library_never_saw_is_not(tmp_path: Path) -> None:
+    service, library, _ = make_service(tmp_path)
+    write(library, "one")
+
+    assert service.stored(["https://mega.nz/file/two"]) == frozenset()
+
+
+def test_the_key_survives_the_question(tmp_path: Path) -> None:
+    """A share link is its key, and a caller handed back a key-less URL has lost it.
+
+    The fragment is stripped to compare — a record never holds one (ADR-020) —
+    and kept in the answer, because the answer is a set of the URLs as asked.
+    """
+    service, library, _ = make_service(tmp_path)
+    write(library, "one")
+    asked = "https://mega.nz/file/one#Aa0123456789bCdEfGhIjKlMnOpQrStUvWxYz"
+
+    assert service.stored([asked]) == frozenset({asked})
+
+
+def test_a_container_is_recognised_from_one_stored_file(tmp_path: Path) -> None:
+    """Why this is a state and not a sentence about being downloaded.
+
+    A share naming a folder is recorded by each file inside it, under the
+    container's own URL — see the Mega provider, which gives every child the
+    parent's link. One stored file therefore answers for the folder, and what
+    reaches a person has to be "the library knows this", never "you have it all".
+    """
+    service, library, _ = make_service(tmp_path)
+    folder = "https://mega.nz/folder/AaBbCcDd"
+    for handle in ("child-one", "child-two"):
+        ref = ResourceRef(
+            provider="mega",
+            resource_id=handle,
+            kind=ResourceKind.FILE,
+            url=folder,
+            parent_id="AaBbCcDd",
+        )
+        entry = library.entry(ref)
+        entry.path.mkdir(parents=True, exist_ok=True)
+        entry.metadata_path.write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "provider": "mega",
+                    "key": entry.key,
+                    "resource_id": handle,
+                    "parent_id": "AaBbCcDd",
+                    "kind": "file",
+                    "name": f"{handle}.pdf",
+                    "source_url": folder,
+                    "source_document": None,
+                    "status": "completed",
+                    "discovered_at": None,
+                    "downloaded_at": None,
+                    "attempts": 1,
+                    "error": None,
+                    "content": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    assert service.stored([folder]) == frozenset({folder})
+
+
+def test_asking_about_nothing_reads_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, library, _ = make_service(tmp_path)
+    write(library, "one")
+    reads = CountingReads()
+    monkeypatch.setattr("maxicrawler.app.library._read_document", reads)
+
+    assert service.stored([]) == frozenset()
+    assert reads.count == 0
+
+
+def test_the_answer_parses_no_metadata_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The URL is a column on the index, so this question never reads a record."""
+    service, library, _ = make_service(tmp_path)
+    write(library, "one")
+    service.stored(["https://mega.nz/file/one"])
+    reads = CountingReads()
+    monkeypatch.setattr("maxicrawler.app.library._read_document", reads)
+
+    again = service.stored(["https://mega.nz/file/one"])
+
+    assert again == frozenset({"https://mega.nz/file/one"})
+    assert reads.count == 0
+
+
+def test_the_answer_is_still_right_without_an_index(tmp_path: Path) -> None:
+    library = Library(tmp_path / "library")
+    settings = Settings(library_path=library.root, database_path=tmp_path / "maxicrawler.db")
+    service = LibraryService(settings, library=library, index=BrokenIndex())  # type: ignore[arg-type]
+    write(library, "one")
+
+    assert service.stored(["https://mega.nz/file/one"]) == frozenset({"https://mega.nz/file/one"})
+
+
+def test_an_entry_stored_since_the_last_question_is_seen(tmp_path: Path) -> None:
+    service, library, _ = make_service(tmp_path)
+    write(library, "one")
+    service.stored(["https://mega.nz/file/one"])
+
+    write(library, "two")
+
+    assert service.stored(["https://mega.nz/file/two"]) == frozenset({"https://mega.nz/file/two"})

@@ -49,7 +49,7 @@ being repaired.
 
 import json
 import sqlite3
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -62,6 +62,7 @@ from maxicrawler.config import Settings
 from maxicrawler.database import IndexedEntry, SQLiteDatabase, SQLiteLibraryIndex
 from maxicrawler.domain import DownloadStatus
 from maxicrawler.library import Library, LibraryEntry, LibraryError, ResourceRecord
+from maxicrawler.utils import strip_fragment
 
 DEFAULT_PER_PAGE = 50
 """How many stored resources one page of the library shows."""
@@ -307,6 +308,52 @@ class LibraryService:
             size=size,
             media=verdict_for(item.filename, size, max_bytes=self._settings.max_view_bytes),
         )
+
+    def stored(self, urls: Iterable[str]) -> frozenset[str]:
+        """Return which of *urls* the library holds something fetched from.
+
+        The answer a report marks its rows with, and the shape
+        :data:`~maxicrawler.app.discovery.StateResolver` asks for: a set of the
+        URLs *as they were given*, so the caller can match them against what it
+        already has.
+
+        Fragments are stripped before comparing and kept in the answer. A share
+        link carries its decryption key there, a stored record never does
+        (ADR-020), and the two would otherwise never compare equal — while a
+        caller handed back a key-less URL would have lost the only thing that
+        makes the link usable.
+
+        This is a claim about the URL, not about completeness: a share naming a
+        folder is recorded by each file inside it, under the container's URL, so
+        one stored file puts the container in this answer. What that is called
+        where somebody reads it is the caller's decision, and
+        :class:`~maxicrawler.app.discovery.LinkState` is where it is made.
+
+        Asked in bulk because the cost is one pass over the library, not one per
+        URL — and the cost of a pass is what the index exists to keep small: the
+        source URLs are a column on it, so this reads no metadata document at all.
+        """
+        asked = tuple(urls)
+        if not asked:
+            return frozenset()
+        known = self._source_urls()
+        return frozenset(url for url in asked if strip_fragment(url) in known)
+
+    def _source_urls(self) -> frozenset[str]:
+        """Return every URL the library has stored something from.
+
+        Off the index's own column where there is one, which reads no document
+        and parses no JSON, and off the entries themselves where there is not.
+        """
+        index = self._index()
+        if index is not None:
+            try:
+                rows = self._synchronize(index)
+            except sqlite3.Error:
+                pass
+            else:
+                return frozenset(row.source_url for row in rows if row.source_url)
+        return frozenset(item.source_url for item in self._read_entries())
 
     def _items(self) -> Iterator[LibraryItem]:
         """Yield every entry that describes itself readably.
