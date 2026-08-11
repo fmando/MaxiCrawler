@@ -149,6 +149,8 @@ def test_durations_read_the_way_a_person_thinks(seconds: float, expected: str) -
         (CrawlOptions(same_domain=True), "same domain"),
         (CrawlOptions(same_domain=True, include_subdomains=True), "same domain and subdomains"),
         (CrawlOptions(include_subdomains=True), "any domain"),
+        (CrawlOptions(below_seed=True), "below the start URL"),
+        (CrawlOptions(below_seed=True, same_domain=True), "below the start URL"),
     ],
 )
 def test_the_scope_is_described_in_one_phrase(options: CrawlOptions, expected: str) -> None:
@@ -930,6 +932,7 @@ def make_stored_crawl(**kwargs: object):  # type: ignore[no-untyped-def]
         "max_pages": 50,
         "same_domain": True,
         "include_subdomains": False,
+        "below_seed": False,
         "respect_robots": True,
         "pages_visited": 28,
         "pages_failed": 2,
@@ -963,6 +966,18 @@ def test_a_recorded_crawl_reports_the_robots_setting_it_ran_under() -> None:
     (row,) = crawl_rows([make_stored_crawl(respect_robots=False)])
 
     assert row["options"].endswith("robots.txt ignored")
+
+
+def test_a_recorded_crawl_reports_the_scope_it_actually_ran_under() -> None:
+    """A row that says "same domain" about a run confined to one path is a lie.
+
+    Both columns are on the record, because both were submitted; which of them
+    governed is the one question a reader has, and the row answers it.
+    """
+    (row,) = crawl_rows([make_stored_crawl(same_domain=True, below_seed=True)])
+
+    assert "below the start URL" in row["options"]
+    assert "same domain" not in row["options"]
 
 
 def test_large_counts_in_a_row_are_grouped() -> None:

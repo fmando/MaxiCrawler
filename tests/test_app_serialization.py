@@ -30,7 +30,9 @@ def make_report(**kwargs: object) -> CrawlReport:
         session_id="crawl-1",
         seed_url="https://example.test/",
         started_at=STARTED,
-        options=CrawlOptions(max_depth=2, max_pages=50, same_domain=True),
+        options=kwargs.pop(  # type: ignore[arg-type]
+            "options", CrawlOptions(max_depth=2, max_pages=50, same_domain=True)
+        ),
         context=kwargs.pop("context", RequestContext(user_agent="MaxiCrawler/test")),  # type: ignore[arg-type]
     )
     values: dict[str, object] = {
@@ -87,7 +89,23 @@ def test_the_document_states_what_the_crawl_was_told_to_do() -> None:
         "max_pages": 50,
         "same_domain": True,
         "include_subdomains": False,
+        "below_seed": False,
+        "scope": "same domain",
     }
+
+
+def test_the_document_names_the_scope_that_governed_rather_than_the_flags() -> None:
+    """Three booleans mean four things, and the reader should not have to know.
+
+    The flags stay, because the document is a record of what the crawl was
+    told. `scope` is what it was actually held to.
+    """
+    report = make_report(options=CrawlOptions(max_depth=2, same_domain=True, below_seed=True))
+
+    options = crawl_document(report)["options"]
+
+    assert options["same_domain"] is True
+    assert options["scope"] == "below the start URL"
 
 
 def test_the_document_carries_every_counter() -> None:

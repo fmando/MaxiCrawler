@@ -967,13 +967,46 @@ one number seen twice, not two numbers to add up.
 | `--depth`, `-d` | `0` | link distance from the start page; 0 fetches it alone |
 | `--same-domain` / `--any-domain` | any domain | stay on the starting host |
 | `--include-subdomains` | off | treat `docs.example.org` as the same domain |
+| `--below-seed` / `--anywhere` | anywhere | stay under the path the start URL names |
 | `--max-pages` | `50` | stop after this many pages |
 | `--json` | off | the machine-readable report |
 | `--prose` / `--no-prose` | prose | also read URLs written as plain text |
 | `--persist` / `--no-persist` | persist | store the summary and the URLs |
 
 Every default except the last two is configurable — `crawl_depth`,
-`crawl_max_pages` and `crawl_same_domain` in `maxicrawler.toml`.
+`crawl_max_pages`, `crawl_same_domain` and `crawl_below_seed` in
+`maxicrawler.toml`.
+
+### Staying under one path
+
+`--same-domain` asks about the host, and on a site that gives each section its
+own path that is not the question. All of `boards.example.org/hr/`,
+`/g/` and `/biz/` are one domain, so the domain rule walks the lot.
+
+`--below-seed` is the narrower rule:
+
+```bash
+maxicrawler crawl https://boards.example.org/hr/ --depth 3 --below-seed
+```
+
+That reaches `/hr/` and everything under it, and nothing else on that host.
+
+Three things worth knowing about it:
+
+- **It carries the host itself**, so it replaces `--same-domain` rather than
+  needing it. Both flags together is the narrow rule, not a contradiction.
+- **Subdomains are always outside it.** `docs.example.org/hr/` is a different
+  site, not a place below `example.org/hr/`, so `--include-subdomains` has no
+  effect here.
+- **A start URL whose last segment looks like a file names its directory**, so
+  `/docs/guide.html` covers `/docs/`. Add a trailing slash when you mean the
+  path literally: `/docs/v1.0/` is a directory, `/docs/v1.0` is read as a file
+  and covers `/docs/`.
+
+It changes what is *fetched*. Links pointing out of scope are still discovered
+and still appear in the report — they are just not followed, which is where the
+volume comes from: without it, crawling one board pulls in every other board's
+pages and every link on them.
 
 ### Links off-site are followed by default
 

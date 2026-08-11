@@ -40,6 +40,8 @@ def crawl_document(report: CrawlReport) -> dict[str, Any]:
             "max_pages": report.session.options.max_pages,
             "same_domain": report.session.options.same_domain,
             "include_subdomains": report.session.options.include_subdomains,
+            "below_seed": report.session.options.below_seed,
+            "scope": str(report.session.options.scope),
         },
         "statistics": {
             "pages_visited": statistics.pages_visited,

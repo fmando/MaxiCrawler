@@ -33,6 +33,7 @@ TABLE = "crawl_sessions"
 ADDED_COLUMNS: Mapping[str, str] = {
     "pages_attempted": "INTEGER NOT NULL DEFAULT 0",
     "respect_robots": "INTEGER NOT NULL DEFAULT 1",
+    "below_seed": "INTEGER NOT NULL DEFAULT 0",
 }
 """Columns that arrived after ``crawl_sessions`` was first released.
 
@@ -58,6 +59,7 @@ SCHEMA = (
         max_pages INTEGER NOT NULL DEFAULT 0,
         same_domain INTEGER NOT NULL DEFAULT 0,
         include_subdomains INTEGER NOT NULL DEFAULT 0,
+        below_seed INTEGER NOT NULL DEFAULT 0,
         respect_robots INTEGER NOT NULL DEFAULT 1,
         pages_visited INTEGER NOT NULL DEFAULT 0,
         pages_failed INTEGER NOT NULL DEFAULT 0,
@@ -98,6 +100,16 @@ class StoredCrawl:
     max_pages: int
     same_domain: bool
     include_subdomains: bool
+    below_seed: bool
+    """Whether the run stayed at or below the place its seed URL named.
+
+    Supersedes the two above when set, which is why it is stored beside them
+    rather than folded into them: a row says what it was told, and
+    :attr:`~maxicrawler.web.session.CrawlOptions.scope` says which of the three
+    actually ran. Rows written before this column existed default to *false* —
+    the crawler had no way to do it.
+    """
+
     respect_robots: bool
     """Whether this run obeyed the robots.txt of the hosts it visited.
 
@@ -155,8 +167,8 @@ class SQLiteCrawlRepository:
             connection.execute(
                 "INSERT INTO crawl_sessions("
                 "session_id, seed_url, started_at, state, max_depth, max_pages, "
-                "same_domain, include_subdomains, respect_robots"
-                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "same_domain, include_subdomains, below_seed, respect_robots"
+                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(session_id) DO UPDATE SET "
                 "seed_url = excluded.seed_url, started_at = excluded.started_at, "
                 "finished_at = NULL, state = excluded.state",
@@ -169,6 +181,7 @@ class SQLiteCrawlRepository:
                     options.max_pages,
                     int(options.same_domain),
                     int(options.include_subdomains),
+                    int(options.below_seed),
                     int(options.respect_robots),
                 ),
             )
@@ -227,6 +240,7 @@ def _to_stored_crawl(row: sqlite3.Row) -> StoredCrawl:
         max_pages=int(row["max_pages"]),
         same_domain=bool(row["same_domain"]),
         include_subdomains=bool(row["include_subdomains"]),
+        below_seed=bool(row["below_seed"]),
         respect_robots=bool(row["respect_robots"]),
         pages_visited=int(row["pages_visited"]),
         pages_failed=int(row["pages_failed"]),

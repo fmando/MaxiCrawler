@@ -13,7 +13,7 @@ from maxicrawler.events import CrawlFinished, EventBus, PageCrawled, UrlDiscover
 from maxicrawler.web import PolicyRefusedError, PolicyRule
 from maxicrawler.web.engine import CrawlEngine
 from maxicrawler.web.report import SkipReason
-from maxicrawler.web.session import CrawlControl, CrawlState
+from maxicrawler.web.session import CrawlControl, CrawlScope, CrawlState
 
 runner = CliRunner()
 MEGA_LINK = "https://mega.nz/file/AaBbCcDd#0123456789abcdefghijklmnopqrstuvwxyzABC"
@@ -74,6 +74,24 @@ def test_what_the_caller_states_overrides_the_configuration() -> None:
     assert session.options.max_depth == 1
     assert session.options.max_pages == 2
     assert session.options.same_domain is False
+
+
+def test_the_path_scope_has_a_configured_default_like_the_domain_one() -> None:
+    service = make_service(crawl_below_seed=True)
+
+    session = service.build_session("https://example.test/hr/")
+
+    assert session.options.below_seed is True
+    assert session.options.scope is CrawlScope.BELOW_SEED
+
+
+def test_a_caller_can_turn_the_configured_path_scope_off_for_one_crawl() -> None:
+    service = make_service(crawl_below_seed=True)
+
+    session = service.build_session("https://example.test/hr/", below_seed=False)
+
+    assert session.options.below_seed is False
+    assert session.options.scope is CrawlScope.ANY_DOMAIN
 
 
 def test_a_session_carries_the_configured_user_agent() -> None:

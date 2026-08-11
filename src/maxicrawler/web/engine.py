@@ -67,6 +67,7 @@ from maxicrawler.web.policy import (
     AllowAllPolicy,
     CompositePolicy,
     CrawlPolicy,
+    PathPrefixPolicy,
     PolicyDecision,
     PolicyRule,
     SameDomainPolicy,
@@ -81,7 +82,7 @@ from maxicrawler.web.report import (
 from maxicrawler.web.repository import CrawlRepository, NullCrawlRepository
 from maxicrawler.web.resolve import looks_like_a_page
 from maxicrawler.web.service import WebDiscoveryService
-from maxicrawler.web.session import CrawlControl, CrawlSession, CrawlState
+from maxicrawler.web.session import CrawlControl, CrawlScope, CrawlSession, CrawlState
 
 FOLLOWABLE_KINDS = frozenset({LinkKind.ANCHOR, LinkKind.FRAME, LinkKind.REDIRECT, LinkKind.TEXT})
 """Which kinds of link could plausibly lead to another page.
@@ -259,19 +260,29 @@ class CrawlEngine:
     def _scope_for(self, session: CrawlSession) -> CrawlPolicy:
         """Return the policy this crawl is actually held to.
 
-        The engine derives the domain restriction from the session rather than
+        The engine derives the restriction from the session rather than
         leaving it to whoever wired the engine. An option that only takes
         effect when a caller separately injects a matching policy is a trap:
         the report and the database row would claim the crawl stayed on one
         host while it wandered. An injected policy still applies — it is asked
         alongside, and the first refusal wins.
+
+        Which rule applies is :attr:`~maxicrawler.web.session.CrawlOptions.scope`
+        rather than a chain of ifs over the booleans, so this and every line
+        that *describes* the crawl read the same answer.
         """
-        if not session.options.same_domain:
+        scope = session.options.scope
+        if scope is CrawlScope.ANY_DOMAIN:
             return self._policy
-        scope = SameDomainPolicy(
-            session.seed_url, include_subdomains=session.options.include_subdomains
+        rule: CrawlPolicy = (
+            PathPrefixPolicy(session.seed_url)
+            if scope is CrawlScope.BELOW_SEED
+            else SameDomainPolicy(
+                session.seed_url,
+                include_subdomains=scope is CrawlScope.SAME_DOMAIN_AND_SUBDOMAINS,
+            )
         )
-        return CompositePolicy([scope, self._policy])
+        return CompositePolicy([rule, self._policy])
 
     def _seed(self, session: CrawlSession) -> None:
         """Queue the starting point, or say why there is nothing to crawl."""

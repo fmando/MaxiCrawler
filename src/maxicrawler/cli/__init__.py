@@ -143,6 +143,13 @@ def crawl(
         bool,
         typer.Option("--include-subdomains", help="Count subdomains as the same domain."),
     ] = False,
+    below_seed: Annotated[
+        bool | None,
+        typer.Option(
+            "--below-seed/--anywhere",
+            help="Follow only links at or below the path the start URL names.",
+        ),
+    ] = None,
     max_pages: Annotated[
         int | None, typer.Option("--max-pages", help="Stop after this many pages.")
     ] = None,
@@ -189,6 +196,13 @@ def crawl(
     because finding a share link on Mega or Pixeldrain is as much the point as
     walking one site. --max-pages is the ceiling that keeps that finite.
 
+    --below-seed is the narrower rule, for a host that gives each section its
+    own path: crawling https://example.org/hr/ with it reaches /hr/ and
+    everything under it and nothing else on that host. It carries the host
+    itself, so it supersedes --same-domain rather than adding to it, and
+    subdomains are always outside it. A start URL whose last segment looks like
+    a file is read as naming its directory, so /docs/guide.html covers /docs/.
+
     Nothing is downloaded and no provider is contacted. Only HTML is read:
     JavaScript is not executed, no cookie is stored and no form is submitted,
     so a page that builds its links in the browser will appear to have fewer of
@@ -225,6 +239,7 @@ def crawl(
             max_pages=max_pages,
             same_domain=same_domain,
             include_subdomains=include_subdomains,
+            below_seed=below_seed,
             respect_robots=respect_robots,
             scan_prose=prose,
         )

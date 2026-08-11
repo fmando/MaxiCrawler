@@ -10,6 +10,7 @@ from maxicrawler.web.session import (
     DEFAULT_MAX_PAGES,
     CrawlControl,
     CrawlOptions,
+    CrawlScope,
     CrawlSession,
     CrawlState,
     RequestContext,
@@ -47,6 +48,50 @@ def test_the_domain_restriction_is_off_by_default() -> None:
     """
     assert CrawlOptions().same_domain is False
     assert CrawlOptions().include_subdomains is False
+    assert CrawlOptions().below_seed is False
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({}, CrawlScope.ANY_DOMAIN),
+        ({"include_subdomains": True}, CrawlScope.ANY_DOMAIN),
+        ({"same_domain": True}, CrawlScope.SAME_DOMAIN),
+        (
+            {"same_domain": True, "include_subdomains": True},
+            CrawlScope.SAME_DOMAIN_AND_SUBDOMAINS,
+        ),
+        ({"below_seed": True}, CrawlScope.BELOW_SEED),
+    ],
+)
+def test_three_booleans_are_read_as_one_scope(
+    kwargs: dict[str, bool], expected: CrawlScope
+) -> None:
+    assert CrawlOptions(**kwargs).scope is expected  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"below_seed": True, "same_domain": True},
+        {"below_seed": True, "same_domain": True, "include_subdomains": True},
+        {"below_seed": True, "include_subdomains": True},
+    ],
+)
+def test_the_path_scope_wins_over_every_domain_spelling(kwargs: dict[str, bool]) -> None:
+    """Both boxes ticked is not a contradiction to resolve; it is the narrow one.
+
+    A path prefix carries the host it belongs to, so a domain rule beside it
+    can only ever agree. Deciding that once, here, is what keeps the engine and
+    every line that *describes* a crawl from working it out separately.
+    """
+    assert CrawlOptions(**kwargs).scope is CrawlScope.BELOW_SEED  # type: ignore[arg-type]
+
+
+def test_a_scope_renders_as_the_phrase_a_report_prints() -> None:
+    """The value is the wording, so nothing needs a table to say it."""
+    assert str(CrawlScope.BELOW_SEED) == "below the start URL"
+    assert str(CrawlScope.ANY_DOMAIN) == "any domain"
 
 
 def test_the_page_ceiling_has_a_documented_default() -> None:
