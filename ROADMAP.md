@@ -34,8 +34,11 @@ The mission, core principles, and non-goals are described in
 -   0.14 Workflow & productivity ✅ — a report you can search, filter and page
     through, a download queue you can reorder and pause, and one click to queue
     everything a filter matches
--   0.15 Scheduler & Automation
--   0.16 REST API
+-   0.15 The report as a workspace ✅ — what is already known about each link,
+    a way back from a batch that keeps the filter you queued it from, and a
+    queue you can watch a hundred files through without reloading a page
+-   0.16 Scheduler & Automation
+-   0.17 REST API
 -   1.0 Stable Release
 
 The desktop GUI that used to sit at 0.11 is superseded by 0.10. A local server
@@ -87,8 +90,12 @@ not change.
     own limit is what bounds a run today
 -   Deduplicating what is queued. `TransferQueue.submit` will happily hold the
     same URL twice, and "queue every match" pressed after a partial drain
-    re-queues what already arrived. A set of what the library holds would
-    answer both, and wants the library index below
+    re-queues what already arrived. Half of this landed in 0.15: the set
+    questions are answered — `LibraryService.stored` and `TransferQueue.pending`
+    are what mark a report's rows *in library* and *in queue* (ADR-037) — and a
+    report now shows you before you click. What is missing is the queue itself
+    declining, which is a decision about what a refusal means rather than about
+    where the answer comes from
 -   A politeness schedule shared across concurrent crawls. Today a `HostSchedule`
     lives per crawl, which is exactly right while `serve` runs one worker and
     wrong the moment it runs two
@@ -112,13 +119,14 @@ not change.
     same shape and the same gap, and it cannot close it before resume exists —
     a restored queue could otherwise only offer to start the same files again
     from zero (ADR-033)
--   A stable identity for a library entry, minted once and preserved. The
-    directory key is derived from the reference and changes when the reference
-    does; anything that wants to *point at* an entry across time — a collection,
-    a persistent job, a group of duplicates — wants a name that does not. The
-    cache column is already there and unwritten, and the reason it is unwritten
-    is that `DownloadManager` rebuilds the record on every status change, so
-    minting one needs a read before the write
+-   Duplicates: one file reached through two share links, or through a link
+    whose address has changed. This is the case a separate identity for a
+    library entry was reserved for, and 0.15 decided *not* to mint one yet
+    (ADR-037): a random id cannot be recomputed from the file system, which is
+    the one property ADR-010 exists to keep, and a derived one is a second name
+    for the key an entry already has. The natural anchor is the checksum, which
+    is address-independent and recomputable both — so the column stays empty
+    until this question is asked properly, and this question chooses the answer
 -   `library` commands — list, verify, prune. `LibraryService` already answers
     the first two questions; what is missing is the command that asks them
 -   Per-host politeness for downloads. The queue drains one at a time, and that
@@ -127,8 +135,11 @@ not change.
     crawler's is what would let the number rise honestly
 -   Filtering and sorting the *crawl* list. The link and page tables inside one
     report have it since 0.14; the list of crawls itself is still everything in
-    the order it was recorded. This is the point at which htmx would earn being
-    vendored — the routes already render standalone fragments
+    the order it was recorded. Still the point at which htmx would earn being
+    vendored, and now with a measurement behind that: 0.15 paid the cheap half
+    once, for the queue page, and it came to about forty lines and no
+    dependency (ADR-038). The question is how many more places want their own
+    forty lines
 -   Authentication, before the interface is anything but loopback. Until then
     `serve` refuses a public address unless `--allow-remote` asks for it
 -   Further providers: Pixeldrain, GoFile, MediaFire. Less urgent than they

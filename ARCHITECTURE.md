@@ -168,12 +168,12 @@ eingebettet ist der Strom des gerade laufenden Transfers. Eine Warteschlange,
 die niemand abarbeitet, hat nichts zu senden.
 
 Die Seite hält außerdem **Summen, die ihre Zeilen überleben**. Die Historie ist
-begrenzt (`DEFAULT_RETAINED_RUNS`), und jede Zahl darüber ist eine Summe über
-die gehaltenen Läufe — ohne Gegenmaßnahme fiele „50 gespeichert" beim
-einundfünfzigsten Transfer zurück auf „1". Verdrängte Läufe werden deshalb
-vorher in `Departed` eingerechnet: die Zeile ist weg, die Zahl nicht. Zurückgesetzt
-werden die Summen nur durch „Clear the list", zusammen mit den Zeilen, über die
-sie gebildet wurden.
+begrenzt (`DEFAULT_RETAINED_RUNS`), verdrängt wird beim Einreihen, und jede Zahl
+darüber ist eine Summe über die gehaltenen Läufe — ohne Gegenmaßnahme nimmt also
+der nächste eingereihte Auftrag die Zähler des vorigen Stapels mit. Verdrängte
+Läufe werden deshalb vorher in `Departed` eingerechnet: die Zeile ist weg, die
+Zahl nicht. Zurückgesetzt werden die Summen nur durch „Clear the list",
+zusammen mit den Zeilen, über die sie gebildet wurden.
 
 Endet dieser Transfer, holt `download.js` **nur die Panels** nach — dieselbe
 Teilvorlage, die auch die Seite einbindet, unter `/downloads?part=queue` — und
