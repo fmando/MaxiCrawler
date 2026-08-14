@@ -16,7 +16,7 @@ limit" on its own line, while a page shows a short badge. Sharing the *numbers*
 is what matters, and those come from the same report either way.
 """
 
-from collections.abc import Container, Iterable, Mapping
+from collections.abc import Callable, Container, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -30,6 +30,7 @@ from maxicrawler.app import (
     UNTRACKED,
     DownloadProgress,
     DownloadSummary,
+    LibraryFacet,
     LibraryItem,
     LibraryPage,
     LibraryQuery,
@@ -609,6 +610,7 @@ def library_view(page: LibraryPage) -> dict[str, Any]:
         "sort_value": str(query.sort),
         "direction": "desc" if query.descending else "asc",
         "kind": "" if query.kind is None else str(query.kind),
+        "state": "queued" if query.queued else "",
         # Shown in the two boxes, and rounded to what `format_size` prints: a
         # bound is a coarse instrument, and "1.2 MB" beside a listing that says
         # "1.3 MB" everywhere else would be the odd one out. What travels in the
@@ -639,8 +641,9 @@ def item_view(item: LibraryItem, payload: StoredPayload | None) -> dict[str, Any
         "directory": item.directory,
         "key": item.key,
         "status": str(item.status),
-        "state_label": STATUS_LABELS[item.status],
-        "state_tone": STATUS_TONES[item.status],
+        "state_label": _entry_label(item),
+        "state_tone": _entry_tone(item),
+        "is_queued": item.queued,
         "size": format_size(item.size),
         "filename": item.filename,
         "downloaded_at": (
@@ -702,47 +705,95 @@ def _library_facets(page: LibraryPage) -> tuple[dict[str, Any], ...]:
     is a control whose two states show the same rows.
     """
     query = page.query
-    groups = (
-        ("Source", page.providers, "provider", query.provider or "", lambda value: value),
-        (
+    rows = (
+        _facet_row("Source", page.providers, query, "provider", query.provider or "", str),
+        _facet_row(
             "Type",
             page.kinds,
+            query,
             "kind",
             "" if query.kind is None else str(query.kind),
             lambda value: KIND_WORDS[MediaKind(value)],
         ),
-        (
+        _facet_row(
             "State",
             page.statuses,
+            query,
             "status",
             _status_value(query.status),
             lambda value: STATUS_LABELS[DownloadStatus(value)],
+            extra=_queued_chips(page),
         ),
+        _size_facets(query),
     )
-    rows: list[dict[str, Any]] = []
-    for heading, facets, name, active, label_of in groups:
-        if len(facets) < 2:
-            continue
-        rows.append(
-            {
-                "heading": heading,
-                "chips": tuple(
-                    {
-                        "label": label_of(facet.value),
-                        "count": format_number(facet.count),
-                        "active": facet.value == active,
-                        "url": _library_url(
-                            query,
-                            page=1,
-                            **{name: None if facet.value == active else facet.value},
-                        ),
-                    }
-                    for facet in facets
-                ),
-            }
+    return tuple(row for row in rows if row is not None)
+
+
+def _facet_row(
+    heading: str,
+    facets: tuple[LibraryFacet, ...],
+    query: LibraryQuery,
+    name: str,
+    active: str,
+    label_of: Callable[[str], str],
+    *,
+    extra: tuple[dict[str, Any], ...] = (),
+) -> dict[str, Any] | None:
+    """Return one chip row, or ``None`` when it would not be worth showing.
+
+    *extra* is for a chip that belongs in a group without coming from its
+    facets, and the length is checked after they are added — a library where
+    everything completed and one thing is being fetched again has two states to
+    choose between, even though only one of them is a status.
+    """
+    chips = [
+        _chip(
+            query,
+            label_of(facet.value),
+            facet.count,
+            active=facet.value == active,
+            **{name: None if facet.value == active else facet.value},
         )
-    rows.append(_size_facets(query))
-    return tuple(rows)
+        for facet in facets
+    ]
+    chips.extend(extra)
+    return None if len(chips) < 2 else {"heading": heading, "chips": tuple(chips)}
+
+
+def _queued_chips(page: LibraryPage) -> tuple[dict[str, Any], ...]:
+    """Return the "waiting" chip, when there is a queue to ask and it holds something.
+
+    Offered beside the download states because that is where somebody looks for
+    it, and built separately because it is not one: a status is what a record
+    says happened, and this is what is happening right now in this process.
+
+    Nothing at all when no queue was handed to the service, which is what tells
+    a page that cannot answer the question apart from one whose answer is none.
+    Kept on the page while it is the active filter even at zero, so the chip you
+    are standing on is always the one that switches it off.
+    """
+    query = page.query
+    if page.queued is None or (page.queued == 0 and not query.queued):
+        return ()
+    return (
+        _chip(page.query, QUEUED_LABEL, page.queued, active=query.queued, queued=not query.queued),
+    )
+
+
+def _chip(
+    query: LibraryQuery, label: str, count: int | None, *, active: bool, **changes: Any
+) -> dict[str, Any]:
+    """Return one chip: what it says, whether it is on, and where it leads.
+
+    Always back to the first page, because a filter applied on page seven of the
+    old listing has no page seven to keep.
+    """
+    return {
+        "label": label,
+        "count": "" if count is None else format_number(count),
+        "active": active,
+        "url": _library_url(query, page=1, **changes),
+    }
 
 
 def _size_facets(query: LibraryQuery) -> dict[str, Any]:
@@ -757,17 +808,14 @@ def _size_facets(query: LibraryQuery) -> dict[str, Any]:
     return {
         "heading": "Size",
         "chips": tuple(
-            {
-                "label": label,
-                "count": "",
-                "active": query.min_size == low and query.max_size == high,
-                "url": _library_url(
-                    query,
-                    page=1,
-                    min_size=None if query.min_size == low and query.max_size == high else low,
-                    max_size=None if query.min_size == low and query.max_size == high else high,
-                ),
-            }
+            _chip(
+                query,
+                label,
+                None,
+                active=query.min_size == low and query.max_size == high,
+                min_size=None if query.min_size == low and query.max_size == high else low,
+                max_size=None if query.min_size == low and query.max_size == high else high,
+            )
             for label, low, high in SIZE_RANGES
         ),
     }
@@ -822,6 +870,7 @@ def _library_url(query: LibraryQuery, **changes: Any) -> str:
         "kind": _enum_value(changes.get("kind", query.kind)),
         "min": _number_value(changes.get("min_size", query.min_size)),
         "max": _number_value(changes.get("max_size", query.max_size)),
+        "state": "queued" if changes.get("queued", query.queued) else "",
         "sort": str(changes.get("sort", query.sort)),
         "dir": "desc" if changes.get("descending", query.descending) else "asc",
         "page": str(changes.get("page", query.page)),
@@ -860,6 +909,7 @@ def _library_row(item: LibraryItem) -> dict[str, Any]:
         "provider": item.provider,
         "name": item.name,
         "size": format_size(item.size),
+        "is_queued": item.queued,
         "downloaded_at": (
             "—" if item.downloaded_at is None else format_timestamp(item.downloaded_at)
         ),
@@ -870,11 +920,26 @@ def _library_row(item: LibraryItem) -> dict[str, Any]:
         "path": "—" if item.path is None else str(item.path),
         "source_url": item.source_url,
         "status": str(item.status),
-        "state_label": STATUS_LABELS[item.status],
-        "state_tone": STATUS_TONES[item.status],
+        "state_label": _entry_label(item),
+        "state_tone": _entry_tone(item),
         "kind": str(item.kind),
         "url": f"/library/{item.directory}/{item.key}",
     }
+
+
+def _entry_label(item: LibraryItem) -> str:
+    """Return what a listing says about this entry's state.
+
+    The queue wins over the record, because it is the newer of the two facts. A
+    row reading "failed" while the file is being fetched again would send
+    somebody to press a button that is already pressed.
+    """
+    return QUEUED_LABEL if item.queued else STATUS_LABELS[item.status]
+
+
+def _entry_tone(item: LibraryItem) -> str:
+    """Return the badge colour that goes with :func:`_entry_label`."""
+    return "idle" if item.queued else STATUS_TONES[item.status]
 
 
 def _transferred(written: int, total: int | None) -> str:

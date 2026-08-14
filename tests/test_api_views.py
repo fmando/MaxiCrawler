@@ -2090,6 +2090,104 @@ def test_the_chosen_category_survives_every_other_link() -> None:
     assert all("kind=image" in column["url"] for column in shown["columns"])
 
 
+# --- what the queue adds to it ------------------------------------------------
+
+
+def test_the_queue_is_a_chip_beside_the_download_states() -> None:
+    """Where somebody looks for it, though it comes from somewhere else entirely."""
+    shown = library_view(
+        library_page(
+            (make_item(), make_item("gone.pdf", status=DownloadStatus.FAILED)),
+            queued=2,
+        )
+    )
+
+    chips = {chip["label"]: chip for chip in group(shown, "State")["chips"]}
+    assert chips["waiting"]["count"] == "2"
+    assert "state=queued" in chips["waiting"]["url"]
+
+
+def test_a_page_that_cannot_ask_a_queue_offers_no_such_chip() -> None:
+    """The command line's answer, and a listing that must not invent one."""
+    shown = library_view(
+        library_page((make_item(), make_item("gone.pdf", status=DownloadStatus.FAILED)))
+    )
+
+    assert [chip["label"] for chip in group(shown, "State")["chips"]] == [
+        "completed",
+        "failed",
+    ]
+
+
+def test_an_empty_queue_is_not_worth_a_chip() -> None:
+    shown = library_view(
+        library_page(
+            (make_item(), make_item("gone.pdf", status=DownloadStatus.FAILED)),
+            queued=0,
+        )
+    )
+
+    assert "waiting" not in [chip["label"] for chip in group(shown, "State")["chips"]]
+
+
+def test_the_queue_chip_can_carry_a_group_on_its_own() -> None:
+    """One status and one thing being fetched again are still two states to pick."""
+    shown = library_view(library_page((make_item(), make_item("other.pdf")), queued=1))
+
+    assert [chip["label"] for chip in group(shown, "State")["chips"]] == [
+        "completed",
+        "waiting",
+    ]
+
+
+def test_the_queue_chip_switches_off_again() -> None:
+    shown = library_view(
+        library_page((make_item(queued=True),), query=LibraryQuery(queued=True), queued=1)
+    )
+
+    (chip,) = (row for row in group(shown, "State")["chips"] if row["label"] == "waiting")
+    assert chip["active"] is True
+    assert "state=" not in chip["url"]
+
+
+def test_the_filter_stays_offered_while_it_is_the_one_in_use() -> None:
+    """The last transfer finishing must not strand somebody inside the filter."""
+    shown = library_view(
+        library_page(
+            (make_item(), make_item("gone.pdf", status=DownloadStatus.FAILED)),
+            query=LibraryQuery(queued=True),
+            queued=0,
+        )
+    )
+
+    (chip,) = (row for row in group(shown, "State")["chips"] if row["label"] == "waiting")
+    assert chip["active"] is True
+
+
+def test_a_row_being_fetched_again_says_so_rather_than_failed() -> None:
+    """The queue is the newer of the two facts, so it is the one shown."""
+    row = library_view(
+        library_page(
+            (make_item(status=DownloadStatus.FAILED, queued=True),),
+            queued=1,
+        )
+    )["rows"][0]
+
+    assert row["state_label"] == "waiting"
+    assert row["state_tone"] == "idle"
+    assert row["status"] == "failed"
+    assert row["is_queued"] is True
+
+
+def test_the_queue_filter_survives_every_other_link() -> None:
+    shown = library_view(
+        library_page((make_item(queued=True),), query=LibraryQuery(queued=True), queued=1)
+    )
+
+    assert shown["state"] == "queued"
+    assert all("state=queued" in column["url"] for column in shown["columns"])
+
+
 # --- the links the table is navigated by --------------------------------------
 
 

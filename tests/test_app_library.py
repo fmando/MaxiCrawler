@@ -7,6 +7,7 @@ socket, no download.
 """
 
 import json
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from maxicrawler.app import (
     LibraryQuery,
     LibraryService,
     LibrarySort,
+    StateResolver,
 )
 from maxicrawler.app.viewing import MediaKind
 from maxicrawler.config import Settings
@@ -28,7 +30,12 @@ from maxicrawler.library import METADATA_FILENAME, Library
 PAYLOAD = b"payload"
 
 
-def make_service(tmp_path: Path, **overrides: object) -> tuple[LibraryService, Library]:
+def make_service(
+    tmp_path: Path,
+    *,
+    queued: StateResolver | None = None,
+    **overrides: object,
+) -> tuple[LibraryService, Library]:
     """Return a service over an empty library below *tmp_path*.
 
     The database goes below *tmp_path* too. The service keeps its listing cache
@@ -41,7 +48,18 @@ def make_service(tmp_path: Path, **overrides: object) -> tuple[LibraryService, L
         database_path=tmp_path / "maxicrawler.db",
         **overrides,  # type: ignore[arg-type]
     )
-    return LibraryService(settings, library=library), library
+    return LibraryService(settings, library=library, queued=queued), library
+
+
+def waiting_for(*urls: str) -> StateResolver:
+    """Return a queue resolver that claims *urls* are in the line.
+
+    The shape the web application hands in, standing in for
+    ``TransferQueue.pending``: asked in bulk, answering with the URLs it was
+    given rather than with its own copies of them.
+    """
+    wanted = frozenset(urls)
+    return lambda asked: frozenset(url for url in asked if url in wanted)
 
 
 def write(
@@ -418,6 +436,118 @@ def test_an_unfiltered_query_says_so() -> None:
     assert LibraryQuery(provider="mega").is_filtered is True
     assert LibraryQuery(kind=MediaKind.IMAGE).is_filtered is True
     assert LibraryQuery(status=DownloadStatus.FAILED).is_filtered is True
+    assert LibraryQuery(queued=True).is_filtered is True
+
+
+# --- what the queue is doing to it --------------------------------------------
+
+
+def test_an_entry_the_queue_is_working_on_is_marked(tmp_path: Path) -> None:
+    """The one fact that is not on disk, put beside the ones that are."""
+    service, library = make_service(tmp_path, queued=waiting_for("https://mega.nz/file/AaBbCcDd"))
+    write(library, "AaBbCcDd", name="again.pdf", status=DownloadStatus.FAILED)
+    write(library, "EeFfGgHh", name="done.pdf")
+
+    marked = {item.name: item.queued for item in service.browse().items}
+
+    assert marked == {"again.pdf": True, "done.pdf": False}
+
+
+def test_nothing_is_marked_without_a_queue_to_ask(tmp_path: Path) -> None:
+    """The command line builds the service this way, and must not be told lies."""
+    service, library = make_service(tmp_path)
+    write(library, "AaBbCcDd")
+
+    page = service.browse()
+
+    assert [item.queued for item in page.items] == [False]
+    assert page.queued is None
+
+
+def test_a_service_with_a_queue_counts_none_rather_than_saying_nothing(
+    tmp_path: Path,
+) -> None:
+    """Zero and "nobody can answer" are different answers, and only one is a chip."""
+    service, library = make_service(tmp_path, queued=waiting_for())
+    write(library, "AaBbCcDd")
+
+    assert service.browse().queued == 0
+
+
+def test_the_queued_count_covers_the_whole_library(tmp_path: Path) -> None:
+    """The same rule the other facet counts follow: a chip counts the library."""
+    service, library = make_service(
+        tmp_path,
+        queued=waiting_for("https://mega.nz/file/AaBbCcDd", "https://mega.nz/file/EeFfGgHh"),
+    )
+    write(library, "AaBbCcDd", name="one.pdf")
+    write(library, "EeFfGgHh", name="two.pdf")
+    write(library, "IiJjKkLl", name="three.pdf")
+
+    page = service.browse(LibraryQuery(search="one"))
+
+    assert page.total == 1
+    assert page.queued == 2
+
+
+def test_only_what_is_queued(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path, queued=waiting_for("https://mega.nz/file/EeFfGgHh"))
+    write(library, "AaBbCcDd", name="done.pdf")
+    write(library, "EeFfGgHh", name="again.pdf")
+
+    page = service.browse(LibraryQuery(queued=True))
+
+    assert [item.name for item in page.items] == ["again.pdf"]
+
+
+def test_the_queue_filter_combines_with_the_others(tmp_path: Path) -> None:
+    service, library = make_service(
+        tmp_path,
+        queued=waiting_for("https://mega.nz/file/AaBbCcDd", "https://mega.nz/file/EeFfGgHh"),
+    )
+    write(library, "AaBbCcDd", name="holiday.jpg", filename="holiday.jpg")
+    write(library, "EeFfGgHh", name="holiday.pdf", filename="holiday.pdf")
+
+    page = service.browse(LibraryQuery(queued=True, kind=MediaKind.IMAGE))
+
+    assert [item.name for item in page.items] == ["holiday.jpg"]
+
+
+def test_asking_for_queued_without_a_queue_answers_with_nothing(tmp_path: Path) -> None:
+    """A typed URL, on a client that has no queue: honestly empty, never everything."""
+    service, library = make_service(tmp_path)
+    write(library, "AaBbCcDd")
+
+    assert service.browse(LibraryQuery(queued=True)).items == ()
+
+
+def test_one_entry_knows_it_is_queued_too(tmp_path: Path) -> None:
+    """The detail page must not read "failed" while the retry is running."""
+    service, library = make_service(tmp_path, queued=waiting_for("https://mega.nz/file/AaBbCcDd"))
+    key = write(library, "AaBbCcDd", status=DownloadStatus.FAILED)
+
+    item = service.item("mega", key)
+
+    assert item is not None
+    assert item.queued is True
+
+
+def test_the_queue_is_asked_once_for_a_listing(tmp_path: Path) -> None:
+    """One question over every URL, not one question per row."""
+    asked: list[tuple[str, ...]] = []
+
+    def resolver(urls: Iterable[str]) -> frozenset[str]:
+        asked.append(tuple(sorted(urls)))
+        return frozenset()
+
+    service, library = make_service(tmp_path, queued=resolver)
+    write(library, "AaBbCcDd")
+    write(library, "EeFfGgHh")
+
+    service.browse()
+
+    assert len(asked) == 1
+    assert len(asked[0]) == 2
 
 
 # --- ordering -----------------------------------------------------------------

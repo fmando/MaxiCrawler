@@ -69,7 +69,11 @@ def client(
         service=service,
         jobs=jobs,
         downloads=downloads,
-        library=LibraryService(settings, library=Library(settings.library_path)),
+        # Wired the way `create_app` wires its own, queue included, so these
+        # tests exercise the arrangement the server really runs.
+        library=LibraryService(
+            settings, library=Library(settings.library_path), queued=downloads.pending
+        ),
     )
     try:
         with TestClient(application) as test_client:
@@ -1936,6 +1940,30 @@ def test_the_detail_page_shows_the_path_in_a_field_it_can_be_copied_from(
     stored = next((tmp_path / "library").rglob("stub.bin"))
     assert str(stored) in body
     assert str(stored) in listing
+
+
+def test_a_file_being_fetched_again_reads_as_waiting_in_the_library(
+    tmp_path: Path,
+) -> None:
+    """The one fact the record cannot hold, arriving on the page it belongs on.
+
+    Queued with the queue held, so nothing races: the request sits in the line
+    for as long as the assertions take, which is what the library is asked about.
+    """
+    with client(tmp_path, provider=make_provider()) as test_client:
+        where = stored_item(test_client)
+        assert "completed" in test_client.get(where).text
+
+        test_client.post("/downloads/pause", data={"paused": "1"})
+        test_client.post("/downloads", data={"url": MEGA_URL})
+
+        listing = test_client.get("/library").text
+        detail = test_client.get(where).text
+
+    assert '<span class="badge idle">waiting</span>' in listing
+    assert '<span class="badge good">completed</span>' not in listing
+    assert "state=queued" in listing
+    assert '<span class="badge idle">waiting</span>' in detail
 
 
 def test_the_detail_page_never_shows_a_key(tmp_path: Path) -> None:

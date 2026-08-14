@@ -81,7 +81,15 @@ def create_app(
         if downloads is not None
         else TransferQueue(DownloadService(crawl_service.settings))
     )
-    shelf = library if library is not None else LibraryService(crawl_service.settings)
+    # The queue is handed to the library the same way the library is handed to
+    # the report below: as one bound method answering one question in bulk.
+    # Neither service learns what the other is, and the command line — which has
+    # no queue to speak of — builds the same service without it.
+    shelf = (
+        library
+        if library is not None
+        else LibraryService(crawl_service.settings, queued=transfers.pending)
+    )
     # The download service answers "could this be fetched?" from a provider
     # registry it builds once and caches. Handing that same instance over rather
     # than a second one is why the resolver is injected: two registries would be

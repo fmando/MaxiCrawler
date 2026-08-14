@@ -856,6 +856,11 @@ def _query(request: Request) -> LibraryQuery:
         # into a field and 10000000 carried by a chip are one filter.
         min_size=parse_size(values.get("min")),
         max_size=parse_size(values.get("max")),
+        # Its own parameter rather than another value of `status`, because it is
+        # a different question: a status is what a record says happened, and this
+        # is what is happening. Written as `state=queued` so the one that comes
+        # after it is a value here rather than a fourth parameter.
+        queued=values.get("state") == "queued",
         sort=LibrarySort.parse(values.get("sort"), default=LibraryQuery().sort),
         descending=values.get("dir", "desc") != "asc",
         page=_positive(values.get("page"), default=1),

@@ -50,13 +50,14 @@ being repaired.
 import json
 import sqlite3
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from math import ceil
 from pathlib import Path
 from typing import Any
 
+from maxicrawler.app.discovery import StateResolver
 from maxicrawler.app.viewing import MediaKind, MediaVerdict, kind_for, verdict_for
 from maxicrawler.config import Settings
 from maxicrawler.database import IndexedEntry, SQLiteDatabase, SQLiteLibraryIndex
@@ -143,6 +144,15 @@ class LibraryItem:
     a person would look for it in.
     """
 
+    queued: bool = False
+    """Whether something is waiting or running right now to fetch this again.
+
+    Not a fourth download status and not stored anywhere: the queue lives in one
+    process's memory, the record lives on disk, and this is the moment the two
+    are put beside each other. A retry in progress is why a row would otherwise
+    still read "failed", which is yesterday's truth told confidently.
+    """
+
     @property
     def is_stored(self) -> bool:
         """Return whether this record claims a finished payload."""
@@ -188,6 +198,15 @@ class LibraryQuery:
     put the same unmeasured file in "under 1 MB" and in "over 100 MB" both.
     """
 
+    queued: bool = False
+    """Show only what is waiting or running in the transfer queue right now.
+
+    Answers with nothing when no queue was handed to the service — the command
+    line, and any test that builds one bare. A client that cannot ask a queue
+    knows of nothing in one, and saying "everything, then" would be a filter
+    that quietly does not filter.
+    """
+
     sort: LibrarySort = LibrarySort.DOWNLOADED
     descending: bool = True
     page: int = 1
@@ -203,6 +222,7 @@ class LibraryQuery:
             or self.kind is not None
             or self.min_size is not None
             or self.max_size is not None
+            or self.queued
         )
 
 
@@ -265,6 +285,15 @@ class LibraryPage:
     A library of nothing but images should not offer to show only the videos.
     """
 
+    queued: int | None = None
+    """How many entries something is queued for, or ``None`` if nobody can say.
+
+    Absent rather than zero when no queue was handed in, the distinction
+    :attr:`~maxicrawler.app.discovery.LinkPage.known` draws for the same reason:
+    "none are queued" and "there is no queue here to ask" are different answers,
+    and only one of them should put a chip on the page.
+    """
+
     @property
     def first(self) -> int:
         """Return the one-based index of the first row shown, or zero."""
@@ -295,9 +324,11 @@ class LibraryService:
         *,
         library: Library | None = None,
         index: SQLiteLibraryIndex | None = None,
+        queued: StateResolver | None = None,
     ) -> None:
         self._settings = settings
         self._library = library if library is not None else Library(settings.library_path)
+        self._queued = queued
         self._injected_index = index
         self._cached_index: SQLiteLibraryIndex | None = None
         self._index_unavailable = False
@@ -321,7 +352,7 @@ class LibraryService:
         after paging would order a page instead of the library.
         """
         asked = query if query is not None else LibraryQuery()
-        items = tuple(self._items())
+        items = self._marked(tuple(self._items()))
         matching = tuple(item for item in items if _matches(item, asked))
         ordered = _ordered(matching, asked)
         per_page = min(max(asked.per_page, 1), MAX_PER_PAGE)
@@ -338,6 +369,9 @@ class LibraryService:
             providers=_facets(items, lambda item: item.directory, sorted),
             statuses=_facets(items, lambda item: item.status.value, sorted),
             kinds=_facets(items, lambda item: item.kind.value, _kind_order),
+            # Counted over the whole library like every facet beside it, and
+            # left absent rather than zero when nothing can answer.
+            queued=None if self._queued is None else sum(item.queued for item in items),
         )
 
     def item(self, provider: str, key: str) -> LibraryItem | None:
@@ -348,7 +382,10 @@ class LibraryService:
         read. A caller answering a request has one thing to say about all three.
         """
         entry = self._library.entry_at(provider, key)
-        return None if entry is None else _item(entry)
+        if entry is None:
+            return None
+        item = _item(entry)
+        return None if item is None else self._marked((item,))[0]
 
     def payload(self, provider: str, key: str) -> StoredPayload | None:
         """Return the file *provider*/*key* holds, if it is really there.
@@ -420,6 +457,28 @@ class LibraryService:
             else:
                 return frozenset(row.source_url for row in rows if row.source_url)
         return frozenset(item.source_url for item in self._read_entries())
+
+    def _marked(self, items: tuple[LibraryItem, ...]) -> tuple[LibraryItem, ...]:
+        """Return *items* with those the queue is working on flagged.
+
+        Asked in bulk for the reason :meth:`stored` is asked in bulk: the answer
+        costs one pass over a set, and one question per row would turn a listing
+        into a thousand.
+
+        The service never learns that there *is* a queue. It is handed a function
+        over URLs — the shape :data:`~maxicrawler.app.discovery.StateResolver`
+        names — exactly as the report is handed one to answer "already in the
+        library", and this is the same arrangement pointed the other way. Without
+        one, nothing is flagged and nothing here allocates.
+        """
+        if self._queued is None or not items:
+            return items
+        waiting = frozenset(self._queued({item.source_url for item in items}))
+        if not waiting:
+            return items
+        return tuple(
+            replace(item, queued=True) if item.source_url in waiting else item for item in items
+        )
 
     def _items(self) -> Iterator[LibraryItem]:
         """Yield every entry that describes itself readably.
@@ -739,6 +798,8 @@ def _matches(item: LibraryItem, query: LibraryQuery) -> bool:
     if query.status is not None and item.status is not query.status:
         return False
     if query.kind is not None and item.kind is not query.kind:
+        return False
+    if query.queued and not item.queued:
         return False
     if not _within_size(item.size, query):
         return False
