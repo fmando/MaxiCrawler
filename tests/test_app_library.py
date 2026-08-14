@@ -194,7 +194,7 @@ def test_the_providers_present_are_reported(tmp_path: Path) -> None:
     write(library, "AaBbCcDd")
     write(library, "EeFfGgHh", provider="gofile")
 
-    assert service.browse().providers == ("gofile", "mega")
+    assert [facet.value for facet in service.browse().providers] == ["gofile", "mega"]
 
 
 # --- searching ----------------------------------------------------------------
@@ -252,7 +252,7 @@ def test_a_provider_filter_keeps_one_namespace(tmp_path: Path) -> None:
     page = service.browse(LibraryQuery(provider="gofile"))
 
     assert [item.directory for item in page.items] == ["gofile"]
-    assert page.providers == ("gofile", "mega")
+    assert [facet.value for facet in page.providers] == ["gofile", "mega"]
 
 
 def test_a_status_filter_keeps_one_verdict(tmp_path: Path) -> None:
@@ -274,7 +274,7 @@ def test_a_kind_filter_keeps_one_category(tmp_path: Path) -> None:
     page = service.browse(LibraryQuery(kind=MediaKind.IMAGE))
 
     assert [item.name for item in page.items] == ["holiday.jpg"]
-    assert page.kinds == (MediaKind.IMAGE, MediaKind.PDF, MediaKind.ARCHIVE)
+    assert [facet.value for facet in page.kinds] == ["image", "pdf", "archive"]
 
 
 def test_a_category_comes_from_the_stored_file_rather_than_the_recorded_name(
@@ -310,6 +310,85 @@ def test_a_payload_whose_name_says_nothing_falls_back_to_the_record(tmp_path: Pa
     (item,) = service.browse().items
 
     assert item.kind is MediaKind.IMAGE
+
+
+def test_a_lower_bound_keeps_what_is_at_least_that_large(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    write(library, "AaBbCcDd", name="small", size=500)
+    write(library, "EeFfGgHh", name="exact", size=1000)
+    write(library, "IiJjKkLl", name="large", size=5000)
+
+    page = service.browse(LibraryQuery(min_size=1000))
+
+    assert sorted(item.name for item in page.items) == ["exact", "large"]
+
+
+def test_an_upper_bound_keeps_what_is_at_most_that_large(tmp_path: Path) -> None:
+    """Inclusive at the top, so the offered bands are a partition."""
+    service, library = make_service(tmp_path)
+    write(library, "AaBbCcDd", name="small", size=500)
+    write(library, "EeFfGgHh", name="exact", size=1000)
+    write(library, "IiJjKkLl", name="large", size=5000)
+
+    page = service.browse(LibraryQuery(max_size=1000))
+
+    assert sorted(item.name for item in page.items) == ["exact", "small"]
+
+
+def test_a_band_is_both_bounds_at_once(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    write(library, "AaBbCcDd", name="small", size=500)
+    write(library, "EeFfGgHh", name="middle", size=5000)
+    write(library, "IiJjKkLl", name="large", size=50_000)
+
+    page = service.browse(LibraryQuery(min_size=1000, max_size=10_000))
+
+    assert [item.name for item in page.items] == ["middle"]
+
+
+def test_a_size_nobody_recorded_satisfies_no_bound(tmp_path: Path) -> None:
+    """Counted as small it would sit under "under 1 MB", as large under "over
+    100 MB", and as both it would be in two bands at once."""
+    service, library = make_service(tmp_path)
+    write(library, "AaBbCcDd", name="unmeasured", filename=None, status=DownloadStatus.FAILED)
+
+    assert service.browse(LibraryQuery(min_size=1)).total == 0
+    assert service.browse(LibraryQuery(max_size=10**12)).total == 0
+    assert service.browse().total == 1
+
+
+def test_the_facets_carry_how_many_of_each_there_are(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    write(library, "AaBbCcDd", name="a.jpg", filename="a.jpg")
+    write(library, "EeFfGgHh", name="b.jpg", filename="b.jpg")
+    write(library, "IiJjKkLl", name="c.pdf", filename="c.pdf", provider="gofile")
+
+    page = service.browse()
+
+    assert [(facet.value, facet.count) for facet in page.kinds] == [("image", 2), ("pdf", 1)]
+    assert [(facet.value, facet.count) for facet in page.providers] == [
+        ("gofile", 1),
+        ("mega", 2),
+    ]
+
+
+def test_the_facet_counts_are_over_the_library_rather_than_the_matches(
+    tmp_path: Path,
+) -> None:
+    """The same rule the report's chips follow, and the cost of it stated.
+
+    A chip can therefore say two and answer with one row once a search is on.
+    What it buys is that choosing a filter never removes the chip you would use
+    to choose a different one.
+    """
+    service, library = make_service(tmp_path)
+    write(library, "AaBbCcDd", name="a.jpg", filename="a.jpg")
+    write(library, "EeFfGgHh", name="b.jpg", filename="b.jpg")
+
+    page = service.browse(LibraryQuery(search="a.jpg"))
+
+    assert page.total == 1
+    assert [(facet.value, facet.count) for facet in page.kinds] == [("image", 2)]
 
 
 def test_filters_combine(tmp_path: Path) -> None:

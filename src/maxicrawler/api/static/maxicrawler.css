@@ -570,6 +570,8 @@ footer {
 }
 .filters label { display: flex; flex-direction: column; gap: 4px; }
 .filters label.wide { flex: 1 1 260px; }
+/* A size bound is four characters wide however much room the row has. */
+.filters label.narrow input { width: 92px; }
 .filters span {
   font-size: 10px;
   letter-spacing: 0.08em;

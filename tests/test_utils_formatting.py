@@ -9,7 +9,8 @@ about what 1.3 MB is.
 import pytest
 
 from maxicrawler.cli import inspection
-from maxicrawler.utils import UNKNOWN_SIZE, format_size
+from maxicrawler.utils import SIZE_UNITS, UNKNOWN_SIZE, format_size, parse_size
+from maxicrawler.utils.formatting import SIZE_MULTIPLIERS
 from maxicrawler.utils.formatting import format_size as canonical
 
 
@@ -39,3 +40,53 @@ def test_an_absent_size_is_unknown_rather_than_zero() -> None:
 def test_the_terminal_renderer_uses_the_shared_function() -> None:
     """Not a tautology: it is what keeps a second copy from appearing here."""
     assert inspection.format_size is canonical
+
+
+# --- reading one back ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "size"),
+    [
+        ("1000", 1000),
+        ("0", 0),
+        ("100 KB", 100_000),
+        ("100KB", 100_000),
+        ("100 kb", 100_000),
+        ("1.3 MB", 1_300_000),
+        ("1,3 MB", 1_300_000),
+        ("2 GB", 2_000_000_000),
+        ("  5 MB  ", 5_000_000),
+        ("7 b", 7),
+    ],
+)
+def test_a_size_is_read_back_from_what_a_person_types(text: str, size: int) -> None:
+    assert parse_size(text) == size
+
+
+def test_a_bare_number_is_bytes_rather_than_the_unit_of_the_box() -> None:
+    """Guessing megabytes would be eight hundred thousand times wrong."""
+    assert parse_size("500") == 500
+
+
+@pytest.mark.parametrize("text", ["", "   ", "big", "10 furlongs", "1.2.3 MB", "-5 MB", "MB", None])
+def test_anything_that_is_not_a_size_filters_nothing(text: str | None) -> None:
+    """Lenient, because the value arrives in a query string."""
+    assert parse_size(text) is None
+
+
+@pytest.mark.parametrize("size", [0, 999, 1000, 1_300_000, 5_500_000_000])
+def test_a_formatted_size_reads_back_as_itself(size: int) -> None:
+    """The property the two boxes rely on: what the page prints, it accepts.
+
+    True for every size this formatter prints exactly, which is every round one
+    — and a bound is round. A size it has to round to one decimal comes back
+    rounded, which is why the URL carries the byte count rather than the words.
+    """
+    assert parse_size(format_size(size)) == size
+
+
+def test_the_two_directions_share_one_table_of_units() -> None:
+    """Otherwise "KB" could mean one thing printed and another read."""
+    assert tuple(SIZE_MULTIPLIERS) == SIZE_UNITS
+    assert SIZE_MULTIPLIERS["MB"] == 1_000_000

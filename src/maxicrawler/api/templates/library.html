@@ -29,44 +29,33 @@
              autocomplete="off" spellcheck="false">
     </label>
 
-    <label>
-      <span>Provider</span>
-      <select name="provider">
-        <option value="">any</option>
-        {% for provider in library.providers %}
-          <option value="{{ provider }}"{% if provider == library.provider %} selected{% endif %}>{{ provider }}</option>
-        {% endfor %}
-      </select>
+    {#
+      Two boxes rather than a pair of dropdowns, because a range is a range.
+      They take what the listing prints -- "10 MB" -- as well as a bare number
+      of bytes, read by the same parser that formats the sizes in the table.
+    #}
+    <label class="narrow">
+      <span>Larger than</span>
+      <input type="text" name="min" value="{{ library.min_size }}" placeholder="100 KB"
+             autocomplete="off" spellcheck="false" inputmode="text">
+    </label>
+
+    <label class="narrow">
+      <span>Smaller than</span>
+      <input type="text" name="max" value="{{ library.max_size }}" placeholder="2 GB"
+             autocomplete="off" spellcheck="false" inputmode="text">
     </label>
 
     {#
-      Absent where the library holds one kind of thing, the same way the
-      status control is built from what is present: offering "show me the
-      videos" to a library of nothing but images answers with an empty page.
+      The source, the type and the state are chosen from the chips below rather
+      than from a box: a chip carries its count, and how many of a thing there
+      are is most of what decides whether you want only those. They travel as
+      hidden fields here, so losing the type you had picked because you then
+      typed a search cannot happen. The same arrangement the report uses.
     #}
-    {% if library.kinds|length > 1 %}
-      <label>
-        <span>Type</span>
-        <select name="kind">
-          <option value="">any</option>
-          {% for kind in library.kinds %}
-            <option value="{{ kind.value }}"{% if kind.value == library.kind %} selected{% endif %}>{{ kind.label }}</option>
-          {% endfor %}
-        </select>
-      </label>
-    {% else %}
-      <input type="hidden" name="kind" value="{{ library.kind }}">
-    {% endif %}
-
-    <label>
-      <span>Status</span>
-      <select name="status">
-        <option value="">any</option>
-        {% for status in library.statuses %}
-          <option value="{{ status.value }}"{% if status.value == library.status %} selected{% endif %}>{{ status.label }}</option>
-        {% endfor %}
-      </select>
-    </label>
+    <input type="hidden" name="provider" value="{{ library.provider }}">
+    <input type="hidden" name="kind" value="{{ library.kind }}">
+    <input type="hidden" name="status" value="{{ library.status }}">
 
     {# The order survives a search rather than resetting to the default. #}
     <input type="hidden" name="sort" value="{{ library.sort_value }}">
@@ -75,6 +64,17 @@
     <button type="submit">Search</button>
     {% if library.is_filtered %}<a class="aside" href="{{ library.reset_url }}">Clear</a>{% endif %}
   </form>
+
+  {% for group in library.facets %}
+    <div class="chips">
+      <span class="chips-heading">{{ group.heading }}</span>
+      {% for chip in group.chips %}
+        <a class="chip{% if chip.active %} active{% endif %}" href="{{ chip.url }}">
+          {{ chip.label }}{% if chip.count %} <span class="num">{{ chip.count }}</span>{% endif %}
+        </a>
+      {% endfor %}
+    </div>
+  {% endfor %}
 
   {% if library.has_rows %}
     <table class="grid">

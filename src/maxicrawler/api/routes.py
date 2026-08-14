@@ -51,6 +51,7 @@ from maxicrawler.app import (
 )
 from maxicrawler.app.viewing import DOWNLOAD_CONTENT_TYPE, MediaKind
 from maxicrawler.domain import DownloadStatus
+from maxicrawler.utils import parse_size
 from maxicrawler.web.report import CrawlReport
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -851,6 +852,10 @@ def _query(request: Request) -> LibraryQuery:
         provider=values.get("provider") or None,
         status=_status(values.get("status")),
         kind=MediaKind.parse(values.get("kind")),
+        # Read with the same parser the boxes are labelled by, so "10 MB" typed
+        # into a field and 10000000 carried by a chip are one filter.
+        min_size=parse_size(values.get("min")),
+        max_size=parse_size(values.get("max")),
         sort=LibrarySort.parse(values.get("sort"), default=LibraryQuery().sort),
         descending=values.get("dir", "desc") != "asc",
         page=_positive(values.get("page"), default=1),

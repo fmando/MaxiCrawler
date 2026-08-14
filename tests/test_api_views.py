@@ -3,7 +3,7 @@
 Pure functions, so none of this needs HTTP, a database or a crawl.
 """
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -53,6 +53,7 @@ from maxicrawler.app import (
     UNTRACKED,
     DownloadProgress,
     DownloadSummary,
+    LibraryFacet,
     LibraryItem,
     LibraryPage,
     LibraryQuery,
@@ -1888,12 +1889,28 @@ def library_page(items: tuple[LibraryItem, ...] = (), **overrides: object) -> Li
         "stored": len(items),
         "page": 1,
         "pages": 1,
-        "providers": tuple(sorted({item.directory for item in items})),
-        "statuses": tuple(sorted({item.status for item in items})),
-        "kinds": tuple(kind for kind in MediaKind if kind in {item.kind for item in items}),
+        "providers": _facets(items, lambda item: item.directory, sorted),
+        "statuses": _facets(items, lambda item: item.status.value, sorted),
+        "kinds": _facets(
+            items,
+            lambda item: item.kind.value,
+            lambda values: [kind.value for kind in MediaKind if kind.value in set(values)],
+        ),
     }
     values.update(overrides)
     return LibraryPage(**values)  # type: ignore[arg-type]
+
+
+def _facets(
+    items: tuple[LibraryItem, ...],
+    value_of: Callable[[LibraryItem], str],
+    order: Callable[[Iterable[str]], list[str]],
+) -> tuple[LibraryFacet, ...]:
+    """Return the facets a real page would carry, so the view sees one shape."""
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[value_of(item)] = counts.get(value_of(item), 0) + 1
+    return tuple(LibraryFacet(value=value, count=counts[value]) for value in order(counts))
 
 
 def test_the_library_table_has_the_columns_it_promises() -> None:
@@ -1940,7 +1957,14 @@ def test_a_filtered_listing_counts_both_numbers() -> None:
     assert shown["search"] == "jump"
 
 
-def test_the_type_filter_offers_only_the_categories_present() -> None:
+def group(shown: Mapping[str, Any], heading: str) -> dict[str, Any]:
+    """Return the chip row called *heading*."""
+    (found,) = (row for row in shown["facets"] if row["heading"] == heading)
+    assert isinstance(found, dict)
+    return found
+
+
+def test_the_type_chips_offer_only_the_categories_present() -> None:
     """A library of pictures should not offer to show only the videos."""
     shown = library_view(
         library_page(
@@ -1951,8 +1975,9 @@ def test_the_type_filter_offers_only_the_categories_present() -> None:
         )
     )
 
-    assert [kind["value"] for kind in shown["kinds"]] == ["image", "pdf"]
-    assert [kind["label"] for kind in shown["kinds"]] == ["images", "PDF"]
+    chips = group(shown, "Type")["chips"]
+    assert [chip["label"] for chip in chips] == ["images", "PDF"]
+    assert [chip["count"] for chip in chips] == ["1", "1"]
 
 
 def test_the_categories_are_offered_in_the_order_somebody_reaches_for_them() -> None:
@@ -1967,7 +1992,86 @@ def test_the_categories_are_offered_in_the_order_somebody_reaches_for_them() -> 
         )
     )
 
-    assert [kind["value"] for kind in shown["kinds"]] == ["image", "video", "archive"]
+    assert [chip["label"] for chip in group(shown, "Type")["chips"]] == [
+        "images",
+        "video",
+        "archives",
+    ]
+
+
+def test_a_group_with_one_value_in_it_is_not_offered() -> None:
+    """Its two states show the same rows, so it is a control that does nothing."""
+    shown = library_view(library_page((make_item(), make_item("other.pdf"))))
+
+    assert [row["heading"] for row in shown["facets"]] == ["Size"]
+
+
+def test_a_chip_you_are_standing_on_links_back_to_the_listing_without_it() -> None:
+    """A toggle rather than a one-way door."""
+    shown = library_view(
+        library_page(
+            (
+                make_item("holiday.jpg", kind=MediaKind.IMAGE),
+                make_item("Jump.pdf", kind=MediaKind.PDF),
+            ),
+            query=LibraryQuery(kind=MediaKind.IMAGE),
+        )
+    )
+
+    chips = {chip["label"]: chip for chip in group(shown, "Type")["chips"]}
+    assert chips["images"]["active"] is True
+    assert "kind=" not in chips["images"]["url"]
+    assert "kind=pdf" in chips["PDF"]["url"]
+
+
+def test_the_size_bands_are_offered_whatever_the_library_holds() -> None:
+    """Unlike the others they are not derived from what is there: a band with
+    nothing in it is still the band somebody wants to rule out."""
+    shown = library_view(library_page((make_item(),)))
+
+    chips = group(shown, "Size")["chips"]
+    assert [chip["label"] for chip in chips] == [
+        "under 1 MB",
+        "1–10 MB",
+        "10–100 MB",
+        "over 100 MB",
+    ]
+
+
+def test_a_size_band_carries_both_bounds_and_switches_off_again() -> None:
+    shown = library_view(
+        library_page((make_item(),), query=LibraryQuery(min_size=1_000_000, max_size=10_000_000))
+    )
+
+    chips = {chip["label"]: chip for chip in group(shown, "Size")["chips"]}
+    assert chips["1–10 MB"]["active"] is True
+    assert "min=" not in chips["1–10 MB"]["url"]
+    assert "min=10000000" in chips["10–100 MB"]["url"]
+    assert "max=100000000" in chips["10–100 MB"]["url"]
+
+
+def test_the_size_boxes_show_what_the_listing_prints() -> None:
+    shown = library_view(
+        library_page((make_item(),), query=LibraryQuery(min_size=100_000, max_size=2_000_000_000))
+    )
+
+    assert shown["min_size"] == "100.0 KB"
+    assert shown["max_size"] == "2.0 GB"
+
+
+def test_an_unbounded_listing_leaves_the_size_boxes_empty() -> None:
+    shown = library_view(library_page((make_item(),)))
+
+    assert shown["min_size"] == ""
+    assert shown["max_size"] == ""
+
+
+def test_a_size_bound_survives_every_other_link() -> None:
+    shown = library_view(
+        library_page((make_item(),), query=LibraryQuery(min_size=1_000_000), total=1, stored=9)
+    )
+
+    assert all("min=1000000" in column["url"] for column in shown["columns"])
 
 
 def test_a_row_carries_its_category() -> None:

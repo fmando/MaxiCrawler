@@ -51,6 +51,7 @@ from maxicrawler.app.downloading import (
 from maxicrawler.app.library import (
     DEFAULT_PER_PAGE,
     MAX_PER_PAGE,
+    LibraryFacet,
     LibraryItem,
     LibraryPage,
     LibraryQuery,
@@ -90,6 +91,7 @@ __all__ = [
     "DownloadProgress",
     "DownloadService",
     "DownloadSummary",
+    "LibraryFacet",
     "LibraryItem",
     "LibraryPage",
     "LibraryQuery",

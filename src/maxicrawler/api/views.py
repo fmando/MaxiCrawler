@@ -609,11 +609,13 @@ def library_view(page: LibraryPage) -> dict[str, Any]:
         "sort_value": str(query.sort),
         "direction": "desc" if query.descending else "asc",
         "kind": "" if query.kind is None else str(query.kind),
-        "providers": page.providers,
-        "statuses": tuple(
-            {"value": str(status), "label": STATUS_LABELS[status]} for status in page.statuses
-        ),
-        "kinds": tuple({"value": str(kind), "label": KIND_WORDS[kind]} for kind in page.kinds),
+        # Shown in the two boxes, and rounded to what `format_size` prints: a
+        # bound is a coarse instrument, and "1.2 MB" beside a listing that says
+        # "1.3 MB" everywhere else would be the odd one out. What travels in the
+        # URL is the byte count, so a bookmark means one thing.
+        "min_size": format_size(query.min_size) if query.min_size is not None else "",
+        "max_size": format_size(query.max_size) if query.max_size is not None else "",
+        "facets": _library_facets(page),
         "page": format_number(page.page),
         "pages": format_number(page.pages),
         "previous_url": _library_url(query, page=page.page - 1) if page.has_previous else None,
@@ -673,6 +675,104 @@ def item_view(item: LibraryItem, payload: StoredPayload | None) -> dict[str, Any
     }
 
 
+SIZE_RANGES: tuple[tuple[str, int | None, int | None], ...] = (
+    ("under 1 MB", None, 1_000_000),
+    ("1–10 MB", 1_000_000, 10_000_000),
+    ("10–100 MB", 10_000_000, 100_000_000),
+    ("over 100 MB", 100_000_000, None),
+)
+"""The size bands offered as one click, and a partition of every stated size.
+
+Contiguous and non-overlapping on purpose: a row belongs to exactly one of them,
+so the four counts add up to the number of entries whose size is known. The
+boundaries are inclusive at the top, which is why "1–10 MB" starts where "under
+1 MB" stops rather than one byte later — a file of exactly a megabyte is in the
+lower band, and being in both would break the same property.
+"""
+
+
+def _library_facets(page: LibraryPage) -> tuple[dict[str, Any], ...]:
+    """Return the chip rows that narrow a listing in one click.
+
+    A chip you are standing on links back to the listing without it, so every
+    chip is a toggle rather than a one-way door — the same behaviour the report's
+    chips have, built the same way.
+
+    A group with one chip in it is dropped. "Show me the only kind of thing here"
+    is a control whose two states show the same rows.
+    """
+    query = page.query
+    groups = (
+        ("Source", page.providers, "provider", query.provider or "", lambda value: value),
+        (
+            "Type",
+            page.kinds,
+            "kind",
+            "" if query.kind is None else str(query.kind),
+            lambda value: KIND_WORDS[MediaKind(value)],
+        ),
+        (
+            "State",
+            page.statuses,
+            "status",
+            _status_value(query.status),
+            lambda value: STATUS_LABELS[DownloadStatus(value)],
+        ),
+    )
+    rows: list[dict[str, Any]] = []
+    for heading, facets, name, active, label_of in groups:
+        if len(facets) < 2:
+            continue
+        rows.append(
+            {
+                "heading": heading,
+                "chips": tuple(
+                    {
+                        "label": label_of(facet.value),
+                        "count": format_number(facet.count),
+                        "active": facet.value == active,
+                        "url": _library_url(
+                            query,
+                            page=1,
+                            **{name: None if facet.value == active else facet.value},
+                        ),
+                    }
+                    for facet in facets
+                ),
+            }
+        )
+    rows.append(_size_facets(query))
+    return tuple(rows)
+
+
+def _size_facets(query: LibraryQuery) -> dict[str, Any]:
+    """Return the size bands as chips, with the active one able to switch off.
+
+    No counts, and that is the one place these differ from the chips above.
+    A band's count would have to be computed over the library while the bands
+    themselves are what somebody is choosing between, and the number that
+    matters — how many the chosen band holds — is already the one at the top of
+    the page.
+    """
+    return {
+        "heading": "Size",
+        "chips": tuple(
+            {
+                "label": label,
+                "count": "",
+                "active": query.min_size == low and query.max_size == high,
+                "url": _library_url(
+                    query,
+                    page=1,
+                    min_size=None if query.min_size == low and query.max_size == high else low,
+                    max_size=None if query.min_size == low and query.max_size == high else high,
+                ),
+            }
+            for label, low, high in SIZE_RANGES
+        ),
+    }
+
+
 COLUMNS: tuple[tuple[str, LibrarySort], ...] = (
     ("Provider", LibrarySort.PROVIDER),
     ("Name", LibrarySort.NAME),
@@ -720,6 +820,8 @@ def _library_url(query: LibraryQuery, **changes: Any) -> str:
         "provider": changes.get("provider", query.provider) or "",
         "status": _status_value(changes.get("status", query.status)),
         "kind": _enum_value(changes.get("kind", query.kind)),
+        "min": _number_value(changes.get("min_size", query.min_size)),
+        "max": _number_value(changes.get("max_size", query.max_size)),
         "sort": str(changes.get("sort", query.sort)),
         "dir": "desc" if changes.get("descending", query.descending) else "asc",
         "page": str(changes.get("page", query.page)),
@@ -740,6 +842,15 @@ def _status_value(status: DownloadStatus | None) -> str:
 
 def _enum_value(value: StrEnum | None) -> str:
     """Return an optional enumerated filter as a query string writes it."""
+    return "" if value is None else str(value)
+
+
+def _number_value(value: int | None) -> str:
+    """Return an optional numeric bound as a query string writes it.
+
+    Written as a plain byte count rather than as "10 MB", so a bookmarked URL
+    means exactly one number and does not depend on this module's rounding.
+    """
     return "" if value is None else str(value)
 
 

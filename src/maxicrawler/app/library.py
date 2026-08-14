@@ -176,6 +176,18 @@ class LibraryQuery:
 
     status: DownloadStatus | None = None
     kind: MediaKind | None = None
+    min_size: int | None = None
+    """Smallest payload to show, in bytes; ``None`` for no lower bound."""
+
+    max_size: int | None = None
+    """Largest payload to show, in bytes; ``None`` for no upper bound.
+
+    An entry whose size nobody recorded is kept by an *unbounded* query and
+    dropped by a bounded one. "Between 1 and 10 MB" is a claim about a number,
+    and a row with no number cannot satisfy it — while showing it anyway would
+    put the same unmeasured file in "under 1 MB" and in "over 100 MB" both.
+    """
+
     sort: LibrarySort = LibrarySort.DOWNLOADED
     descending: bool = True
     page: int = 1
@@ -189,7 +201,23 @@ class LibraryQuery:
             or self.provider is not None
             or self.status is not None
             or self.kind is not None
+            or self.min_size is not None
+            or self.max_size is not None
         )
+
+
+@dataclass(frozen=True, slots=True)
+class LibraryFacet:
+    """One value a listing can be narrowed to, and how much of it there is.
+
+    The same shape :class:`~maxicrawler.app.discovery.LinkFacet` has, because a
+    report's chips and a library's chips are the same control asked about two
+    different stores, and one of them having a count the other lacks would show
+    up as two designs on two pages.
+    """
+
+    value: str
+    count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,21 +234,32 @@ class LibraryPage:
 
     page: int
     pages: int
-    providers: tuple[str, ...]
-    """The provider directories present, whatever the query asked for.
+    providers: tuple[LibraryFacet, ...]
+    """The provider directories present, and how many entries each holds.
 
-    The whole library rather than the matches, so choosing a filter never
-    removes the entry you would use to choose a different one.
+    Counted over the **whole library** rather than over the matches, which is
+    two decisions in one and both deliberate.
+
+    The *values* are the whole library so that choosing a filter never removes
+    the entry you would use to choose a different one — a chip row that shrank
+    as you used it would be a door that locks behind you.
+
+    The *counts* are the whole library because that is what a report's chips
+    already say (:func:`~maxicrawler.app.discovery._plugin_facets` counts over
+    everything recorded), and one rule across the product beats a better rule on
+    one page of it. What it costs is real and worth writing down: a chip saying
+    twelve can answer with an empty table once a search is on, because it counts
+    twelve in the library rather than twelve in what you are looking at.
     """
 
-    statuses: tuple[DownloadStatus, ...] = ()
+    statuses: tuple[LibraryFacet, ...] = ()
     """The verdicts present, on the same terms and for the same reason.
 
     Derived rather than listed from the enum: offering "running" as a filter for
     a store that never holds one is a menu entry that can only disappoint.
     """
 
-    kinds: tuple[MediaKind, ...] = ()
+    kinds: tuple[LibraryFacet, ...] = ()
     """The categories present, derived for the reason :attr:`statuses` is.
 
     A library of nothing but images should not offer to show only the videos.
@@ -296,9 +335,9 @@ class LibraryService:
             stored=len(items),
             page=page,
             pages=pages,
-            providers=tuple(sorted({item.directory for item in items})),
-            statuses=tuple(sorted({item.status for item in items})),
-            kinds=_kinds_present(items),
+            providers=_facets(items, lambda item: item.directory, sorted),
+            statuses=_facets(items, lambda item: item.status.value, sorted),
+            kinds=_facets(items, lambda item: item.kind.value, _kind_order),
         )
 
     def item(self, provider: str, key: str) -> LibraryItem | None:
@@ -545,17 +584,35 @@ def _item_from_record(
     )
 
 
-def _kinds_present(items: tuple[LibraryItem, ...]) -> tuple[MediaKind, ...]:
-    """Return the categories *items* contain, in the order they are offered in.
+def _facets(
+    items: tuple[LibraryItem, ...],
+    value_of: Callable[[LibraryItem], str],
+    order: Callable[[Iterable[str]], list[str]],
+) -> tuple[LibraryFacet, ...]:
+    """Return how many of *items* each value of *value_of* accounts for.
+
+    One pass, and the ordering handed in rather than assumed: a provider list
+    reads best alphabetically and a category list does not (see
+    :func:`_kind_order`).
+    """
+    counts: dict[str, int] = {}
+    for item in items:
+        value = value_of(item)
+        counts[value] = counts.get(value, 0) + 1
+    return tuple(LibraryFacet(value=value, count=counts[value]) for value in order(counts))
+
+
+def _kind_order(values: Iterable[str]) -> list[str]:
+    """Return the categories in the order they are offered in.
 
     Declaration order rather than alphabetical, which is the one place this
-    differs from :attr:`LibraryPage.statuses`. The members are declared in the
-    order somebody sorting through a crawl reaches for them — pictures and
-    video first, "other" last — and sorting the values as strings would put
-    "archive" at the top and scatter the rest by spelling.
+    differs from the providers and the statuses beside it. The members are
+    declared in the order somebody sorting through a crawl reaches for them —
+    pictures and video first, "other" last — and sorting the values as strings
+    would put "archive" at the top and scatter the rest by spelling.
     """
-    present = {item.kind for item in items}
-    return tuple(kind for kind in MediaKind if kind in present)
+    present = set(values)
+    return [kind.value for kind in MediaKind if kind.value in present]
 
 
 def _kind_of(content: ContentRecord | None, name: str) -> MediaKind:
@@ -683,11 +740,30 @@ def _matches(item: LibraryItem, query: LibraryQuery) -> bool:
         return False
     if query.kind is not None and item.kind is not query.kind:
         return False
+    if not _within_size(item.size, query):
+        return False
     if not query.search:
         return True
     needle = query.search.casefold()
     haystack = (item.name, item.filename or "", item.source_url)
     return any(needle in value.casefold() for value in haystack)
+
+
+def _within_size(size: int | None, query: LibraryQuery) -> bool:
+    """Return whether *size* falls inside the bounds *query* asks for.
+
+    An unmeasured size fails any bound and satisfies none, which is the only
+    reading that keeps the ranges a partition: counted as small it would appear
+    under "under 1 MB", counted as large under "over 100 MB", and counted as
+    both it would be in two buckets at once.
+    """
+    if query.min_size is None and query.max_size is None:
+        return True
+    if size is None:
+        return False
+    if query.min_size is not None and size < query.min_size:
+        return False
+    return query.max_size is None or size <= query.max_size
 
 
 def _ordered(items: tuple[LibraryItem, ...], query: LibraryQuery) -> tuple[LibraryItem, ...]:
