@@ -24,13 +24,23 @@ infrastructure.
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from maxicrawler.domain import Checksum, DownloadStatus, ResourceKind, ResourceRef
 from maxicrawler.library.errors import LibraryRecordError
 
 RECORD_SCHEMA = 1
-"""Version of the metadata document this release writes."""
+"""Version of the metadata document this release writes.
+
+Deliberately unchanged by the arrival of :attr:`ResourceRecord.review`. A
+document whose schema is higher than this one is *refused* rather than read, so
+raising the number would make every library written here unreadable to any
+release that came before — and an added optional member is exactly the case
+:attr:`ResourceRecord.extra` exists for: an older MaxiCrawler carries ``review``
+through untouched without ever knowing what it means. The number describes the
+shape of the document, and that has not changed.
+"""
 
 METADATA_FILENAME = "metadata.json"
 """Name of the metadata document inside an entry directory."""
@@ -55,9 +65,93 @@ _KNOWN_KEYS = frozenset(
         "attempts",
         "error",
         "content",
+        "review",
     }
 )
 """Members this release understands; anything else is carried in ``extra``."""
+
+
+class ReviewVerdict(StrEnum):
+    """What a person decided about a stored resource.
+
+    Deliberately *not* a member of
+    :class:`~maxicrawler.domain.downloads.DownloadStatus`. That enum records how
+    a transfer ended — something that happened to the resource — and this one
+    records what somebody thought of the result. A file can perfectly well have
+    arrived completely and be worthless, and one vocabulary covering both would
+    have to answer "did this download work?" with "the person did not like it".
+    """
+
+    UNREVIEWED = "unreviewed"
+    """Nobody has judged this yet. The state every stored resource starts in."""
+
+    KEPT = "kept"
+    """Worth having. Nothing follows from it except that it has been looked at."""
+
+    IGNORED = "ignored"
+    """Not interesting, but not in the way. The payload stays on disk."""
+
+    DISCARDED = "discarded"
+    """Not wanted, and the payload has been removed.
+
+    The record stays behind as a tombstone, and that is the entire point of it:
+    it is the only thing that stops the next bulk queue from fetching the file
+    again, because "the library holds it" is answered by the record *and* the
+    file, and the file is gone.
+    """
+
+    @property
+    def is_dismissed(self) -> bool:
+        """Return whether this verdict means *do not offer this to me again*."""
+        return self in {ReviewVerdict.IGNORED, ReviewVerdict.DISCARDED}
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewRecord:
+    """What somebody decided about one stored resource, and when.
+
+    Written only by the library service and never by a download: the two touch
+    disjoint members of the same document, which is what lets a resource be
+    fetched again without losing the judgement passed on it.
+    """
+
+    verdict: ReviewVerdict = ReviewVerdict.UNREVIEWED
+    favourite: bool = False
+    """Marked as worth finding again. A switch, independent of the verdict:
+    keeping something and starring it are two different statements."""
+
+    reviewed_at: datetime | None = None
+    payload_removed_at: datetime | None = None
+    """When the payload was deleted, for a discarded entry.
+
+    Recorded rather than inferred from the file being absent. A missing file is
+    also what a disk error looks like, and reading one as a decision would turn
+    an accident into a permanent verdict — see :meth:`ResourceRecord.is_complete`,
+    which is what makes a damaged library repairable by downloading again.
+    """
+
+    def to_document(self) -> dict[str, Any]:
+        """Return the serializable description of this judgement."""
+        return {
+            "verdict": self.verdict.value,
+            "favourite": self.favourite,
+            "reviewed_at": _write_time(self.reviewed_at),
+            "payload_removed_at": _write_time(self.payload_removed_at),
+        }
+
+    @classmethod
+    def from_document(cls, document: Mapping[str, Any]) -> "ReviewRecord":
+        """Return the judgement *document* holds.
+
+        Raises:
+            LibraryRecordError: the document is not a readable review record.
+        """
+        return cls(
+            verdict=_read_enum(document, "verdict", ReviewVerdict),
+            favourite=_optional_bool(document, "favourite"),
+            reviewed_at=_read_time(document, "reviewed_at"),
+            payload_removed_at=_read_time(document, "payload_removed_at"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +226,15 @@ class ResourceRecord:
     attempts: int = 0
     error: str | None = None
     content: ContentRecord | None = None
+    review: ReviewRecord | None = None
+    """What somebody decided about this resource, once somebody has.
+
+    ``None`` for everything nobody has judged, which is every entry written
+    before this member existed. Absent rather than a default instance, so an
+    unreviewed entry's document says ``null`` and a reader can tell "not looked
+    at" from "looked at and shrugged".
+    """
+
     extra: Mapping[str, Any] = field(default_factory=dict)
     """Members a future release added, preserved verbatim across a round trip."""
 
@@ -139,6 +242,15 @@ class ResourceRecord:
     def is_complete(self) -> bool:
         """Return whether this record claims a finished, stored payload."""
         return self.status is DownloadStatus.COMPLETED and self.content is not None
+
+    @property
+    def verdict(self) -> ReviewVerdict:
+        """Return the judgement passed on this resource, unreviewed by default.
+
+        Saves every caller the same ``None`` check, and keeps "nobody has
+        looked at this" a value rather than an absence.
+        """
+        return ReviewVerdict.UNREVIEWED if self.review is None else self.review.verdict
 
     def to_document(self) -> dict[str, Any]:
         """Return the serializable description of this resource.
@@ -164,6 +276,7 @@ class ResourceRecord:
                 "attempts": self.attempts,
                 "error": self.error,
                 "content": None if self.content is None else self.content.to_document(),
+                "review": None if self.review is None else self.review.to_document(),
             }
         )
         return document
@@ -184,6 +297,7 @@ class ResourceRecord:
             )
             raise LibraryRecordError(msg)
         content = document.get("content")
+        review = document.get("review")
         return cls(
             provider=_require_str(document, "provider"),
             key=_require_str(document, "key"),
@@ -199,6 +313,7 @@ class ResourceRecord:
             attempts=_optional_int(document, "attempts") or 0,
             error=_optional_str(document, "error"),
             content=None if content is None else ContentRecord.from_document(_mapping(content)),
+            review=None if review is None else ReviewRecord.from_document(_mapping(review)),
             extra={key: value for key, value in document.items() if key not in _KNOWN_KEYS},
         )
 
@@ -280,7 +395,22 @@ def _optional_int(document: Mapping[str, Any], key: str) -> int | None:
     return value
 
 
-def _read_enum[EnumT: (ResourceKind, DownloadStatus)](
+def _optional_bool(document: Mapping[str, Any], key: str) -> bool:
+    """Return the optional boolean member *key*, absent meaning false.
+
+    An absent switch is off rather than an error: a review record written before
+    a switch existed is a document this release still has to read.
+    """
+    value = document.get(key)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        msg = f"metadata member {key!r} must be true or false"
+        raise LibraryRecordError(msg)
+    return value
+
+
+def _read_enum[EnumT: (ResourceKind, DownloadStatus, ReviewVerdict)](
     document: Mapping[str, Any], key: str, enum: type[EnumT]
 ) -> EnumT:
     """Return the member *key* as a value of *enum*."""

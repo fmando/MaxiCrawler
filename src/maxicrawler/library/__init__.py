@@ -29,6 +29,8 @@ from maxicrawler.library.records import (
     RECORD_SCHEMA,
     ContentRecord,
     ResourceRecord,
+    ReviewRecord,
+    ReviewVerdict,
     new_record,
 )
 from maxicrawler.library.store import (
@@ -58,6 +60,8 @@ __all__ = [
     "LibraryLayoutError",
     "LibraryRecordError",
     "ResourceRecord",
+    "ReviewRecord",
+    "ReviewVerdict",
     "is_path_component",
     "new_record",
     "provider_directory",

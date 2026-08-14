@@ -132,7 +132,8 @@ class DownloadWorker:
         except (ProviderError, LibraryError, DownloadError, OSError) as error:
             reason = str(error)
             self._store(
-                entry, self._record(job, entry, DownloadStatus.FAILED, attempts, error=reason)
+                entry,
+                self._record(job, entry, DownloadStatus.FAILED, attempts, previous, error=reason),
             )
             return self._finish(job, DownloadStatus.FAILED, started, reason=reason)
         self._store(
@@ -142,6 +143,7 @@ class DownloadWorker:
                 entry,
                 DownloadStatus.COMPLETED,
                 attempts,
+                previous,
                 name=descriptor.name or job.name,
                 content=content,
             ),
@@ -161,12 +163,25 @@ class DownloadWorker:
         entry: LibraryEntry,
         status: DownloadStatus,
         attempts: int,
+        previous: ResourceRecord | None,
         *,
         name: str | None = None,
         content: ContentRecord | None = None,
         error: str | None = None,
     ) -> ResourceRecord:
-        """Return the metadata document describing *job* in *status*."""
+        """Return the metadata document describing *job* in *status*.
+
+        Built fresh from the job rather than edited into the old document, so
+        what a completed transfer says is decided by the transfer and not by
+        whatever the entry happened to hold before it.
+
+        Two members are the exception, and they are the ones this layer has no
+        opinion about. **A judgement and an unrecognised member are carried
+        forward from *previous* verbatim.** Rebuilding them away would mean
+        somebody's decision to keep a file was erased by fetching it a second
+        time — and would quietly break the promise ADR-013 makes about unknown
+        members surviving, which `to_document` keeps and this method used not to.
+        """
         record = new_record(
             job.ref,
             entry.key,
@@ -181,6 +196,8 @@ class DownloadWorker:
             attempts=attempts,
             error=error,
             content=content,
+            review=None if previous is None else previous.review,
+            extra={} if previous is None else previous.extra,
         )
 
     @staticmethod

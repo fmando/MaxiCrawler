@@ -7,6 +7,7 @@ the layer exists for.
 """
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -31,7 +32,12 @@ from maxicrawler.downloader import (
     SourceItem,
     SourceResolver,
 )
-from maxicrawler.library import METADATA_FILENAME, Library
+from maxicrawler.library import (
+    METADATA_FILENAME,
+    Library,
+    ReviewRecord,
+    ReviewVerdict,
+)
 from maxicrawler.providers import ProviderRegistry, ProviderTransportError
 
 FILE_URL = "https://mega.nz/file/AaBbCcDd#0123456789abcdefghijkl"
@@ -237,6 +243,71 @@ def test_a_download_whose_payload_was_deleted_is_fetched_again(tmp_path: Path) -
     assert len(provider.downloaded) == 2
     entry = library.entry(report.completed[0].job.ref)
     assert stored_record(library, entry.path)["attempts"] == 2
+
+
+def test_a_judgement_survives_the_payload_being_fetched_again(tmp_path: Path) -> None:
+    provider = make_provider()
+    manager, library = make_manager(tmp_path, provider)
+    first = manager.download(FILE_URL)
+    entry = library.entry(first.completed[0].job.ref)
+    stored = entry.read()
+    assert stored is not None
+    entry.write(replace(stored, review=ReviewRecord(verdict=ReviewVerdict.KEPT, favourite=True)))
+    assert first.completed[0].path is not None
+    first.completed[0].path.unlink()
+
+    manager.download(FILE_URL)
+
+    again = entry.read()
+    assert again is not None
+    assert again.verdict is ReviewVerdict.KEPT
+    assert again.review is not None
+    assert again.review.favourite is True
+    assert again.attempts == 2
+
+
+def test_a_member_this_release_does_not_know_survives_a_second_download(tmp_path: Path) -> None:
+    provider = make_provider()
+    manager, library = make_manager(tmp_path, provider)
+    first = manager.download(FILE_URL)
+    entry = library.entry(first.completed[0].job.ref)
+    stored = entry.read()
+    assert stored is not None
+    entry.write(replace(stored, extra={"seeded_at": "2027-01-01T00:00:00+00:00"}))
+    assert first.completed[0].path is not None
+    first.completed[0].path.unlink()
+
+    manager.download(FILE_URL)
+
+    assert stored_record(library, entry.path)["seeded_at"] == "2027-01-01T00:00:00+00:00"
+
+
+def test_a_judgement_survives_a_download_that_fails(tmp_path: Path) -> None:
+    manager, library = make_manager(tmp_path, make_provider())
+    first = manager.download(FILE_URL)
+    entry = library.entry(first.completed[0].job.ref)
+    stored = entry.read()
+    assert stored is not None
+    entry.write(replace(stored, review=ReviewRecord(verdict=ReviewVerdict.KEPT)))
+    assert first.completed[0].path is not None
+    first.completed[0].path.unlink()
+
+    failing, _ = make_manager(tmp_path, make_provider(failure=ProviderTransportError("reset")))
+    failing.download(FILE_URL)
+
+    again = entry.read()
+    assert again is not None
+    assert again.status is DownloadStatus.FAILED
+    assert again.verdict is ReviewVerdict.KEPT
+
+
+def test_a_first_download_records_no_judgement_of_its_own(tmp_path: Path) -> None:
+    manager, library = make_manager(tmp_path)
+
+    report = manager.download(FILE_URL)
+
+    entry = library.entry(report.completed[0].job.ref)
+    assert stored_record(library, entry.path)["review"] is None
 
 
 def test_a_failing_provider_produces_a_failed_outcome(tmp_path: Path) -> None:

@@ -13,12 +13,15 @@ from maxicrawler.library import (
     ContentRecord,
     LibraryRecordError,
     ResourceRecord,
+    ReviewRecord,
+    ReviewVerdict,
     new_record,
 )
 from maxicrawler.library.records import _KNOWN_KEYS
 
 DISCOVERED = datetime(2026, 8, 2, 9, 0, tzinfo=UTC)
 DOWNLOADED = datetime(2026, 8, 2, 9, 5, tzinfo=UTC)
+REVIEWED = datetime(2026, 8, 2, 10, 0, tzinfo=UTC)
 
 
 def make_record(**overrides: Any) -> ResourceRecord:
@@ -159,3 +162,98 @@ def test_a_new_record_starts_out_pending() -> None:
     assert record.resource_id == "AaBbCcDd"
     assert record.source_url == ref.url
     assert record.content is None
+
+
+def test_a_record_nobody_judged_reads_as_unreviewed() -> None:
+    record = make_record()
+
+    assert record.review is None
+    assert record.verdict is ReviewVerdict.UNREVIEWED
+
+
+def test_a_document_written_before_reviews_existed_still_reads() -> None:
+    document = make_record().to_document()
+    del document["review"]
+
+    assert ResourceRecord.from_document(document).verdict is ReviewVerdict.UNREVIEWED
+
+
+def test_a_judgement_survives_a_round_trip() -> None:
+    record = make_record(
+        review=ReviewRecord(
+            verdict=ReviewVerdict.KEPT,
+            favourite=True,
+            reviewed_at=REVIEWED,
+        )
+    )
+
+    assert round_trip(record) == record
+
+
+def test_a_discarded_record_remembers_when_the_payload_went() -> None:
+    record = make_record(
+        review=ReviewRecord(
+            verdict=ReviewVerdict.DISCARDED,
+            reviewed_at=REVIEWED,
+            payload_removed_at=REVIEWED,
+        )
+    )
+
+    assert round_trip(record).review == record.review
+
+
+def test_a_judgement_and_an_unknown_member_survive_together() -> None:
+    document = make_record(review=ReviewRecord(verdict=ReviewVerdict.KEPT)).to_document()
+    document["seeded_at"] = "2027-01-01T00:00:00+00:00"
+
+    record = ResourceRecord.from_document(document)
+
+    assert record.verdict is ReviewVerdict.KEPT
+    assert record.extra == {"seeded_at": "2027-01-01T00:00:00+00:00"}
+
+
+def test_an_absent_favourite_switch_is_off_rather_than_an_error() -> None:
+    document = ReviewRecord(verdict=ReviewVerdict.KEPT).to_document()
+    del document["favourite"]
+
+    assert ReviewRecord.from_document(document).favourite is False
+
+
+@pytest.mark.parametrize(
+    ("member", "value", "message"),
+    [
+        ("verdict", "hated", "'verdict' is not a known ReviewVerdict"),
+        ("favourite", "yes", "'favourite' must be true or false"),
+        ("reviewed_at", "yesterday", "'reviewed_at' is not an ISO-8601 timestamp"),
+    ],
+)
+def test_an_unreadable_judgement_is_reported(member: str, value: object, message: str) -> None:
+    document = make_record().to_document()
+    document["review"] = ReviewRecord(verdict=ReviewVerdict.KEPT).to_document()
+    document["review"][member] = value
+
+    with pytest.raises(LibraryRecordError, match=message):
+        ResourceRecord.from_document(document)
+
+
+def test_a_review_that_is_not_an_object_is_reported() -> None:
+    document = make_record().to_document()
+    document["review"] = "kept"
+
+    with pytest.raises(LibraryRecordError, match="must be an object"):
+        ResourceRecord.from_document(document)
+
+
+@pytest.mark.parametrize(
+    ("verdict", "dismissed"),
+    [
+        (ReviewVerdict.UNREVIEWED, False),
+        (ReviewVerdict.KEPT, False),
+        (ReviewVerdict.IGNORED, True),
+        (ReviewVerdict.DISCARDED, True),
+    ],
+)
+def test_a_verdict_says_whether_it_means_do_not_offer_this_again(
+    verdict: ReviewVerdict, dismissed: bool
+) -> None:
+    assert verdict.is_dismissed is dismissed
