@@ -1212,3 +1212,175 @@ because a confirmation that survived a reload would outlive being true. The
 parameters that carry it are named in `views.TRANSIENT_PARAMS` and dropped by
 the same function that carries every other parameter forward, so nothing has to
 remember that it has already shown one.
+
+## ADR-040: A verdict is not a transfer
+
+What somebody thinks of a stored file is recorded **in that entry's own metadata
+document**, as an optional `review` member holding a verdict, a favourite
+switch, and the two times that belong to them. Not in the database: an index is
+a cache that may be deleted and rebuilt (ADR-037), and a judgement that a
+rebuild loses is not a judgement. The file system stays the authority (ADR-010),
+so a library moved with `rsync` arrives with everything anybody decided about it.
+
+**The schema number stays 1.** ADR-013 has a reader refuse a document whose
+schema is higher than its own, so raising it would make every library written by
+this release unreadable to the release before it — for an *added optional*
+member, which is precisely what `extra` was built to survive. An older version
+reads such a document, keeps `review` in `extra` untouched, and writes it back
+unchanged. The number describes the format, and the format did not change.
+
+**Two writers, disjoint fields.** ADR-028 kept reading and writing apart;
+judging is writing, and it is the second writer:
+
+- `DownloadWorker` rebuilds every transfer field and carries `review` **and**
+  `extra` across from the previous record. Until this release it carried neither,
+  which was invisible while nothing wrote them and would have quietly deleted a
+  verdict on the first re-download.
+- `LibraryService.review` rebuilds `review` and carries everything else across,
+  read-modify-write through `LibraryEntry.read`/`.write`.
+
+Nothing locks the directory, so a download finishing at the same moment as a
+judgement can still lose one of them. That is named rather than solved: because
+the two writers touch different members, the worst case is one judgement lost,
+never a document describing a file that is not there.
+
+`ReviewVerdict` is its own enum beside `DownloadStatus` for the same reason.
+A status says how a transfer ended; a verdict says what somebody made of the
+result. A file can arrive perfectly and be worthless, and one vocabulary for
+both would have to answer *"did this download work?"* with *"they did not like
+it"*. The queue's state is a third axis and lives in memory, so the query string
+carries `status=`, `verdict=` and `state=queued` separately and never merges them.
+
+**Auto-advance decides the successor before it writes.** Judging a file from a
+listing sends the browser to the next file in *that* listing, and the listing is
+the point: with the *unreviewed* filter on, the row being judged leaves the set
+the moment the verdict lands, so a successor looked up afterwards is already one
+file too far — every click would skip one. The listing travels in its own `walk`
+parameter rather than in `back`, because the two answer different questions:
+`back` is where a control that does *not* advance returns to (the file's own
+page, ADR-039), and `walk` is the set the next file comes from. Both go through
+`_our_path`. Only the three verdicts advance; taking one back and starring stay
+on the file, because a correction belongs on the thing it corrects.
+
+## ADR-041: Discarding removes the file and keeps the headstone
+
+*Ignore* and *discard* are two decisions, not one with a stronger adverb.
+Ignoring means *do not show me this again* and leaves the file alone. Discarding
+means *and take the bytes back*, and it is the only thing in the interface that
+deletes.
+
+**One call does both halves**, `LibraryService.discard`, and the two halves have
+an order. The file goes first, the document second. Deleting the payload without
+writing the headstone leaves an entry the next bulk queue cheerfully fetches
+again; writing the headstone without deleting the payload leaves a record
+claiming a file is gone while it sits on disk, which everything downstream reads
+as *do not fetch this again* — the file would still be there and no longer
+reachable. In this order the failure that actually happens, a file something
+else holds open, leaves the entry untouched. `review()` refuses the discarded
+verdict outright for the same reason: `discard()` is its only writer, and it
+removes the file first.
+
+**What stays is everything the record said about the payload** — its name, its
+size, its checksum. That is what makes *"show me what I threw away"* a view
+rather than an excavation, and it is what makes the headstone work at all: "the
+library holds this" is answered by the record *and* the file, and only the file
+is gone.
+
+**The promise is kept in three places, because two would make it a lie:**
+
+1. `DownloadWorker.execute` refuses a dismissed record — after asking whether the
+   payload is already stored, so *"the library already holds it"* stays the
+   answer when it is the more useful one, and it writes nothing at all. A record
+   rebuilt to say "refused" would lose the status and the content the entry
+   already had.
+2. A report marks such a link *dismissed*, through one more `LinkState` member
+   and one more resolver in the same mapping the *in library* and *in queue*
+   marks already come through.
+3. *"Queue every fetchable match"* leaves them out, so they do not enter the
+   queue only to be turned away at the far end, where a refusal reads as a fault.
+
+**A URL counts as dismissed only when every entry recorded under it is.** Mega
+gives each child of a folder the folder's own URL, so *any* would put a folder of
+two hundred files out of reach because of one dismissed thumbnail. Queueing the
+container stays right while a single file in it is wanted, and the worker still
+turns away the individual entries, where the question has no ambiguity.
+
+**There is no `restore()`.** Taking a discard back is `review()` with
+*unreviewed*, the same call that takes any other verdict back — a second method
+would be one operation under two names. What it cannot do is bring the file
+back; what it does is lift the headstone, so downloading the link again restores
+it, which is the safety net ADR-012 already promised. The removal time belongs to
+the verdict and is cleared in the same write, because a deletion time that
+outlived the verdict would ride along on the next download and describe a file
+that is there.
+
+## ADR-042: A floor under what is worth downloading
+
+An image directory answers with a thumbnail, a sprite and an icon for every
+picture in it. Clearing those out by hand is undone by the next *"queue every
+match"*, so `min_download_size` (default 100 000 bytes, 0 turns it off) refuses
+what is too small to be the thing anybody wanted.
+
+**It lives in `DownloadSink`**, not in the crawler and not in a provider. The
+sink is where every provider's bytes pass anyway, it is where a transfer is
+already stopped (ADR-032), and it is the one place that is already guaranteed to
+leave nothing behind. A rule in the providers would be a rule per provider.
+
+**Two checkpoints, because a size is not always known in advance.** At `begin`,
+a descriptor that states a size below the floor is refused before a byte is
+transferred. At `commit`, a descriptor that stated no size at all is caught by
+what actually arrived — and the file is still staged under `.incomplete/` at that
+moment, so it is discarded without ever appearing in `content/`, which is the
+mechanic ADR-012 already provides.
+
+**It applies to an explicitly requested single download too.** One rule in one
+place: the sink does not know who commissioned it, and two rules would need two
+explanations. Somebody who wants a small file lowers the setting.
+
+**A refusal writes a record.** Without one the decision is gone after a restart
+and the next bulk queue fetches the same file again — the same trap the
+headstone in ADR-041 exists for. It shows up as `SKIPPED` with the reason naming
+both sizes, filterable in the library and readable in the queue's history. The
+known objection stands and is not argued away: 100 000 bytes also catches small
+PDFs and text files. What makes that bearable is that every refusal is visible
+with its reason, and that the number lives in exactly one setting.
+
+## ADR-043: A form of ours, or none at all
+
+The interface has no authentication and says so (ADR-025): whoever reaches the
+port can use it. That was a bounded statement while the worst a stray request
+could do was start a crawl. It stopped being bounded when a button began
+deleting files — any page in any other tab can submit a form at this server and
+the browser will send it, needing no access to anything this server returns.
+
+So every unsafe method must have come from a page of ours, decided in this order
+by `SameOriginMiddleware`:
+
+- **`Sec-Fetch-Site`**, which every current browser sends and no script can set —
+  the property a token in a hidden field has to be given by hand. `same-origin`
+  is ours; `none` is a user-initiated navigation and is accepted, because
+  refusing it could only cost a legitimate request; `same-site` and `cross-site`
+  are refused, the first because this server has no sibling hosts that ought to
+  be posting to it.
+- **`Origin`**, for a client that sent no `Sec-Fetch-*` header, compared against
+  the `Host` the request was addressed to — behind a reverse proxy the scheme is
+  not knowable and the host is.
+- **Neither header: allowed**, and that is a decision. A browser always sends one
+  of them cross-origin; what sends neither is `curl`, a script, a test —
+  something already on the machine, which is the position the command line is in
+  anyway. Refusing those would break every non-browser client to stop an attacker
+  who could equally well send no header.
+
+No token, no session, no cookie, and nothing to render, so every form keeps
+working without JavaScript (ADR-023).
+
+It is **pure ASGI rather than `BaseHTTPMiddleware`**, and that is load-bearing:
+two routes answer with an event stream that stays open for the length of a
+crawl, and `BaseHTTPMiddleware` buffers a response through a queue. This one
+inspects the request and then either steps out of the way entirely or answers
+instead of the application.
+
+**It is not authentication and does not become any.** It stops a page somebody
+else wrote from acting through a browser that can reach this server; it stops
+nobody who can make a request directly. That stays the job of a reverse proxy in
+front, and binding anywhere but loopback stays a deliberate act.

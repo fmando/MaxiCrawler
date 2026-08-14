@@ -1702,7 +1702,117 @@ refused if it leaves the library root — including through a symbolic link.
 - **No htmx.** Sorting and paging are links; on a loopback server a round trip
   costs less than the vendored file would.
 - **No thumbnails, no previews in the table, no text extraction.** All three
-  would mean reading files to render them.
+  would mean reading files to render them. Two of the three were revisited in
+  0.16 and came out differently — a tile shows the stored file itself and, for
+  text, its first lines — because neither of those *renders* anything. Producing
+  a thumbnail still does, and still is not done.
+
+## The library as a workspace
+
+Sprint 16 is about the question a listing could not answer: not *what is in
+here*, but *what of it do I want to keep*. See ADR-040 through ADR-043.
+
+### Judging is writing, and it is the second writer
+
+`DownloadService` writes into the library and `LibraryService` reads it
+(ADR-028). A verdict is written by the reader, and the rule that keeps that from
+being a contradiction is that the two writers touch **disjoint members**:
+
+| Writer | Rebuilds | Carries across untouched |
+| --- | --- | --- |
+| `DownloadWorker._record` | every transfer field | `review`, `extra` |
+| `LibraryService.review` | `review` | everything else |
+
+The second column of the first row is the fix for a bug that predates verdicts:
+a re-download rebuilt the record from the job, so `extra` was dropped — ADR-013
+promises unknown members survive a round trip, and they did through
+`from_document`/`to_document` and not through a second download. Harmless while
+nothing wrote them, and the quiet deletion of somebody's judgement the moment
+something did.
+
+It lives in the document rather than in a column because the index is a cache
+that may be deleted (ADR-037) and the file system is the authority (ADR-010). A
+library moved to another machine arrives with its verdicts.
+
+### Three axes, and no shared enum
+
+```text
+DownloadStatus   completed | skipped | failed          how a transfer ended
+ReviewVerdict    unreviewed | kept | ignored | discarded   what somebody decided
+TransferQueue    pending | running                     what is happening now
+```
+
+The first two are on disk, the third is in memory, and the query string carries
+`status=`, `verdict=` and `state=queued` separately. *In queue* is answered the
+way *in library* is: a callable handed to the service, which never learns that
+one of them is a queue.
+
+### Ignore and discard
+
+Ignoring leaves the file alone; discarding removes it. `LibraryService.discard`
+does both halves in one call, file first, and is the only writer of that
+verdict — `review()` raises on it, because a headstone over a file that is still
+there is read downstream as *do not fetch this again* and would make a present
+file unreachable.
+
+What the record keeps is everything it said about the payload: name, size,
+checksum. That is what makes the promise enforceable in three places at once:
+the worker refuses a dismissed record, a report marks the link *dismissed*, and
+`fetchable()` leaves it out of what a filter resolves to. A URL counts as
+dismissed only when **every** entry recorded under it is, because a Mega folder
+gives all of its children the folder's own URL.
+
+There is no `restore()`: undoing a discard is `review()` with *unreviewed*, the
+same call that undoes anything else. The removal time is part of the verdict and
+is cleared in the same write, so it cannot outlive it and ride along on the next
+download.
+
+### A tile draws nothing that is not already there
+
+`LibraryService.preview` is one function with three cases, not a registry: the
+stored image below `preview_inline_bytes`, a short read of the first lines for
+text, and a symbol otherwise. A registry is the shape this wants once something
+actually *produces* a preview, and reading three branches is cheaper than reading
+an abstraction that has nothing to abstract yet.
+
+The ceiling is the whole reason a tile view is possible without thumbnails. Sixty
+originals of twenty megabytes each is more than a gigabyte on the wire and, worse,
+sixty decoded bitmaps sized by pixel count rather than by file size — a 300 KB
+6000×4000 JPEG is 96 MB in the tab. Above the ceiling a tile is a symbol and a
+size, and never the original.
+
+### Walking a listing
+
+A file page reached from a listing says which of how many and links both ways;
+reached on its own it is the page it always was. The listing travels as `walk`,
+its own parameter, because `back` already means *where a control that does not
+advance returns to* (ADR-039) and the two are different sets. Both are checked by
+`_our_path`.
+
+**The successor is looked up before the verdict is written.** Under the
+*unreviewed* filter the row being judged leaves the set as the verdict lands, so
+a lookup afterwards is one file too far and every click would skip one. Only the
+three verdicts advance; undo and the star stay on the file.
+
+Audio and video are the only additions to the display table, and they get their
+own ceiling: `max_view_bytes` exists because a browser chokes on a 400 MB text
+file, which is not the situation a `<video>` requesting ranges is in.
+`max_stream_bytes` is unlimited by default. The list of streamable suffixes is
+deliberately shorter than the list of *kinds*: `.mkv` gets a category and stays a
+download, because a player showing a black rectangle is worse than a download
+link.
+
+### Deliberately not done
+
+- **No thumbnail generation.** If it is ever built: cache only, deletable in
+  full, and never inside `library/`.
+- **No comments and no tags.** Not even as a reserved member — an empty field in
+  a document is a promise.
+- **No duplicate detection.** The checksum column is filled and the facet
+  grammar takes another group without changing the query, which is the whole of
+  the preparation.
+- **No per-entry locking.** A download and a judgement landing together can lose
+  one write, and disjoint members are what bounds the damage.
 
 ## Design rules
 
@@ -1781,3 +1891,18 @@ refused if it leaves the library root — including through a symbolic link.
     it never draws it.
 42. Nothing on a page is fetched from another host. The interface renders on a
     machine with no route to the internet.
+43. Two writers of one document touch disjoint members, and each carries the
+    other's across untouched. Rebuilding a record from what you know loses what
+    you do not.
+44. What a person decided is recorded where the file is, not where the cache is.
+    A judgement a rebuilt index loses is not a judgement.
+45. Deleting a payload and recording that it was deleted is one call, in that
+    order. Either half alone is a lie somebody acts on.
+46. An allow-list decides what may be served; a classification decides what
+    something is. Never make one table do both.
+47. Where the next thing is, is decided before the current thing changes.
+48. A tile shows what is on disk or shows a symbol. Producing an image to show
+    is a different feature with its own cache, and the cache never lives in the
+    library.
+49. An unsafe method is accepted only from a page of ours, decided from a header
+    the browser sets. It is not authentication and must not be described as any.

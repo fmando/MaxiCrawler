@@ -19,8 +19,16 @@ So a listing now consults
 :class:`~maxicrawler.database.library.SQLiteLibraryIndex` and reads only the
 documents that changed. Every entry is still *stat*-ed on every listing, which is
 what makes the cache safe to believe: a row is trusted only while the document it
-came from has the same modification time and size. The saving is the parse, not
-the walk.
+came from has the same modification time and size.
+
+**What is saved is the read, not the walk and not the parse.** The row holds the
+document verbatim, so a listing still parses one JSON string per entry — off a
+single database read instead of off two thousand files, which is where the
+seconds were. Turning the members a listing filters and sorts by into columns
+would drop the parse as well; the columns a judgement needs are already there and
+answer the set questions in :meth:`LibraryService.stored` and
+:meth:`LibraryService.dismissed` without parsing anything, and the rest is
+measured work that has not been done.
 
 Three rules keep the cache from quietly becoming the authority, and each of them
 is a property this module can be read for:
