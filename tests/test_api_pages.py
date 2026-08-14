@@ -374,6 +374,28 @@ def test_the_library_can_be_filtered_by_provider_and_status(tmp_path: Path) -> N
     assert "stub.bin" not in dropped
 
 
+def test_the_library_can_be_filtered_by_what_kind_of_file_it_is(tmp_path: Path) -> None:
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+
+        kept = test_client.get("/library?kind=other").text
+        dropped = test_client.get("/library?kind=video").text
+
+    assert "stub.bin" in kept
+    assert "stub.bin" not in dropped
+
+
+def test_a_category_nobody_recognises_filters_nothing(tmp_path: Path) -> None:
+    """Lenient like every other parameter here: a stale bookmark is ordinary."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+
+        response = test_client.get("/library?kind=sculpture")
+
+    assert response.status_code == 200
+    assert "stub.bin" in response.text
+
+
 def test_the_library_can_be_sorted_by_a_link(tmp_path: Path) -> None:
     with client(tmp_path, provider=make_provider()) as test_client:
         finished_download(test_client)

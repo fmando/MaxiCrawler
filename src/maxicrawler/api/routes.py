@@ -49,7 +49,7 @@ from maxicrawler.app import (
     browse_pages,
     crawl_document,
 )
-from maxicrawler.app.viewing import DOWNLOAD_CONTENT_TYPE
+from maxicrawler.app.viewing import DOWNLOAD_CONTENT_TYPE, MediaKind
 from maxicrawler.domain import DownloadStatus
 from maxicrawler.web.report import CrawlReport
 
@@ -850,6 +850,7 @@ def _query(request: Request) -> LibraryQuery:
         search=values.get("q", "").strip(),
         provider=values.get("provider") or None,
         status=_status(values.get("status")),
+        kind=MediaKind.parse(values.get("kind")),
         sort=LibrarySort.parse(values.get("sort"), default=LibraryQuery().sort),
         descending=values.get("dir", "desc") != "asc",
         page=_positive(values.get("page"), default=1),

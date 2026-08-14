@@ -69,6 +69,7 @@ from maxicrawler.app import (
     browse_pages,
     target_of,
 )
+from maxicrawler.app.viewing import MediaKind
 from maxicrawler.crawler import DiscoverySummary, PluginUsage
 from maxicrawler.domain import DownloadStatus, ScanSession, Statistics
 from maxicrawler.web.models import LinkKind
@@ -1889,6 +1890,7 @@ def library_page(items: tuple[LibraryItem, ...] = (), **overrides: object) -> Li
         "pages": 1,
         "providers": tuple(sorted({item.directory for item in items})),
         "statuses": tuple(sorted({item.status for item in items})),
+        "kinds": tuple(kind for kind in MediaKind if kind in {item.kind for item in items}),
     }
     values.update(overrides)
     return LibraryPage(**values)  # type: ignore[arg-type]
@@ -1936,6 +1938,52 @@ def test_a_filtered_listing_counts_both_numbers() -> None:
     assert shown["stored"] == "9"
     assert shown["is_filtered"] is True
     assert shown["search"] == "jump"
+
+
+def test_the_type_filter_offers_only_the_categories_present() -> None:
+    """A library of pictures should not offer to show only the videos."""
+    shown = library_view(
+        library_page(
+            (
+                make_item("holiday.jpg", kind=MediaKind.IMAGE),
+                make_item("Jump.pdf", kind=MediaKind.PDF),
+            )
+        )
+    )
+
+    assert [kind["value"] for kind in shown["kinds"]] == ["image", "pdf"]
+    assert [kind["label"] for kind in shown["kinds"]] == ["images", "PDF"]
+
+
+def test_the_categories_are_offered_in_the_order_somebody_reaches_for_them() -> None:
+    """Declaration order, not alphabetical: "archive" is not the first thing."""
+    shown = library_view(
+        library_page(
+            (
+                make_item("release.zip", kind=MediaKind.ARCHIVE),
+                make_item("holiday.jpg", kind=MediaKind.IMAGE),
+                make_item("talk.mp4", kind=MediaKind.VIDEO),
+            )
+        )
+    )
+
+    assert [kind["value"] for kind in shown["kinds"]] == ["image", "video", "archive"]
+
+
+def test_a_row_carries_its_category() -> None:
+    row = library_view(library_page((make_item("talk.mp4", kind=MediaKind.VIDEO),)))["rows"][0]
+
+    assert row["kind"] == "video"
+
+
+def test_the_chosen_category_survives_every_other_link() -> None:
+    """A sort link that dropped the type filter would undo it on every click."""
+    shown = library_view(
+        library_page((make_item(),), query=LibraryQuery(kind=MediaKind.IMAGE), total=1, stored=9)
+    )
+
+    assert shown["kind"] == "image"
+    assert all("kind=image" in column["url"] for column in shown["columns"])
 
 
 # --- the links the table is navigated by --------------------------------------

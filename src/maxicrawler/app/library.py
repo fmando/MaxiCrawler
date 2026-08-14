@@ -57,11 +57,17 @@ from math import ceil
 from pathlib import Path
 from typing import Any
 
-from maxicrawler.app.viewing import MediaVerdict, verdict_for
+from maxicrawler.app.viewing import MediaKind, MediaVerdict, kind_for, verdict_for
 from maxicrawler.config import Settings
 from maxicrawler.database import IndexedEntry, SQLiteDatabase, SQLiteLibraryIndex
 from maxicrawler.domain import DownloadStatus
-from maxicrawler.library import Library, LibraryEntry, LibraryError, ResourceRecord
+from maxicrawler.library import (
+    ContentRecord,
+    Library,
+    LibraryEntry,
+    LibraryError,
+    ResourceRecord,
+)
 from maxicrawler.utils import strip_fragment
 
 DEFAULT_PER_PAGE = 50
@@ -128,6 +134,14 @@ class LibraryItem:
     downloaded_at: datetime | None = None
     attempts: int = 0
     error: str | None = None
+    kind: MediaKind = MediaKind.OTHER
+    """What sort of file this is, from its name.
+
+    Read from the stored file name where there is one and from the recorded
+    name where there is not, so an entry that never received a payload — a
+    failure, or something a limit turned away — still sorts under the category
+    a person would look for it in.
+    """
 
     @property
     def is_stored(self) -> bool:
@@ -161,6 +175,7 @@ class LibraryQuery:
     """A provider *directory*, because that is what a URL can carry safely."""
 
     status: DownloadStatus | None = None
+    kind: MediaKind | None = None
     sort: LibrarySort = LibrarySort.DOWNLOADED
     descending: bool = True
     page: int = 1
@@ -169,7 +184,12 @@ class LibraryQuery:
     @property
     def is_filtered(self) -> bool:
         """Return whether this query shows less than the whole library."""
-        return bool(self.search) or self.provider is not None or self.status is not None
+        return (
+            bool(self.search)
+            or self.provider is not None
+            or self.status is not None
+            or self.kind is not None
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +218,12 @@ class LibraryPage:
 
     Derived rather than listed from the enum: offering "running" as a filter for
     a store that never holds one is a menu entry that can only disappoint.
+    """
+
+    kinds: tuple[MediaKind, ...] = ()
+    """The categories present, derived for the reason :attr:`statuses` is.
+
+    A library of nothing but images should not offer to show only the videos.
     """
 
     @property
@@ -272,6 +298,7 @@ class LibraryService:
             pages=pages,
             providers=tuple(sorted({item.directory for item in items})),
             statuses=tuple(sorted({item.status for item in items})),
+            kinds=_kinds_present(items),
         )
 
     def item(self, provider: str, key: str) -> LibraryItem | None:
@@ -498,11 +525,13 @@ def _item_from_record(
     library it is in has been mounted.
     """
     content = record.content
+    name = _name(record, key)
     return LibraryItem(
         provider=record.provider,
         directory=directory,
         key=key,
-        name=_name(record, key),
+        name=name,
+        kind=_kind_of(content, name),
         status=record.status,
         source_url=record.source_url,
         filename=None if content is None else content.filename,
@@ -514,6 +543,39 @@ def _item_from_record(
         attempts=record.attempts,
         error=record.error,
     )
+
+
+def _kinds_present(items: tuple[LibraryItem, ...]) -> tuple[MediaKind, ...]:
+    """Return the categories *items* contain, in the order they are offered in.
+
+    Declaration order rather than alphabetical, which is the one place this
+    differs from :attr:`LibraryPage.statuses`. The members are declared in the
+    order somebody sorting through a crawl reaches for them — pictures and
+    video first, "other" last — and sorting the values as strings would put
+    "archive" at the top and scatter the rest by spelling.
+    """
+    present = {item.kind for item in items}
+    return tuple(kind for kind in MediaKind if kind in present)
+
+
+def _kind_of(content: ContentRecord | None, name: str) -> MediaKind:
+    """Return the category of an entry holding *content* and called *name*.
+
+    The stored file name decides it, because that is what the payload actually
+    is. An entry with no payload falls back to the recorded name — a download
+    that failed, or one a limit turned away, is still a picture or an archive as
+    far as somebody looking for it is concerned, and it would otherwise sit in
+    "other" where nobody would think to look.
+
+    The fallback also covers a payload whose own suffix says nothing, which is
+    how a provider that stored ``download`` beside a record named ``holiday.jpg``
+    stays findable.
+    """
+    if content is not None:
+        stored = kind_for(content.filename)
+        if stored is not MediaKind.OTHER:
+            return stored
+    return kind_for(name)
 
 
 def _name(record: ResourceRecord, key: str) -> str:
@@ -618,6 +680,8 @@ def _matches(item: LibraryItem, query: LibraryQuery) -> bool:
     if query.provider is not None and item.directory != query.provider:
         return False
     if query.status is not None and item.status is not query.status:
+        return False
+    if query.kind is not None and item.kind is not query.kind:
         return False
     if not query.search:
         return True

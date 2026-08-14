@@ -39,6 +39,25 @@
       </select>
     </label>
 
+    {#
+      Absent where the library holds one kind of thing, the same way the
+      status control is built from what is present: offering "show me the
+      videos" to a library of nothing but images answers with an empty page.
+    #}
+    {% if library.kinds|length > 1 %}
+      <label>
+        <span>Type</span>
+        <select name="kind">
+          <option value="">any</option>
+          {% for kind in library.kinds %}
+            <option value="{{ kind.value }}"{% if kind.value == library.kind %} selected{% endif %}>{{ kind.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    {% else %}
+      <input type="hidden" name="kind" value="{{ library.kind }}">
+    {% endif %}
+
     <label>
       <span>Status</span>
       <select name="status">

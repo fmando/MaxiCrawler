@@ -20,6 +20,7 @@ from maxicrawler.app import (
     LibraryService,
     LibrarySort,
 )
+from maxicrawler.app.viewing import MediaKind
 from maxicrawler.config import Settings
 from maxicrawler.domain import DownloadStatus, ResourceKind, ResourceRef
 from maxicrawler.library import METADATA_FILENAME, Library
@@ -264,6 +265,53 @@ def test_a_status_filter_keeps_one_verdict(tmp_path: Path) -> None:
     assert [item.status for item in page.items] == [DownloadStatus.FAILED]
 
 
+def test_a_kind_filter_keeps_one_category(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    write(library, "AaBbCcDd", name="Jump.pdf", filename="Jump.pdf")
+    write(library, "EeFfGgHh", name="holiday.jpg", filename="holiday.jpg")
+    write(library, "IiJjKkLl", name="release.zip", filename="release.zip")
+
+    page = service.browse(LibraryQuery(kind=MediaKind.IMAGE))
+
+    assert [item.name for item in page.items] == ["holiday.jpg"]
+    assert page.kinds == (MediaKind.IMAGE, MediaKind.PDF, MediaKind.ARCHIVE)
+
+
+def test_a_category_comes_from_the_stored_file_rather_than_the_recorded_name(
+    tmp_path: Path,
+) -> None:
+    """The payload is what the entry actually holds."""
+    service, library = make_service(tmp_path)
+    write(library, "AaBbCcDd", name="the holiday photo", filename="holiday.jpg")
+
+    (item,) = service.browse().items
+
+    assert item.kind is MediaKind.IMAGE
+
+
+def test_an_entry_with_no_payload_is_still_categorised(tmp_path: Path) -> None:
+    """A failure and a refusal are exactly what somebody goes looking for.
+
+    Leaving them in "other" would hide the thumbnails a floor turned away from
+    the one filter that would find them.
+    """
+    service, library = make_service(tmp_path)
+    write(library, "AaBbCcDd", name="thumb.jpg", filename=None, status=DownloadStatus.FAILED)
+
+    (item,) = service.browse().items
+
+    assert item.kind is MediaKind.IMAGE
+
+
+def test_a_payload_whose_name_says_nothing_falls_back_to_the_record(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    write(library, "AaBbCcDd", name="holiday.jpg", filename="download")
+
+    (item,) = service.browse().items
+
+    assert item.kind is MediaKind.IMAGE
+
+
 def test_filters_combine(tmp_path: Path) -> None:
     service, library = make_service(tmp_path)
     write(library, "AaBbCcDd", name="keep me")
@@ -274,10 +322,22 @@ def test_filters_combine(tmp_path: Path) -> None:
     assert page.total == 1
 
 
+def test_a_kind_narrows_what_another_filter_left(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    write(library, "AaBbCcDd", name="holiday.jpg", filename="holiday.jpg")
+    write(library, "EeFfGgHh", name="holiday.pdf", filename="holiday.pdf")
+    write(library, "IiJjKkLl", name="other.jpg", filename="other.jpg")
+
+    page = service.browse(LibraryQuery(search="holiday", kind=MediaKind.IMAGE))
+
+    assert [item.name for item in page.items] == ["holiday.jpg"]
+
+
 def test_an_unfiltered_query_says_so() -> None:
     assert LibraryQuery().is_filtered is False
     assert LibraryQuery(search="x").is_filtered is True
     assert LibraryQuery(provider="mega").is_filtered is True
+    assert LibraryQuery(kind=MediaKind.IMAGE).is_filtered is True
     assert LibraryQuery(status=DownloadStatus.FAILED).is_filtered is True
 
 

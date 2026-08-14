@@ -16,10 +16,13 @@ from maxicrawler.app.viewing import (
     DEFAULT_MAX_VIEW_BYTES,
     DOWNLOAD_CONTENT_TYPE,
     HTML,
+    KINDS,
     PLAIN_TEXT,
     SVG,
     VIEWABLE,
     Display,
+    MediaKind,
+    kind_for,
     verdict_for,
 )
 
@@ -115,7 +118,68 @@ def test_svg_is_never_framed() -> None:
     assert verdict_for("drawing.svg", size=1).display is Display.IMAGE
 
 
+# --- what sort of file it is ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("filename", "kind"),
+    [
+        ("holiday.JPG", MediaKind.IMAGE),
+        ("drawing.svg", MediaKind.IMAGE),
+        ("talk.mp4", MediaKind.VIDEO),
+        ("song.flac", MediaKind.AUDIO),
+        ("manual.pdf", MediaKind.PDF),
+        ("notes.docx", MediaKind.DOCUMENT),
+        ("page.html", MediaKind.DOCUMENT),
+        ("release.tar.gz", MediaKind.ARCHIVE),
+        ("disk.iso", MediaKind.ARCHIVE),
+        ("readme.md", MediaKind.TEXT),
+        ("links.txt", MediaKind.TEXT),
+        ("installer.exe", MediaKind.OTHER),
+        ("README", MediaKind.OTHER),
+    ],
+)
+def test_a_file_is_categorised_by_its_suffix(filename: str, kind: MediaKind) -> None:
+    assert kind_for(filename) is kind
+
+
+def test_a_file_nobody_named_is_other_rather_than_an_error() -> None:
+    assert kind_for(None) is MediaKind.OTHER
+    assert kind_for("") is MediaKind.OTHER
+
+
+def test_a_category_is_lenient_about_what_a_query_string_carries() -> None:
+    assert MediaKind.parse("image") is MediaKind.IMAGE
+    assert MediaKind.parse("sculpture") is None
+    assert MediaKind.parse(None) is None
+
+
+def test_every_suffix_a_browser_may_be_shown_also_has_a_category() -> None:
+    """Otherwise a file the viewer renders sits under "other" in the filter.
+
+    The reverse does not hold and is the point of two tables: `KINDS` covers
+    video and archives, which `VIEWABLE` deliberately does not.
+    """
+    assert set(VIEWABLE) <= set(KINDS)
+
+
+def test_categorising_a_file_never_reads_it() -> None:
+    """A category is a hint for sorting, not a claim about content.
+
+    Opening a thousand files to fill a listing would cost more than the sorting
+    saves — and would make the answer depend on whether the payload is still
+    there, which for a refused or failed entry it is not.
+    """
+    assert kind_for("holiday.jpg") is MediaKind.IMAGE
+
+
 # --- the table itself ---------------------------------------------------------
+
+
+def test_every_suffix_in_the_category_table_is_lower_case_and_dotted() -> None:
+    for suffix in KINDS:
+        assert suffix.startswith(".")
+        assert suffix == suffix.lower()
 
 
 def test_every_suffix_in_the_table_is_lower_case_and_dotted() -> None:

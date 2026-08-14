@@ -137,6 +137,182 @@ stylesheet and become script-capable, and nobody asked to view XML *rendered*.
 """
 
 
+class MediaKind(StrEnum):
+    """What sort of thing a stored file is, for somebody sorting through them.
+
+    A different question from :data:`VIEWABLE`, and kept in a different table
+    for a reason worth stating. That one is a **security boundary**: an
+    allow-list of what may be handed to a browser with a content type, where
+    everything absent is a download and a suffix nobody thought about is
+    therefore harmless. This one is an **estimate**, and is allowed to be
+    generous — a ``.rar`` gets a category and still gets no content type.
+
+    Merging them would tie a filter's vocabulary to a decision about executing
+    code, so that adding "show me the archives" meant editing the list that
+    decides what a browser may run.
+    """
+
+    IMAGE = "image"
+    VIDEO = "video"
+    AUDIO = "audio"
+    PDF = "pdf"
+    """Its own kind rather than a document, because it is the one document type
+    every browser here renders, and because it is what most of a crawl's
+    keepable output turns out to be."""
+
+    DOCUMENT = "document"
+    """Word processing, spreadsheets, presentations, e-books, stored web pages."""
+
+    ARCHIVE = "archive"
+    TEXT = "text"
+    OTHER = "other"
+    """Everything with no category, including a file with no extension.
+
+    Never an error: a library holds whatever a crawl found, and a suffix nobody
+    listed is an ordinary thing to have rather than a fault to report.
+    """
+
+    @classmethod
+    def parse(cls, value: str | None) -> "MediaKind | None":
+        """Return the kind *value* names, or ``None`` when it names none.
+
+        Lenient like :meth:`~maxicrawler.app.library.LibrarySort.parse`, and for
+        the same reason: the value arrives in a query string, where a stale
+        bookmark is ordinary and a refusal is worse than an unfiltered listing.
+        """
+        try:
+            return cls(value or "")
+        except ValueError:
+            return None
+
+
+KINDS: dict[str, MediaKind] = {
+    # Images. `.svg` belongs here although it is markup: what a person is
+    # looking for when they ask for pictures is what looks like one.
+    ".png": MediaKind.IMAGE,
+    ".jpg": MediaKind.IMAGE,
+    ".jpeg": MediaKind.IMAGE,
+    ".jfif": MediaKind.IMAGE,
+    ".gif": MediaKind.IMAGE,
+    ".webp": MediaKind.IMAGE,
+    ".bmp": MediaKind.IMAGE,
+    ".ico": MediaKind.IMAGE,
+    ".avif": MediaKind.IMAGE,
+    ".svg": MediaKind.IMAGE,
+    ".tif": MediaKind.IMAGE,
+    ".tiff": MediaKind.IMAGE,
+    ".heic": MediaKind.IMAGE,
+    ".heif": MediaKind.IMAGE,
+    ".psd": MediaKind.IMAGE,
+    # Video.
+    ".mp4": MediaKind.VIDEO,
+    ".m4v": MediaKind.VIDEO,
+    ".mkv": MediaKind.VIDEO,
+    ".webm": MediaKind.VIDEO,
+    ".avi": MediaKind.VIDEO,
+    ".mov": MediaKind.VIDEO,
+    ".wmv": MediaKind.VIDEO,
+    ".flv": MediaKind.VIDEO,
+    ".mpg": MediaKind.VIDEO,
+    ".mpeg": MediaKind.VIDEO,
+    ".ts": MediaKind.VIDEO,
+    ".m2ts": MediaKind.VIDEO,
+    ".ogv": MediaKind.VIDEO,
+    ".3gp": MediaKind.VIDEO,
+    # Audio.
+    ".mp3": MediaKind.AUDIO,
+    ".m4a": MediaKind.AUDIO,
+    ".aac": MediaKind.AUDIO,
+    ".flac": MediaKind.AUDIO,
+    ".ogg": MediaKind.AUDIO,
+    ".oga": MediaKind.AUDIO,
+    ".opus": MediaKind.AUDIO,
+    ".wav": MediaKind.AUDIO,
+    ".wma": MediaKind.AUDIO,
+    ".aiff": MediaKind.AUDIO,
+    ".aif": MediaKind.AUDIO,
+    ".mid": MediaKind.AUDIO,
+    ".midi": MediaKind.AUDIO,
+    ".m3u": MediaKind.AUDIO,
+    ".m3u8": MediaKind.AUDIO,
+    # Documents, PDF apart.
+    ".pdf": MediaKind.PDF,
+    ".doc": MediaKind.DOCUMENT,
+    ".docx": MediaKind.DOCUMENT,
+    ".odt": MediaKind.DOCUMENT,
+    ".rtf": MediaKind.DOCUMENT,
+    ".xls": MediaKind.DOCUMENT,
+    ".xlsx": MediaKind.DOCUMENT,
+    ".ods": MediaKind.DOCUMENT,
+    ".ppt": MediaKind.DOCUMENT,
+    ".pptx": MediaKind.DOCUMENT,
+    ".odp": MediaKind.DOCUMENT,
+    ".epub": MediaKind.DOCUMENT,
+    ".mobi": MediaKind.DOCUMENT,
+    ".azw3": MediaKind.DOCUMENT,
+    ".djvu": MediaKind.DOCUMENT,
+    ".chm": MediaKind.DOCUMENT,
+    ".html": MediaKind.DOCUMENT,
+    ".htm": MediaKind.DOCUMENT,
+    # Archives, disk images included: what a person means by "archive" is a
+    # file they will have to open something else to get inside.
+    ".zip": MediaKind.ARCHIVE,
+    ".rar": MediaKind.ARCHIVE,
+    ".7z": MediaKind.ARCHIVE,
+    ".tar": MediaKind.ARCHIVE,
+    ".gz": MediaKind.ARCHIVE,
+    ".tgz": MediaKind.ARCHIVE,
+    ".bz2": MediaKind.ARCHIVE,
+    ".tbz2": MediaKind.ARCHIVE,
+    ".xz": MediaKind.ARCHIVE,
+    ".zst": MediaKind.ARCHIVE,
+    ".lz": MediaKind.ARCHIVE,
+    ".lzh": MediaKind.ARCHIVE,
+    ".arj": MediaKind.ARCHIVE,
+    ".cab": MediaKind.ARCHIVE,
+    ".iso": MediaKind.ARCHIVE,
+    ".dmg": MediaKind.ARCHIVE,
+    # Text, which is also where Markdown sits. The viewer tells the two apart
+    # when it renders a preview; a filter has no use for the distinction.
+    ".txt": MediaKind.TEXT,
+    ".log": MediaKind.TEXT,
+    ".csv": MediaKind.TEXT,
+    ".tsv": MediaKind.TEXT,
+    ".json": MediaKind.TEXT,
+    ".xml": MediaKind.TEXT,
+    ".yaml": MediaKind.TEXT,
+    ".yml": MediaKind.TEXT,
+    ".toml": MediaKind.TEXT,
+    ".ini": MediaKind.TEXT,
+    ".cfg": MediaKind.TEXT,
+    ".conf": MediaKind.TEXT,
+    ".nfo": MediaKind.TEXT,
+    ".srt": MediaKind.TEXT,
+    ".vtt": MediaKind.TEXT,
+    ".md": MediaKind.TEXT,
+    ".markdown": MediaKind.TEXT,
+}
+"""Which category each suffix falls into; anything absent is :attr:`MediaKind.OTHER`.
+
+Longer than :data:`VIEWABLE` on purpose. That table lists what a browser may be
+shown, so a video and an archive are missing from it entirely — and those are
+exactly the two a person sorting through a crawl most wants to separate out.
+"""
+
+
+def kind_for(filename: str | None) -> MediaKind:
+    """Return what sort of file *filename* is, by its suffix alone.
+
+    ``None`` and a name with no suffix both answer :attr:`MediaKind.OTHER`. The
+    content is never opened: a category is a hint for sorting, and reading a
+    thousand files to compute one would cost more than the sorting saves.
+    """
+    if not filename:
+        return MediaKind.OTHER
+    suffix = PurePosixPath(filename).suffix.lower()
+    return KINDS.get(suffix, MediaKind.OTHER)
+
+
 def verdict_for(
     filename: str, size: int | None = None, *, max_bytes: int = DEFAULT_MAX_VIEW_BYTES
 ) -> MediaVerdict:

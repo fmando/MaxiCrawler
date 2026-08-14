@@ -19,6 +19,7 @@ is what matters, and those come from the same report either way.
 from collections.abc import Container, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlencode
@@ -44,6 +45,7 @@ from maxicrawler.app import (
     StoredPayload,
     TargetKind,
 )
+from maxicrawler.app.viewing import MediaKind
 from maxicrawler.config import Settings
 from maxicrawler.crawler import PluginUsage
 from maxicrawler.database import StoredCrawl
@@ -114,6 +116,22 @@ STATUS_TONES: dict[DownloadStatus, str] = {
     DownloadStatus.FAILED: "bad",
     DownloadStatus.CANCELLED: "idle",
 }
+
+KIND_WORDS: dict[MediaKind, str] = {
+    MediaKind.IMAGE: "images",
+    MediaKind.VIDEO: "video",
+    MediaKind.AUDIO: "audio",
+    MediaKind.PDF: "PDF",
+    MediaKind.DOCUMENT: "documents",
+    MediaKind.ARCHIVE: "archives",
+    MediaKind.TEXT: "text",
+    MediaKind.OTHER: "other",
+}
+"""What each file category is called where somebody picks one.
+
+Plural, because every one of them names a filter rather than a file: the control
+answers "show me the images", not "this is an image".
+"""
 
 KIND_LABELS: dict[LinkKind, str] = {
     LinkKind.ANCHOR: "anchor",
@@ -590,10 +608,12 @@ def library_view(page: LibraryPage) -> dict[str, Any]:
         # the order you had chosen instead of silently resetting it.
         "sort_value": str(query.sort),
         "direction": "desc" if query.descending else "asc",
+        "kind": "" if query.kind is None else str(query.kind),
         "providers": page.providers,
         "statuses": tuple(
             {"value": str(status), "label": STATUS_LABELS[status]} for status in page.statuses
         ),
+        "kinds": tuple({"value": str(kind), "label": KIND_WORDS[kind]} for kind in page.kinds),
         "page": format_number(page.page),
         "pages": format_number(page.pages),
         "previous_url": _library_url(query, page=page.page - 1) if page.has_previous else None,
@@ -699,6 +719,7 @@ def _library_url(query: LibraryQuery, **changes: Any) -> str:
         "q": changes.get("search", query.search),
         "provider": changes.get("provider", query.provider) or "",
         "status": _status_value(changes.get("status", query.status)),
+        "kind": _enum_value(changes.get("kind", query.kind)),
         "sort": str(changes.get("sort", query.sort)),
         "dir": "desc" if changes.get("descending", query.descending) else "asc",
         "page": str(changes.get("page", query.page)),
@@ -715,6 +736,11 @@ def _library_url(query: LibraryQuery, **changes: Any) -> str:
 def _status_value(status: DownloadStatus | None) -> str:
     """Return a status as a query string writes it, or nothing."""
     return "" if status is None else str(status)
+
+
+def _enum_value(value: StrEnum | None) -> str:
+    """Return an optional enumerated filter as a query string writes it."""
+    return "" if value is None else str(value)
 
 
 def _library_row(item: LibraryItem) -> dict[str, Any]:
@@ -735,6 +761,7 @@ def _library_row(item: LibraryItem) -> dict[str, Any]:
         "status": str(item.status),
         "state_label": STATUS_LABELS[item.status],
         "state_tone": STATUS_TONES[item.status],
+        "kind": str(item.kind),
         "url": f"/library/{item.directory}/{item.key}",
     }
 
