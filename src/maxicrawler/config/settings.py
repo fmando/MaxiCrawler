@@ -43,6 +43,25 @@ class Settings:
     nothing about what may be stored.
     """
 
+    preview_inline_bytes: int = 1_000_000
+    """Largest image a tile shows as itself, in bytes.
+
+    A grid of sixty tiles that each loaded the original is a page that transfers
+    what sixty originals weigh — and this server does not usually run on the
+    machine somebody is looking at it from, so those bytes cross a network. The
+    second cost is worse and is not a file size at all: a browser holds a decoded
+    image as a bitmap of four bytes per pixel, so a 300 kB photograph at
+    6000×4000 occupies roughly 96 MB while it is on screen.
+
+    Above the limit a tile shows a symbol and the size, never a scaled-down
+    original — scaling in the browser means the original was transferred and
+    decoded first, which is precisely the cost being avoided.
+
+    One megabyte is a starting value covering the web-sized pictures a crawl
+    mostly returns, and is meant to be measured against a real library rather
+    than trusted. Zero shows no image in any tile.
+    """
+
     min_download_size: int = 100_000
     """Smallest payload worth putting in the library, in bytes.
 
@@ -209,6 +228,9 @@ class Settings:
         if self.max_view_bytes < 1:
             msg = "max_view_bytes must be at least 1"
             raise ValueError(msg)
+        if self.preview_inline_bytes < 0:
+            msg = "preview_inline_bytes must not be negative"
+            raise ValueError(msg)
         if self.min_download_size < 0:
             msg = "min_download_size must not be negative"
             raise ValueError(msg)
@@ -256,6 +278,9 @@ class Settings:
             max_redirects=_int_value(app_config, "max_redirects", defaults.max_redirects),
             max_links=_int_value(app_config, "max_links", defaults.max_links),
             max_view_bytes=_int_value(app_config, "max_view_bytes", defaults.max_view_bytes),
+            preview_inline_bytes=_int_value(
+                app_config, "preview_inline_bytes", defaults.preview_inline_bytes
+            ),
             min_download_size=_int_value(
                 app_config, "min_download_size", defaults.min_download_size
             ),
@@ -302,6 +327,7 @@ class Settings:
             f"max_redirects = {self.max_redirects}\n"
             f"max_links = {self.max_links}\n"
             f"max_view_bytes = {self.max_view_bytes}\n"
+            f"preview_inline_bytes = {self.preview_inline_bytes}\n"
             f"min_download_size = {self.min_download_size}\n"
             f"crawl_depth = {self.crawl_depth}\n"
             f"crawl_max_pages = {self.crawl_max_pages}\n"

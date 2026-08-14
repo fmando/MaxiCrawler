@@ -1,0 +1,38 @@
+{#
+  The library as rows: the dense layout, for reading rather than glancing.
+
+  Every heading is a link that reorders the whole listing, and the preview is a
+  small square in the first column so the two layouts agree about what a file
+  looks like. Nothing here decides anything; the URLs arrive built.
+#}
+<table class="grid library-rows">
+  <thead>
+    <tr>
+      <th class="shot"></th>
+      {% for column in library.columns %}
+        <th{% if column.active %} class="sorted"{% endif %}>
+          <a href="{{ column.url }}">{{ column.label }}{% if column.mark %} <span class="mark">{{ column.mark }}</span>{% endif %}</a>
+        </th>
+      {% endfor %}
+      <th>Path</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for item in library.rows %}
+      <tr>
+        <td class="shot">
+          <a href="{{ item.url }}">{% include "_library_preview.html" %}</a>
+        </td>
+        <td>{{ item.provider }}</td>
+        <td>
+          <a href="{{ item.url }}">{{ item.name }}</a>
+          <div class="muted small url">{{ item.source_url }}</div>
+        </td>
+        <td class="num right">{{ item.size }}</td>
+        <td class="num">{{ item.downloaded_at }}</td>
+        <td><span class="badge {{ item.state_tone }}">{{ item.state_label }}</span></td>
+        <td class="url muted small">{{ item.path }}</td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>

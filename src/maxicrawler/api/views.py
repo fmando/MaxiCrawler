@@ -27,6 +27,7 @@ from urllib.parse import urlencode
 from maxicrawler.api.downloads import DownloadSnapshot, QueueSnapshot, QueueTally
 from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.app import (
+    DEFAULT_PER_PAGE,
     UNTRACKED,
     DownloadProgress,
     DownloadSummary,
@@ -43,6 +44,8 @@ from maxicrawler.app import (
     PageQuery,
     PageSlice,
     PageState,
+    Preview,
+    PreviewShape,
     StoredPayload,
     TargetKind,
 )
@@ -52,7 +55,7 @@ from maxicrawler.crawler import PluginUsage
 from maxicrawler.database import StoredCrawl
 from maxicrawler.domain import DownloadStatus
 from maxicrawler.plugins.generic import GENERIC_PLUGIN_NAME
-from maxicrawler.utils import format_size, strip_fragment
+from maxicrawler.utils import elide_middle, format_size, strip_fragment
 from maxicrawler.web.models import LinkKind
 from maxicrawler.web.report import CrawlReport, PageOutcome, SkipReason
 from maxicrawler.web.session import CrawlOptions, CrawlState
@@ -586,17 +589,89 @@ def _item_url(summary: DownloadSummary | None) -> str | None:
     return f"/library/{summary.directory}/{summary.key}"
 
 
-def library_view(page: LibraryPage) -> dict[str, Any]:
+class LibraryLayout(StrEnum):
+    """Which way the library is laid out. Lives in the URL and nowhere else.
+
+    Not a cookie and not a session: a bookmark of a filtered grid should be a
+    filtered grid when it is opened, and the two ways of looking at the same
+    listing should be two addresses. It is also not part of
+    :class:`~maxicrawler.app.LibraryQuery` — the service answers the same
+    question either way, and a field it never reads would be a field somebody
+    later assumes it does.
+    """
+
+    GRID = "grid"
+    LIST = "list"
+
+    @classmethod
+    def parse(cls, value: str | None) -> "LibraryLayout":
+        """Return the layout *value* names, defaulting to the grid.
+
+        Lenient like every other query parameter: a stale bookmark gets the
+        default rather than a refusal.
+        """
+        try:
+            return cls(value or "")
+        except ValueError:
+            return cls.GRID
+
+
+LAYOUT_WORDS: Mapping[LibraryLayout, str] = MappingProxyType(
+    {LibraryLayout.GRID: "Tiles", LibraryLayout.LIST: "List"}
+)
+"""What each layout is called where somebody switches between them."""
+
+TILE_NAME_LENGTH = 34
+"""How much of a file name a tile shows before eliding the middle of it."""
+
+LAYOUT_PER_PAGE: Mapping[LibraryLayout, int] = MappingProxyType(
+    {LibraryLayout.GRID: 60, LibraryLayout.LIST: DEFAULT_PER_PAGE}
+)
+"""How many entries each layout shows at once.
+
+More in the grid, because a tile is read at a glance and a row is read. Sixty is
+also what the measurement in the sprint's plan is written against: it is the
+number that decides how much a page transfers.
+"""
+
+
+def library_view(
+    page: LibraryPage,
+    previews: tuple[Preview, ...] | None = None,
+    *,
+    layout: LibraryLayout = LibraryLayout.GRID,
+) -> dict[str, Any]:
     """Return what the library page shows, links included.
 
     The sort links and the paging links are built here rather than in the
     template, because each of them is *this* query with one thing changed — and
-    a template assembling query strings is a template deciding something.
+    a template assembling query strings is a template deciding something. The
+    layout rides along the same way, so that no link on the page can drop it.
+
+    *previews* comes from the service and is parallel to ``page.items``. Absent,
+    every tile falls back to its symbol, which is what a caller with no interest
+    in tiles wants and costs it nothing to ask for.
     """
     query = page.query
+    shown = previews if previews is not None else ((None,) * len(page.items))
     return {
-        "rows": tuple(_library_row(item) for item in page.items),
-        "columns": tuple(_column(label, sort, query) for label, sort in COLUMNS),
+        "rows": tuple(
+            _library_row(item, preview) for item, preview in zip(page.items, shown, strict=True)
+        ),
+        "columns": tuple(_column(label, sort, query, layout) for label, sort in COLUMNS),
+        "layout": str(layout),
+        "is_grid": layout is LibraryLayout.GRID,
+        # Both, always, and the one you are on marked rather than hidden: a
+        # control that disappears when it is active is one you cannot find your
+        # way back from.
+        "layouts": tuple(
+            {
+                "label": LAYOUT_WORDS[option],
+                "url": _library_url(query, option, page=1),
+                "active": option is layout,
+            }
+            for option in LibraryLayout
+        ),
         "total": format_number(page.total),
         "stored": format_number(page.stored),
         "shown": f"{format_number(page.first)}–{format_number(page.last)}",
@@ -617,12 +692,14 @@ def library_view(page: LibraryPage) -> dict[str, Any]:
         # URL is the byte count, so a bookmark means one thing.
         "min_size": format_size(query.min_size) if query.min_size is not None else "",
         "max_size": format_size(query.max_size) if query.max_size is not None else "",
-        "facets": _library_facets(page),
+        "facets": _library_facets(page, layout),
         "page": format_number(page.page),
         "pages": format_number(page.pages),
-        "previous_url": _library_url(query, page=page.page - 1) if page.has_previous else None,
-        "next_url": _library_url(query, page=page.page + 1) if page.has_next else None,
-        "reset_url": _library_url(LibraryQuery()),
+        "previous_url": (
+            _library_url(query, layout, page=page.page - 1) if page.has_previous else None
+        ),
+        "next_url": _library_url(query, layout, page=page.page + 1) if page.has_next else None,
+        "reset_url": _library_url(LibraryQuery(), layout),
     }
 
 
@@ -694,7 +771,7 @@ lower band, and being in both would break the same property.
 """
 
 
-def _library_facets(page: LibraryPage) -> tuple[dict[str, Any], ...]:
+def _library_facets(page: LibraryPage, layout: LibraryLayout) -> tuple[dict[str, Any], ...]:
     """Return the chip rows that narrow a listing in one click.
 
     A chip you are standing on links back to the listing without it, so every
@@ -706,11 +783,12 @@ def _library_facets(page: LibraryPage) -> tuple[dict[str, Any], ...]:
     """
     query = page.query
     rows = (
-        _facet_row("Source", page.providers, query, "provider", query.provider or "", str),
+        _facet_row("Source", page.providers, query, layout, "provider", query.provider or "", str),
         _facet_row(
             "Type",
             page.kinds,
             query,
+            layout,
             "kind",
             "" if query.kind is None else str(query.kind),
             lambda value: KIND_WORDS[MediaKind(value)],
@@ -719,12 +797,13 @@ def _library_facets(page: LibraryPage) -> tuple[dict[str, Any], ...]:
             "State",
             page.statuses,
             query,
+            layout,
             "status",
             _status_value(query.status),
             lambda value: STATUS_LABELS[DownloadStatus(value)],
-            extra=_queued_chips(page),
+            extra=_queued_chips(page, layout),
         ),
-        _size_facets(query),
+        _size_facets(query, layout),
     )
     return tuple(row for row in rows if row is not None)
 
@@ -733,6 +812,7 @@ def _facet_row(
     heading: str,
     facets: tuple[LibraryFacet, ...],
     query: LibraryQuery,
+    layout: LibraryLayout,
     name: str,
     active: str,
     label_of: Callable[[str], str],
@@ -749,6 +829,7 @@ def _facet_row(
     chips = [
         _chip(
             query,
+            layout,
             label_of(facet.value),
             facet.count,
             active=facet.value == active,
@@ -760,7 +841,7 @@ def _facet_row(
     return None if len(chips) < 2 else {"heading": heading, "chips": tuple(chips)}
 
 
-def _queued_chips(page: LibraryPage) -> tuple[dict[str, Any], ...]:
+def _queued_chips(page: LibraryPage, layout: LibraryLayout) -> tuple[dict[str, Any], ...]:
     """Return the "waiting" chip, when there is a queue to ask and it holds something.
 
     Offered beside the download states because that is where somebody looks for
@@ -776,12 +857,25 @@ def _queued_chips(page: LibraryPage) -> tuple[dict[str, Any], ...]:
     if page.queued is None or (page.queued == 0 and not query.queued):
         return ()
     return (
-        _chip(page.query, QUEUED_LABEL, page.queued, active=query.queued, queued=not query.queued),
+        _chip(
+            page.query,
+            layout,
+            QUEUED_LABEL,
+            page.queued,
+            active=query.queued,
+            queued=not query.queued,
+        ),
     )
 
 
 def _chip(
-    query: LibraryQuery, label: str, count: int | None, *, active: bool, **changes: Any
+    query: LibraryQuery,
+    layout: LibraryLayout,
+    label: str,
+    count: int | None,
+    *,
+    active: bool,
+    **changes: Any,
 ) -> dict[str, Any]:
     """Return one chip: what it says, whether it is on, and where it leads.
 
@@ -792,11 +886,11 @@ def _chip(
         "label": label,
         "count": "" if count is None else format_number(count),
         "active": active,
-        "url": _library_url(query, page=1, **changes),
+        "url": _library_url(query, layout, page=1, **changes),
     }
 
 
-def _size_facets(query: LibraryQuery) -> dict[str, Any]:
+def _size_facets(query: LibraryQuery, layout: LibraryLayout) -> dict[str, Any]:
     """Return the size bands as chips, with the active one able to switch off.
 
     No counts, and that is the one place these differ from the chips above.
@@ -810,6 +904,7 @@ def _size_facets(query: LibraryQuery) -> dict[str, Any]:
         "chips": tuple(
             _chip(
                 query,
+                layout,
                 label,
                 None,
                 active=query.min_size == low and query.max_size == high,
@@ -834,7 +929,9 @@ SORT_MARKS = {True: "▾", False: "▴"}
 """What marks the column a listing is ordered by, and which way."""
 
 
-def _column(label: str, sort: LibrarySort, query: LibraryQuery) -> dict[str, Any]:
+def _column(
+    label: str, sort: LibrarySort, query: LibraryQuery, layout: LibraryLayout
+) -> dict[str, Any]:
     """Return one column heading, and the link that reorders by it.
 
     Clicking the active column reverses it; clicking another one starts at the
@@ -846,7 +943,7 @@ def _column(label: str, sort: LibrarySort, query: LibraryQuery) -> dict[str, Any
     descending = not query.descending if active else sort in _DESCENDING_FIRST
     return {
         "label": label,
-        "url": _library_url(query, sort=sort, descending=descending, page=1),
+        "url": _library_url(query, layout, sort=sort, descending=descending, page=1),
         "active": active,
         "mark": SORT_MARKS[query.descending] if active else "",
     }
@@ -856,15 +953,17 @@ _DESCENDING_FIRST = frozenset({LibrarySort.SIZE, LibrarySort.DOWNLOADED})
 """Columns whose first click means "biggest first" rather than "smallest"."""
 
 
-def _library_url(query: LibraryQuery, **changes: Any) -> str:
+def _library_url(query: LibraryQuery, layout: LibraryLayout, **changes: Any) -> str:
     """Return the library URL for *query* with *changes* applied.
 
     Only what differs from the default is written into the query string, so an
     unfiltered listing is plain ``/library`` and a bookmarked one carries exactly
-    what it needs.
+    what it needs. The layout follows the same rule and is therefore absent from
+    every grid link: the grid is what ``/library`` means.
     """
     values = {
         "q": changes.get("search", query.search),
+        "view": "" if layout is LibraryLayout.GRID else str(layout),
         "provider": changes.get("provider", query.provider) or "",
         "status": _status_value(changes.get("status", query.status)),
         "kind": _enum_value(changes.get("kind", query.kind)),
@@ -903,12 +1002,29 @@ def _number_value(value: int | None) -> str:
     return "" if value is None else str(value)
 
 
-def _library_row(item: LibraryItem) -> dict[str, Any]:
-    """Return one stored resource as a table row."""
+def _library_row(item: LibraryItem, preview: Preview | None = None) -> dict[str, Any]:
+    """Return one stored resource as a row, and as a tile.
+
+    One dictionary for both layouts rather than two, because they show the same
+    entry: what differs is which template reads which keys. Two builders would
+    make it possible for a tile and a row to disagree about the same file, which
+    is exactly the bug nobody would look for.
+    """
+    base = f"/library/{item.directory}/{item.key}"
+    shape = PreviewShape.SYMBOL if preview is None else preview.shape
     return {
         "provider": item.provider,
         "name": item.name,
+        # Elided here rather than by the stylesheet: CSS can only cut the end
+        # off, which is where the extension is. See `elide_middle`.
+        "short_name": elide_middle(item.name, TILE_NAME_LENGTH),
         "size": format_size(item.size),
+        # What the tile puts where the file would be. The image is the stored
+        # file itself, served by the route that already decides what a browser
+        # may be shown — there is no second delivery path and no generated file.
+        "preview_shape": str(shape),
+        "preview_url": f"{base}/view" if shape is PreviewShape.IMAGE else None,
+        "excerpt": "" if preview is None else preview.excerpt,
         "is_queued": item.queued,
         "downloaded_at": (
             "—" if item.downloaded_at is None else format_timestamp(item.downloaded_at)
@@ -923,7 +1039,8 @@ def _library_row(item: LibraryItem) -> dict[str, Any]:
         "state_label": _entry_label(item),
         "state_tone": _entry_tone(item),
         "kind": str(item.kind),
-        "url": f"/library/{item.directory}/{item.key}",
+        "kind_word": KIND_WORDS[item.kind],
+        "url": base,
     }
 
 
@@ -1724,6 +1841,12 @@ def settings_view(settings: Settings) -> tuple[dict[str, Any], ...]:
                     "max_view_bytes",
                     format_bytes(settings.max_view_bytes),
                     "Largest stored file the browser is offered inline.",
+                ),
+                _setting(
+                    "preview_inline_bytes",
+                    format_size(settings.preview_inline_bytes),
+                    "Largest image a tile shows as itself. Above it a tile "
+                    "shows a symbol, never a scaled-down original.",
                 ),
                 _setting(
                     "min_download_size",

@@ -4,6 +4,7 @@ from maxicrawler.utils.addresses import PrivateNetworkRule, Resolver
 from maxicrawler.utils.formatting import (
     SIZE_UNITS,
     UNKNOWN_SIZE,
+    elide_middle,
     format_size,
     parse_size,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "PrivateNetworkRule",
     "Resolver",
     "configure_logging",
+    "elide_middle",
     "format_size",
     "normalize_url",
     "parse_size",

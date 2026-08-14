@@ -16,10 +16,13 @@ import pytest
 from maxicrawler.app import (
     DEFAULT_PER_PAGE,
     MAX_PER_PAGE,
+    PREVIEW_EXCERPT_BYTES,
+    PREVIEW_EXCERPT_LINES,
     Display,
     LibraryQuery,
     LibraryService,
     LibrarySort,
+    PreviewShape,
     StateResolver,
 )
 from maxicrawler.app.viewing import MediaKind
@@ -788,3 +791,163 @@ def test_the_service_names_where_the_library_is(tmp_path: Path) -> None:
     service, library = make_service(tmp_path)
 
     assert service.library_root == library.root
+
+
+# --- what a tile shows in place of the file -----------------------------------
+
+
+def test_a_small_picture_is_shown_as_itself(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd", name="holiday.jpg", filename="holiday.jpg", size=200_000)
+    item = service.item("mega", key)
+    assert item is not None
+
+    preview = service.preview(item)
+
+    assert preview.shape is PreviewShape.IMAGE
+    assert preview.kind is MediaKind.IMAGE
+    assert preview.excerpt == ""
+
+
+def test_a_large_picture_is_a_symbol_and_never_the_original(tmp_path: Path) -> None:
+    """Sixty originals is what the limit exists to keep off one page."""
+    service, library = make_service(tmp_path, preview_inline_bytes=1_000_000)
+    key = write(library, "AaBbCcDd", name="raw.jpg", filename="raw.jpg", size=4_000_000)
+    item = service.item("mega", key)
+    assert item is not None
+
+    assert service.preview(item).shape is PreviewShape.SYMBOL
+
+
+def test_the_limit_is_inclusive_at_the_top(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path, preview_inline_bytes=1_000_000)
+    key = write(library, "AaBbCcDd", name="exact.jpg", filename="exact.jpg", size=1_000_000)
+    item = service.item("mega", key)
+    assert item is not None
+
+    assert service.preview(item).shape is PreviewShape.IMAGE
+
+
+def test_zero_switches_inline_pictures_off_altogether(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path, preview_inline_bytes=0)
+    key = write(library, "AaBbCcDd", name="holiday.jpg", filename="holiday.jpg", size=1000)
+    item = service.item("mega", key)
+    assert item is not None
+
+    assert service.preview(item).shape is PreviewShape.SYMBOL
+
+
+def test_a_picture_no_browser_is_handed_stays_a_symbol(tmp_path: Path) -> None:
+    """`.tif` is an image to a filter and is not on the viewer's allow-list."""
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd", name="scan.tif", filename="scan.tif", size=1000)
+    item = service.item("mega", key)
+    assert item is not None and item.kind is MediaKind.IMAGE
+
+    assert service.preview(item).shape is PreviewShape.SYMBOL
+
+
+def test_a_text_file_shows_its_first_lines(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    key = write(
+        library,
+        "AaBbCcDd",
+        name="notes.txt",
+        filename="notes.txt",
+        payload=b"first line\nsecond line\n",
+    )
+    item = service.item("mega", key)
+    assert item is not None
+
+    preview = service.preview(item)
+
+    assert preview.shape is PreviewShape.EXCERPT
+    assert preview.excerpt == "first line\nsecond line"
+
+
+def test_an_excerpt_is_bounded_by_lines(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    key = write(
+        library,
+        "AaBbCcDd",
+        name="notes.txt",
+        filename="notes.txt",
+        payload=b"\n".join(f"line {number}".encode() for number in range(100)),
+    )
+    item = service.item("mega", key)
+    assert item is not None
+
+    excerpt = service.preview(item).excerpt
+
+    assert len(excerpt.splitlines()) == PREVIEW_EXCERPT_LINES
+    assert excerpt.startswith("line 0")
+
+
+def test_an_excerpt_is_bounded_by_bytes_as_well(tmp_path: Path) -> None:
+    """One line a megabyte long is still one line; only the read stops it."""
+    service, library = make_service(tmp_path)
+    key = write(
+        library,
+        "AaBbCcDd",
+        name="one.txt",
+        filename="one.txt",
+        payload=b"x" * 1_000_000,
+    )
+    item = service.item("mega", key)
+    assert item is not None
+
+    assert len(service.preview(item).excerpt) <= PREVIEW_EXCERPT_BYTES
+
+
+def test_an_empty_text_file_falls_back_to_its_symbol(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd", name="empty.txt", filename="empty.txt", payload=b"")
+    item = service.item("mega", key)
+    assert item is not None
+
+    assert service.preview(item).shape is PreviewShape.SYMBOL
+
+
+def test_a_record_whose_file_is_gone_shows_a_symbol(tmp_path: Path) -> None:
+    """A broken picture in a tile would be the page's own fault, not the library's."""
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd", name="holiday.jpg", filename="holiday.jpg", size=1000)
+    item = service.item("mega", key)
+    assert item is not None and item.path is not None
+    item.path.unlink()
+
+    assert service.preview(item).shape is PreviewShape.SYMBOL
+
+
+def test_an_entry_with_no_payload_shows_a_symbol(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    key = write(
+        library,
+        "AaBbCcDd",
+        name="holiday.jpg",
+        filename=None,
+        status=DownloadStatus.FAILED,
+    )
+    item = service.item("mega", key)
+    assert item is not None
+
+    preview = service.preview(item)
+
+    assert preview.shape is PreviewShape.SYMBOL
+    assert preview.kind is MediaKind.IMAGE
+
+
+def test_previews_answer_in_the_order_they_were_asked(tmp_path: Path) -> None:
+    """The client zips them against the rows, so the order is the whole contract."""
+    service, library = make_service(tmp_path)
+    write(library, "AaBbCcDd", name="a.jpg", filename="a.jpg", size=1000)
+    write(library, "EeFfGgHh", name="b.zip", filename="b.zip", size=1000)
+    items = service.browse(LibraryQuery(sort=LibrarySort.NAME, descending=False)).items
+
+    previews = service.previews(items)
+
+    assert [preview.kind for preview in previews] == [MediaKind.IMAGE, MediaKind.ARCHIVE]
+    assert [preview.shape for preview in previews] == [
+        PreviewShape.IMAGE,
+        PreviewShape.SYMBOL,
+    ]

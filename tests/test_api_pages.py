@@ -36,7 +36,11 @@ MEGA_URL = f"https://mega.nz/file/AaBbCcDd#{MEGA_KEY}"
 
 @contextmanager
 def client(
-    tmp_path: Path, *, provider: StubProvider | None = None, max_view_bytes: int | None = None
+    tmp_path: Path,
+    *,
+    provider: StubProvider | None = None,
+    max_view_bytes: int | None = None,
+    preview_inline_bytes: int | None = None,
 ) -> Iterator[TestClient]:
     """Yield a client over an application with a throwaway database and library.
 
@@ -55,6 +59,7 @@ def client(
         # and what is being tested is the page rather than the floor.
         min_download_size=0,
         **({} if max_view_bytes is None else {"max_view_bytes": max_view_bytes}),
+        **({} if preview_inline_bytes is None else {"preview_inline_bytes": preview_inline_bytes}),
     )
     service = CrawlService(settings)
     jobs = CrawlJobs(service, persist=False)
@@ -401,12 +406,13 @@ def test_a_category_nobody_recognises_filters_nothing(tmp_path: Path) -> None:
 
 
 def test_the_library_can_be_sorted_by_a_link(tmp_path: Path) -> None:
+    """The sortable headings belong to the dense layout, which is where this looks."""
     with client(tmp_path, provider=make_provider()) as test_client:
         finished_download(test_client)
-        body = test_client.get("/library").text
+        body = test_client.get("/library?view=list").text
 
-        assert 'href="/library?sort=name&amp;dir=asc"' in body
-        assert test_client.get("/library?sort=name&dir=asc").status_code == 200
+        assert 'href="/library?view=list&amp;sort=name&amp;dir=asc"' in body
+        assert test_client.get("/library?view=list&sort=name&dir=asc").status_code == 200
 
 
 def test_a_nonsense_query_string_still_answers(tmp_path: Path) -> None:
@@ -439,7 +445,7 @@ def test_a_row_links_to_the_file_it_describes(tmp_path: Path) -> None:
 def test_the_library_lists_what_was_downloaded(tmp_path: Path) -> None:
     with client(tmp_path, provider=make_provider()) as test_client:
         finished_download(test_client)
-        body = test_client.get("/library").text
+        body = test_client.get("/library?view=list").text
 
     assert "stub.bin" in body
     assert ">mega</td>" in body
@@ -1929,7 +1935,8 @@ def test_the_detail_page_shows_the_path_in_a_field_it_can_be_copied_from(
     with client(tmp_path, provider=make_provider()) as test_client:
         where = stored_item(test_client)
         body = unescape(test_client.get(where).text)
-        listing = unescape(test_client.get("/library").text)
+        # The path is a column of the dense layout; a tile does not carry one.
+        listing = unescape(test_client.get("/library?view=list").text)
 
     assert 'class="path"' in body
     assert "readonly" in body
@@ -1940,6 +1947,64 @@ def test_the_detail_page_shows_the_path_in_a_field_it_can_be_copied_from(
     stored = next((tmp_path / "library").rglob("stub.bin"))
     assert str(stored) in body
     assert str(stored) in listing
+
+
+def test_the_library_opens_as_tiles(tmp_path: Path) -> None:
+    """Sorting through a crawl is looking, not reading, so this is the default."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+        body = test_client.get("/library").text
+
+    assert 'class="tiles"' in body
+    assert "<table" not in body
+
+
+def test_both_layouts_show_the_same_entry(tmp_path: Path) -> None:
+    """One listing, two renderings — never two answers about what is stored."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+        tiles = test_client.get("/library").text
+        rows = test_client.get("/library?view=list").text
+
+    assert "stub.bin" in tiles
+    assert "stub.bin" in rows
+    assert 'class="tiles"' not in rows
+    assert 'href="/library?view=list"' in tiles
+
+
+def test_a_picture_small_enough_is_the_tile(tmp_path: Path) -> None:
+    """No generated file anywhere: the tile points at the viewer's own route."""
+    picture = StubProvider(
+        "mega",
+        url_prefix="https://mega.nz/",
+        capabilities=frozenset({ProviderCapability.INSPECT, ProviderCapability.DOWNLOAD}),
+        payload=b"\x89PNG\r\n\x1a\n" + b"0" * 200,
+        content_name="shot.png",
+    )
+    with client(tmp_path, provider=picture) as test_client:
+        finished_download(test_client)
+        body = test_client.get("/library").text
+
+    assert 'class="shot-image"' in body
+    assert 'loading="lazy"' in body
+    assert "/view" in body
+
+
+def test_a_picture_above_the_limit_never_reaches_a_tile(tmp_path: Path) -> None:
+    """The whole point of the limit: sixty originals must not be one page."""
+    picture = StubProvider(
+        "mega",
+        url_prefix="https://mega.nz/",
+        capabilities=frozenset({ProviderCapability.INSPECT, ProviderCapability.DOWNLOAD}),
+        payload=b"\x89PNG\r\n\x1a\n" + b"0" * 200,
+        content_name="shot.png",
+    )
+    with client(tmp_path, provider=picture, preview_inline_bytes=1) as test_client:
+        finished_download(test_client)
+        body = test_client.get("/library").text
+
+    assert 'class="shot-image"' not in body
+    assert 'class="shot-symbol image"' in body
 
 
 def test_a_file_being_fetched_again_reads_as_waiting_in_the_library(

@@ -1,0 +1,23 @@
+{#
+  One file as a tile.
+
+  The question a tile answers is "do I want to keep this?", not "what exactly
+  is this?" — so it carries the preview, the name, the size and the state, and
+  the source URL, the path and the checksum stay on the detail page.
+
+  The name is elided in the middle by the view, because the end of it is the
+  extension and a column of names all ending in an ellipsis has thrown away the
+  one part that says what each of them is. The full name is in the `title`.
+#}
+<li class="tile{% if item.is_queued %} busy{% endif %}">
+  <a class="tile-shot" href="{{ item.url }}" title="{{ item.name }}">
+    {% include "_library_preview.html" %}
+  </a>
+  <div class="tile-facts">
+    <a class="tile-name" href="{{ item.url }}" title="{{ item.name }}">{{ item.short_name }}</a>
+    <div class="tile-meta">
+      <span class="num">{{ item.size }}</span>
+      <span class="badge {{ item.state_tone }}">{{ item.state_label }}</span>
+    </div>
+  </div>
+</li>

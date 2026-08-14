@@ -34,7 +34,6 @@ from maxicrawler.api.jobs import DEFAULT_RETAINED_JOBS, CrawlJob, CrawlJobs
 from maxicrawler.app import (
     DEFAULT_LINKS_PER_PAGE,
     DEFAULT_PAGES_PER_PAGE,
-    DEFAULT_PER_PAGE,
     DiscoveryService,
     LibraryQuery,
     LibraryService,
@@ -719,11 +718,13 @@ async def library(request: Request) -> Response:
     a better answer to a stale link than a refusal.
     """
     service = library_of(request)
+    layout = views.LibraryLayout.parse(request.query_params.get("view"))
+    listing = service.browse(_query(request, layout))
     return page(
         request,
         "library.html",
         {
-            "library": views.library_view(service.browse(_query(request))),
+            "library": views.library_view(listing, service.previews(listing.items), layout=layout),
             "library_path": service.library_root.as_posix(),
             "running": _running(request),
         },
@@ -844,8 +845,13 @@ def _payload(request: Request) -> StoredPayload:
     return payload
 
 
-def _query(request: Request) -> LibraryQuery:
-    """Return the library query this request asks for."""
+def _query(request: Request, layout: views.LibraryLayout) -> LibraryQuery:
+    """Return the library query this request asks for.
+
+    The layout decides only how many entries one page holds. Everything else
+    about the query is the same either way, which is what makes switching
+    between the two a link rather than a different listing.
+    """
     values = request.query_params
     return LibraryQuery(
         search=values.get("q", "").strip(),
@@ -864,7 +870,7 @@ def _query(request: Request) -> LibraryQuery:
         sort=LibrarySort.parse(values.get("sort"), default=LibraryQuery().sort),
         descending=values.get("dir", "desc") != "asc",
         page=_positive(values.get("page"), default=1),
-        per_page=_positive(values.get("per_page"), default=DEFAULT_PER_PAGE),
+        per_page=_positive(values.get("per_page"), default=views.LAYOUT_PER_PAGE[layout]),
     )
 
 

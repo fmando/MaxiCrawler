@@ -1,0 +1,20 @@
+{#
+  What stands in for one file, in a tile and in a row alike.
+
+  Three shapes, decided by the service and never here: the file itself when it
+  is a picture small enough that a page of them is a page rather than a
+  download, the first lines of it when it is text, and a symbol otherwise. The
+  symbols are drawn by the stylesheet, so no image is generated, cached or
+  written anywhere for any of this.
+
+  `loading="lazy"` matters more than it looks: it is what keeps a grid from
+  fetching sixty files before the first row is on screen.
+#}
+{% if item.preview_shape == "image" %}
+  <img class="shot-image" src="{{ item.preview_url }}" alt=""
+       loading="lazy" decoding="async">
+{% elif item.preview_shape == "excerpt" %}
+  <pre class="shot-text">{{ item.excerpt }}</pre>
+{% else %}
+  <span class="shot-symbol {{ item.kind }}" role="img" aria-label="{{ item.kind_word }}"></span>
+{% endif %}

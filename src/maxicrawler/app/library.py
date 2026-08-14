@@ -58,7 +58,7 @@ from pathlib import Path
 from typing import Any
 
 from maxicrawler.app.discovery import StateResolver
-from maxicrawler.app.viewing import MediaKind, MediaVerdict, kind_for, verdict_for
+from maxicrawler.app.viewing import Display, MediaKind, MediaVerdict, kind_for, verdict_for
 from maxicrawler.config import Settings
 from maxicrawler.database import IndexedEntry, SQLiteDatabase, SQLiteLibraryIndex
 from maxicrawler.domain import DownloadStatus
@@ -172,6 +172,54 @@ class StoredPayload:
     filename: str
     size: int
     media: MediaVerdict
+
+
+class PreviewShape(StrEnum):
+    """What a tile puts where the file would be."""
+
+    IMAGE = "image"
+    """The stored file itself, small enough to be shown as it is."""
+
+    EXCERPT = "excerpt"
+    """The first few lines of it, read here rather than fetched by the browser."""
+
+    SYMBOL = "symbol"
+    """A mark standing for the category. Everything else, including every image
+    too large to send sixty of."""
+
+
+PREVIEW_EXCERPT_BYTES = 2048
+"""How much of a text file a tile reads to show the start of it.
+
+Two kilobytes is more than a tile can display and little enough that sixty of
+them are sixty short reads — the same order as the directory walk a listing
+already does, and bounded whatever the file turns out to be.
+"""
+
+PREVIEW_EXCERPT_LINES = 12
+"""How many lines of that are kept. The rest is what the viewer is for."""
+
+
+@dataclass(frozen=True, slots=True)
+class Preview:
+    """What one tile shows in place of the file.
+
+    A decision, not a rendering: nothing here produces an image, writes a cache
+    or names a URL. The client turns :attr:`shape` into an element, which is the
+    same division :class:`~maxicrawler.app.viewing.MediaVerdict` already keeps —
+    the service says what may be shown, the page says how.
+
+    Should thumbnails ever be generated, they arrive as a fourth shape decided
+    here, and under two rules worth writing down before anybody is tempted: a
+    thumbnail is **only ever a cache**, deletable in full at any moment, and it
+    lives **outside** ``library/``, never beside the file it depicts. A library
+    directory holds what was downloaded and what the download said about itself.
+    """
+
+    shape: PreviewShape
+    kind: MediaKind
+    excerpt: str = ""
+    """The text, for :attr:`PreviewShape.EXCERPT`; empty otherwise."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -411,6 +459,62 @@ class LibraryService:
             size=size,
             media=verdict_for(item.filename, size, max_bytes=self._settings.max_view_bytes),
         )
+
+    def previews(self, items: Iterable[LibraryItem]) -> tuple[Preview, ...]:
+        """Return what each of *items* shows in a tile, in the order given.
+
+        Asked for a page rather than for a library: these are the sixty rows
+        somebody is looking at, and the work is bounded by that. Nothing is
+        cached, because nothing expensive happens — a stat and, for text, one
+        short read.
+
+        One function with three cases rather than a registry of renderers, and
+        deliberately so. A registry would be the shape this needs once something
+        actually *produces* a preview; three branches over what is already on
+        disk is not that, and the abstraction would have to be read before the
+        rule could be.
+        """
+        return tuple(self.preview(item) for item in items)
+
+    def preview(self, item: LibraryItem) -> Preview:
+        """Return what one tile shows in place of *item*'s file.
+
+        The order of the questions is the whole rule. Is there a file at all;
+        may a browser be shown this type; is it small enough that sixty of them
+        are a page rather than a download. Only then is it the image itself.
+        """
+        if item.path is None or item.filename is None or not item.is_stored:
+            return Preview(shape=PreviewShape.SYMBOL, kind=item.kind)
+        try:
+            if not item.path.is_file():
+                return Preview(shape=PreviewShape.SYMBOL, kind=item.kind)
+        except OSError:
+            return Preview(shape=PreviewShape.SYMBOL, kind=item.kind)
+        if self._shows_inline(item):
+            return Preview(shape=PreviewShape.IMAGE, kind=item.kind)
+        if item.kind is MediaKind.TEXT:
+            excerpt = _excerpt(item.path)
+            if excerpt:
+                return Preview(shape=PreviewShape.EXCERPT, kind=item.kind, excerpt=excerpt)
+        return Preview(shape=PreviewShape.SYMBOL, kind=item.kind)
+
+    def _shows_inline(self, item: LibraryItem) -> bool:
+        """Return whether a tile may load *item*'s own bytes as a picture.
+
+        Two gates, and neither is redundant. The first is the viewer's own
+        allow-list, so a category and a content type never drift apart: a
+        ``.tif`` is an image to a filter and remains something no browser here
+        is handed. The second is the size, and it is checked against the
+        recorded number rather than the file, because that is the number the
+        tile also prints.
+        """
+        limit = self._settings.preview_inline_bytes
+        if limit <= 0 or item.size is None or item.size > limit:
+            return False
+        if item.filename is None:
+            return False
+        verdict = verdict_for(item.filename, item.size, max_bytes=self._settings.max_view_bytes)
+        return verdict.display is Display.IMAGE
 
     def stored(self, urls: Iterable[str]) -> frozenset[str]:
         """Return which of *urls* the library holds something fetched from.
@@ -692,6 +796,26 @@ def _kind_of(content: ContentRecord | None, name: str) -> MediaKind:
         if stored is not MediaKind.OTHER:
             return stored
     return kind_for(name)
+
+
+def _excerpt(path: Path) -> str:
+    """Return the first lines of a text file, or nothing when it will not read.
+
+    Bounded twice — by bytes before decoding and by lines after — because either
+    limit alone can be defeated: a file with no newlines is one very long line,
+    and a file of a million short ones would be a million lines.
+
+    Undecodable bytes become the replacement character rather than being
+    dropped. A tile showing a row of them is telling the truth about a file that
+    is named ``.txt`` and is not text, which is worth knowing before opening it.
+    """
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(PREVIEW_EXCERPT_BYTES)
+    except OSError:
+        return ""
+    lines = raw.decode("utf-8", errors="replace").splitlines()[:PREVIEW_EXCERPT_LINES]
+    return "\n".join(lines).strip()
 
 
 def _name(record: ResourceRecord, key: str) -> str:

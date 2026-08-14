@@ -15,6 +15,7 @@ from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.api.views import (
     ABANDONED_LABEL,
     KIND_LABELS,
+    LAYOUT_PER_PAGE,
     LINK_COLUMNS,
     LINK_PARAMS,
     LINK_STATE_LABELS,
@@ -25,7 +26,9 @@ from maxicrawler.api.views import (
     STATE_TONES,
     STATUS_LABELS,
     STATUS_TONES,
+    TILE_NAME_LENGTH,
     TRANSIENT_PARAMS,
+    LibraryLayout,
     QueuedBatch,
     crawl_rows,
     describe_options,
@@ -66,6 +69,8 @@ from maxicrawler.app import (
     LinkState,
     PageQuery,
     PageState,
+    Preview,
+    PreviewShape,
     TargetKind,
     browse_pages,
     target_of,
@@ -2186,6 +2191,105 @@ def test_the_queue_filter_survives_every_other_link() -> None:
 
     assert shown["state"] == "queued"
     assert all("state=queued" in column["url"] for column in shown["columns"])
+
+
+# --- two ways to look at the same listing -------------------------------------
+
+
+def test_the_grid_is_what_the_plain_address_means() -> None:
+    """So a link in the navigation and a bookmark of the default agree."""
+    shown = library_view(library_page((make_item(),)))
+
+    assert shown["layout"] == "grid"
+    assert shown["is_grid"] is True
+    assert all("view=" not in column["url"] for column in shown["columns"])
+
+
+def test_the_list_carries_itself_through_every_link() -> None:
+    """A sort link that dropped the layout would throw somebody out of it."""
+    shown = library_view(
+        library_page((make_item(),), query=LibraryQuery(min_size=1000)),
+        layout=LibraryLayout.LIST,
+    )
+
+    assert shown["is_grid"] is False
+    assert all("view=list" in column["url"] for column in shown["columns"])
+    assert "view=list" in shown["reset_url"]
+    assert all("view=list" in chip["url"] for row in shown["facets"] for chip in row["chips"])
+
+
+def test_both_layouts_are_always_offered_with_the_current_one_marked() -> None:
+    shown = library_view(library_page((make_item(),)), layout=LibraryLayout.LIST)
+
+    offered = {option["label"]: option for option in shown["layouts"]}
+    assert set(offered) == {"Tiles", "List"}
+    assert offered["List"]["active"] is True
+    assert offered["Tiles"]["active"] is False
+    assert offered["Tiles"]["url"] == "/library"
+
+
+def test_the_grid_shows_more_at_once_than_the_list() -> None:
+    """A tile is glanced at, a row is read, so the page sizes differ."""
+    assert LAYOUT_PER_PAGE[LibraryLayout.GRID] > LAYOUT_PER_PAGE[LibraryLayout.LIST]
+
+
+def test_a_layout_nobody_recognises_is_the_grid() -> None:
+    assert LibraryLayout.parse("mosaic") is LibraryLayout.GRID
+    assert LibraryLayout.parse(None) is LibraryLayout.GRID
+    assert LibraryLayout.parse("list") is LibraryLayout.LIST
+
+
+# --- what a tile puts where the file would be ---------------------------------
+
+
+def test_a_small_picture_becomes_the_file_itself() -> None:
+    row = library_view(
+        library_page((make_item("holiday.jpg", kind=MediaKind.IMAGE),)),
+        (Preview(shape=PreviewShape.IMAGE, kind=MediaKind.IMAGE),),
+    )["rows"][0]
+
+    assert row["preview_shape"] == "image"
+    assert row["preview_url"] == "/library/mega/abc/view"
+
+
+def test_a_symbol_names_no_url_at_all() -> None:
+    """The one property that keeps a large original off a page of sixty."""
+    row = library_view(
+        library_page((make_item("raw.jpg", kind=MediaKind.IMAGE),)),
+        (Preview(shape=PreviewShape.SYMBOL, kind=MediaKind.IMAGE),),
+    )["rows"][0]
+
+    assert row["preview_shape"] == "symbol"
+    assert row["preview_url"] is None
+    assert row["kind"] == "image"
+    assert row["kind_word"] == "images"
+
+
+def test_an_excerpt_travels_as_text() -> None:
+    row = library_view(
+        library_page((make_item("notes.txt", kind=MediaKind.TEXT),)),
+        (Preview(shape=PreviewShape.EXCERPT, kind=MediaKind.TEXT, excerpt="first line"),),
+    )["rows"][0]
+
+    assert row["preview_shape"] == "excerpt"
+    assert row["excerpt"] == "first line"
+    assert row["preview_url"] is None
+
+
+def test_without_previews_every_row_falls_back_to_its_symbol() -> None:
+    row = library_view(library_page((make_item(),)))["rows"][0]
+
+    assert row["preview_shape"] == "symbol"
+    assert row["preview_url"] is None
+
+
+def test_a_tile_elides_the_middle_of_a_long_name_and_keeps_the_whole_one() -> None:
+    long_name = "a-very-long-holiday-photograph-name-from-crete.jpeg"
+    row = library_view(library_page((make_item(long_name),)))["rows"][0]
+
+    assert row["name"] == long_name
+    assert row["short_name"].endswith(".jpeg")
+    assert len(row["short_name"]) == TILE_NAME_LENGTH
 
 
 # --- the links the table is navigated by --------------------------------------

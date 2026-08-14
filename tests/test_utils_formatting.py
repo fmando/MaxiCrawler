@@ -9,8 +9,8 @@ about what 1.3 MB is.
 import pytest
 
 from maxicrawler.cli import inspection
-from maxicrawler.utils import SIZE_UNITS, UNKNOWN_SIZE, format_size, parse_size
-from maxicrawler.utils.formatting import SIZE_MULTIPLIERS
+from maxicrawler.utils import SIZE_UNITS, UNKNOWN_SIZE, elide_middle, format_size, parse_size
+from maxicrawler.utils.formatting import ELLIPSIS, SIZE_MULTIPLIERS
 from maxicrawler.utils.formatting import format_size as canonical
 
 
@@ -90,3 +90,28 @@ def test_the_two_directions_share_one_table_of_units() -> None:
     """Otherwise "KB" could mean one thing printed and another read."""
     assert tuple(SIZE_MULTIPLIERS) == SIZE_UNITS
     assert SIZE_MULTIPLIERS["MB"] == 1_000_000
+
+
+# --- shortening a name so its ending survives ---------------------------------
+
+
+def test_a_short_name_is_left_alone() -> None:
+    assert elide_middle("holiday.jpg", 34) == "holiday.jpg"
+    assert elide_middle("x" * 34, 34) == "x" * 34
+
+
+def test_a_long_name_keeps_both_ends() -> None:
+    """The extension is the point: it is what says what the file is."""
+    shortened = elide_middle("a-very-long-holiday-photograph-name.jpeg", 20)
+
+    assert len(shortened) == 20
+    assert shortened.startswith("a-very-long-")
+    assert shortened.endswith(".jpeg")
+    assert ELLIPSIS in shortened
+
+
+def test_a_limit_too_small_to_split_still_answers() -> None:
+    """Nonsense in, something renderable out: never an exception, never longer."""
+    assert elide_middle("holiday.jpg", 1) == ELLIPSIS
+    assert len(elide_middle("holiday.jpg", 2)) == 2
+    assert elide_middle("holiday.jpg", 0) == ELLIPSIS

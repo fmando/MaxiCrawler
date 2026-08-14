@@ -78,3 +78,29 @@ def parse_size(text: str | None) -> int | None:
     if multiplier is None:
         return None
     return int(float(match["number"].replace(",", ".")) * multiplier)
+
+
+ELLIPSIS = "…"
+"""What stands in for the part of a name that was left out."""
+
+
+def elide_middle(text: str, limit: int) -> str:
+    """Return *text* shortened to *limit* characters by dropping its middle.
+
+    The middle rather than the end, because the end of a file name is where the
+    extension is, and a column of names all ending in "…" has thrown away the
+    one character that says what each of them is.
+
+    Two thirds of the budget goes to the front, which is where a name usually
+    differs from its neighbours — ``holiday-2026-crete-0142.jpg`` and
+    ``holiday-2026-crete-0143.jpg`` are told apart at the back, but a listing of
+    unrelated files is told apart at the front, and only one of those is the
+    common case for a library.
+    """
+    if len(text) <= limit:
+        return text
+    keep = limit - len(ELLIPSIS)
+    if keep <= 0:
+        return ELLIPSIS
+    head = (keep * 2) // 3
+    return f"{text[:head]}{ELLIPSIS}{text[len(text) - (keep - head) :]}"
