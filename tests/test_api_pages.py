@@ -509,14 +509,27 @@ def wait_until_finished(test_client: TestClient, job_id: str, *, timeout: float 
     which is both the exact condition the page changes on and impossible to
     fool: a report saying "7 still queued" used to read as a running crawl.
 
-    A crawl that failed never produces a report, so the refusal is asked too.
+    **What is waited for is the report, not the word "finished".** A job counts
+    as finished the moment the engine publishes ``CrawlFinished``, and the
+    engine writes the report to the repository *after* publishing it. Between
+    those two the crawl says it is done and its report is not there yet, so a
+    page fetched in that window renders without a link table — which is not a
+    rare shape of failure here, because the window is a SQLite write of every
+    page and link the crawl found and this loop looks every fifty milliseconds.
+    Asking for 200 is asking for the report: the endpoint answers 409 until the
+    job has one.
+
+    A crawl that failed never produces a report, so the error is asked too —
+    and it is asked *instead* of ``finished``, which is the whole of the fix:
+    ``finished`` is true in the window as well, and it was what made a handful
+    of these tests fail on a loaded machine and pass on a quiet one.
     """
     from time import monotonic, sleep
 
     deadline = monotonic() + timeout
     while monotonic() < deadline:
         response = test_client.get(f"/crawls/{job_id}.json")
-        if response.status_code == 200 or response.json()["finished"]:
+        if response.status_code == 200 or response.json()["error"]:
             return test_client.get(f"/crawls/{job_id}").text
         sleep(0.05)
     raise AssertionError("the crawl did not finish in time")
