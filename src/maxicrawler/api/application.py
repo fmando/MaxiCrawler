@@ -220,6 +220,21 @@ def create_app(
                 name="download_events",
             ),
             Route("/library", routes.library, methods=["GET"], name="library"),
+            # Above `{provider}/{key}`, for the reason `/downloads/pause` sits
+            # above `{download_id}`: a path parameter matches any one segment,
+            # and "review" is one.
+            Route(
+                "/library/review",
+                routes.review_selection,
+                methods=["POST"],
+                name="review_selection",
+            ),
+            Route(
+                "/library/{provider}/{key}/review",
+                routes.review_item,
+                methods=["POST"],
+                name="review_item",
+            ),
             Route(
                 "/library/{provider}/{key}/view",
                 routes.library_view,

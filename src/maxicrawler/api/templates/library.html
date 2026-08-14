@@ -67,6 +67,8 @@
     <input type="hidden" name="kind" value="{{ library.kind }}">
     <input type="hidden" name="status" value="{{ library.status }}">
     <input type="hidden" name="state" value="{{ library.state }}">
+    <input type="hidden" name="verdict" value="{{ library.verdict }}">
+    <input type="hidden" name="fav" value="{{ library.fav }}">
 
     {# So a search does not throw you out of the layout you were working in. #}
     <input type="hidden" name="view" value="{{ library.layout }}">
@@ -91,11 +93,36 @@
   {% endfor %}
 
   {% if library.has_rows %}
+    {#
+      The batch, and the ticks that feed it. The form holds no rows: the
+      checkboxes join it by id, which is what the HTML `form` attribute is for
+      and what lets a tile carry one without nesting a form inside a form
+      (ADR-034, the same arrangement the report's selection uses).
+
+      Without script this is still usable -- tick the boxes and press a button.
+      What `select.js` adds is the header tick and the counter, both rendered
+      hidden and revealed only once something is there to count.
+    #}
+    <form class="batch" id="library-selection" method="post" action="{{ library.review_action }}">
+      <label class="tick-every">
+        <input type="checkbox" class="tick-all" hidden>
+        <span>Select every file on this page</span>
+      </label>
+      {% for button in library.verdict_buttons %}
+        <button type="submit" name="verdict" value="{{ button.verdict }}">{{ button.label }} selected</button>
+      {% endfor %}
+      <button type="submit" name="favourite" value="1">Star selected</button>
+      <span class="chosen muted small" hidden><span class="num">0</span> selected</span>
+    </form>
+
     {% if library.is_grid %}
       {% include "_library_grid.html" %}
     {% else %}
       {% include "_library_table.html" %}
     {% endif %}
+
+    {# Loaded only where there are boxes to tick, as on the report. #}
+    <script src="/static/select.js" defer></script>
 
     <p class="paging">
       <span class="muted">{{ library.shown }} of {{ library.total }}</span>

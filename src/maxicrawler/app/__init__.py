@@ -62,6 +62,7 @@ from maxicrawler.app.library import (
     Preview,
     PreviewShape,
     StoredPayload,
+    parse_verdict,
 )
 from maxicrawler.app.reports import (
     DEFAULT_PAGES_PER_PAGE,
@@ -125,6 +126,7 @@ __all__ = [
     "count_pages",
     "crawl_document",
     "page_document",
+    "parse_verdict",
     "target_of",
     "verdict_for",
 ]

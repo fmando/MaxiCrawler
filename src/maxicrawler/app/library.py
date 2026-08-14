@@ -61,13 +61,14 @@ from maxicrawler.app.discovery import StateResolver
 from maxicrawler.app.viewing import Display, MediaKind, MediaVerdict, kind_for, verdict_for
 from maxicrawler.config import Settings
 from maxicrawler.database import IndexedEntry, SQLiteDatabase, SQLiteLibraryIndex
-from maxicrawler.domain import DownloadStatus
+from maxicrawler.domain import DownloadStatus, ReviewVerdict
 from maxicrawler.library import (
     ContentRecord,
     Library,
     LibraryEntry,
     LibraryError,
     ResourceRecord,
+    ReviewRecord,
 )
 from maxicrawler.utils import strip_fragment
 
@@ -144,6 +145,12 @@ class LibraryItem:
     a person would look for it in.
     """
 
+    verdict: ReviewVerdict = ReviewVerdict.UNREVIEWED
+    """What somebody decided about this, from the entry's own document."""
+
+    favourite: bool = False
+    """Marked worth finding again, independently of :attr:`verdict`."""
+
     queued: bool = False
     """Whether something is waiting or running right now to fetch this again.
 
@@ -172,6 +179,24 @@ class StoredPayload:
     filename: str
     size: int
     media: MediaVerdict
+
+
+def parse_verdict(value: str | None) -> ReviewVerdict | None:
+    """Return the judgement *value* names, or ``None`` when it names none.
+
+    Lives here rather than on the enum because it is a question about a *query*:
+    the value arrives in a query string or a form field, where a stale bookmark
+    and a typed URL are ordinary, and the answer to one nobody recognises is an
+    unfiltered listing rather than a refusal — the same leniency
+    :meth:`~maxicrawler.app.viewing.MediaKind.parse` is read with.
+
+    ``None`` is therefore two things at once, and they agree: *no such verdict*
+    and *no verdict filter*.
+    """
+    try:
+        return ReviewVerdict(value or "")
+    except ValueError:
+        return None
 
 
 class PreviewShape(StrEnum):
@@ -234,6 +259,19 @@ class LibraryQuery:
 
     status: DownloadStatus | None = None
     kind: MediaKind | None = None
+    verdict: ReviewVerdict | None = None
+    """Which judgement to show, or ``None`` for every one but the discarded.
+
+    Discarded entries are hidden unless they are what was asked for, and that
+    asymmetry is the point of the state: *not wanted, and do not offer it to me
+    again*. Showing them beside everything else would make the one verdict that
+    means "out of my way" the one that stays in it — while leaving them
+    unreachable would turn a decision into a deletion.
+    """
+
+    favourite: bool = False
+    """Show only what is starred. A switch beside the verdict, not one of them."""
+
     min_size: int | None = None
     """Smallest payload to show, in bytes; ``None`` for no lower bound."""
 
@@ -271,6 +309,8 @@ class LibraryQuery:
             or self.min_size is not None
             or self.max_size is not None
             or self.queued
+            or self.verdict is not None
+            or self.favourite
         )
 
 
@@ -332,6 +372,16 @@ class LibraryPage:
 
     A library of nothing but images should not offer to show only the videos.
     """
+
+    verdicts: tuple[LibraryFacet, ...] = ()
+    """The judgements present, counted over the whole library.
+
+    Includes the discarded, although the default listing does not show them:
+    the count is how somebody finds their way to the one view that does.
+    """
+
+    favourites: int = 0
+    """How many entries are starred. Always answerable, unlike :attr:`queued`."""
 
     queued: int | None = None
     """How many entries something is queued for, or ``None`` if nobody can say.
@@ -417,6 +467,8 @@ class LibraryService:
             providers=_facets(items, lambda item: item.directory, sorted),
             statuses=_facets(items, lambda item: item.status.value, sorted),
             kinds=_facets(items, lambda item: item.kind.value, _kind_order),
+            verdicts=_facets(items, lambda item: item.verdict.value, _verdict_order),
+            favourites=sum(item.favourite for item in items),
             # Counted over the whole library like every facet beside it, and
             # left absent rather than zero when nothing can answer.
             queued=None if self._queued is None else sum(item.queued for item in items),
@@ -459,6 +511,66 @@ class LibraryService:
             size=size,
             media=verdict_for(item.filename, size, max_bytes=self._settings.max_view_bytes),
         )
+
+    def review(
+        self,
+        provider: str,
+        key: str,
+        *,
+        verdict: ReviewVerdict | None = None,
+        favourite: bool | None = None,
+    ) -> LibraryItem | None:
+        """Record what somebody thinks of one stored resource.
+
+        The only writing this service does, and it writes exactly one member of
+        the document. A download rebuilds every transfer field and carries the
+        review across untouched; this rebuilds the review and carries everything
+        else across untouched. Two writers, disjoint fields — which is what
+        ADR-028 turns into a rule rather than a habit, and what lets a file be
+        fetched again without losing the judgement passed on it.
+
+        Both arguments are optional and ``None`` means *leave this alone*, so
+        starring something says nothing about whether it has been looked at, and
+        judging it does not clear the star.
+
+        ``reviewed_at`` follows the verdict and not the star. It answers "when
+        was this decided", and a decision is what the verdict is; marking
+        something worth finding again is a note about it, not a ruling on it.
+
+        ``None`` when there is no such entry, for the reason :meth:`item`
+        answers ``None``: a name that cannot be a path component, a directory
+        that is not there and a document that will not read are one answer to
+        whoever is handling the request.
+
+        A concurrent download of the same entry can still overwrite this, and is
+        not prevented here: the read and the write are one after the other, and
+        nothing locks the directory. What bounds the damage is that the two
+        writers touch different members, so the worst case is one judgement lost
+        rather than a document that describes two different files.
+
+        Raises:
+            ValueError: the verdict is *discarded*. That word is not an opinion
+                somebody types, it is what a record says after its payload has
+                been removed — and writing it here would produce a tombstone
+                standing over a file that is still there. Everything downstream
+                reads it as "the file is gone, do not fetch it again", so a
+                record that lied about it would quietly make the file
+                unreachable while it sat on disk.
+        """
+        if verdict is ReviewVerdict.DISCARDED:
+            msg = "discarding removes the payload and is not written through review()"
+            raise ValueError(msg)
+        entry = self._library.entry_at(provider, key)
+        if entry is None:
+            return None
+        try:
+            record = entry.read()
+        except LibraryError:
+            return None
+        if record is None:
+            return None
+        entry.write(record.with_review(_reviewed(record.review, verdict, favourite)))
+        return self.item(provider, key)
 
     def previews(self, items: Iterable[LibraryItem]) -> tuple[Preview, ...]:
         """Return what each of *items* shows in a tile, in the order given.
@@ -728,12 +840,15 @@ def _item_from_record(
     """
     content = record.content
     name = _name(record, key)
+    review = record.review
     return LibraryItem(
         provider=record.provider,
         directory=directory,
         key=key,
         name=name,
         kind=_kind_of(content, name),
+        verdict=record.verdict,
+        favourite=review is not None and review.favourite,
         status=record.status,
         source_url=record.source_url,
         filename=None if content is None else content.filename,
@@ -763,6 +878,18 @@ def _facets(
         value = value_of(item)
         counts[value] = counts.get(value, 0) + 1
     return tuple(LibraryFacet(value=value, count=counts[value]) for value in order(counts))
+
+
+def _verdict_order(values: Iterable[str]) -> list[str]:
+    """Return the judgements in the order they are offered in.
+
+    Declaration order, for the reason :func:`_kind_order` gives — and here it
+    matters more: "unreviewed" is declared first because it is the pile somebody
+    sits down to work through, and sorting these as strings would bury it under
+    "discarded" and "ignored".
+    """
+    present = set(values)
+    return [verdict.value for verdict in ReviewVerdict if verdict.value in present]
 
 
 def _kind_order(values: Iterable[str]) -> list[str]:
@@ -796,6 +923,31 @@ def _kind_of(content: ContentRecord | None, name: str) -> MediaKind:
         if stored is not MediaKind.OTHER:
             return stored
     return kind_for(name)
+
+
+def _reviewed(
+    previous: ReviewRecord | None,
+    verdict: ReviewVerdict | None,
+    favourite: bool | None,
+) -> ReviewRecord:
+    """Return the judgement that results from saying *verdict* and *favourite*.
+
+    Built from the previous one rather than from nothing, so that the two
+    statements a person can make about an entry stay independent: neither
+    argument being given leaves the record as it was, and giving one leaves the
+    other alone.
+    """
+    current = previous if previous is not None else ReviewRecord()
+    if verdict is None or verdict is current.verdict:
+        decided = current.reviewed_at
+    else:
+        decided = datetime.now(UTC)
+    return ReviewRecord(
+        verdict=current.verdict if verdict is None else verdict,
+        favourite=current.favourite if favourite is None else favourite,
+        reviewed_at=decided,
+        payload_removed_at=current.payload_removed_at,
+    )
 
 
 def _excerpt(path: Path) -> str:
@@ -875,6 +1027,7 @@ def _indexed(entry: LibraryEntry, stamp: tuple[int, int]) -> IndexedEntry | None
         return None
     record = _record_of(document)
     content = None if record is None else record.content
+    review = None if record is None else record.review
     return IndexedEntry(
         directory=entry.provider,
         key=entry.key,
@@ -883,6 +1036,8 @@ def _indexed(entry: LibraryEntry, stamp: tuple[int, int]) -> IndexedEntry | None
         document=document,
         source_url="" if record is None else record.source_url,
         status="" if record is None else record.status.value,
+        verdict="" if record is None else record.verdict.value,
+        favourite=review is not None and review.favourite,
         checksum=None if content is None else content.checksum("sha256"),
     )
 
@@ -923,6 +1078,10 @@ def _matches(item: LibraryItem, query: LibraryQuery) -> bool:
         return False
     if query.kind is not None and item.kind is not query.kind:
         return False
+    if not _wanted_verdict(item.verdict, query.verdict):
+        return False
+    if query.favourite and not item.favourite:
+        return False
     if query.queued and not item.queued:
         return False
     if not _within_size(item.size, query):
@@ -932,6 +1091,19 @@ def _matches(item: LibraryItem, query: LibraryQuery) -> bool:
     needle = query.search.casefold()
     haystack = (item.name, item.filename or "", item.source_url)
     return any(needle in value.casefold() for value in haystack)
+
+
+def _wanted_verdict(verdict: ReviewVerdict, asked: ReviewVerdict | None) -> bool:
+    """Return whether an entry judged *verdict* belongs in a listing asking *asked*.
+
+    The one filter that is not simply "equal or unset". Asking for nothing in
+    particular means everything except what was discarded, because a discarded
+    entry is one somebody has already said they do not want to see — and the
+    listing that would keep showing it is the listing they said it about.
+    """
+    if asked is None:
+        return verdict is not ReviewVerdict.DISCARDED
+    return verdict is asked
 
 
 def _within_size(size: int | None, query: LibraryQuery) -> bool:

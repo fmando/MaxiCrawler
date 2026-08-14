@@ -14,6 +14,7 @@ import os
 import shutil
 import sqlite3
 from collections.abc import Iterable
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from maxicrawler.app import LibraryService
 from maxicrawler.app.library import _read_document
 from maxicrawler.config import Settings
 from maxicrawler.database import IndexedEntry, SQLiteDatabase, SQLiteLibraryIndex
+from maxicrawler.database.library import ADDED_COLUMNS, SCHEMA
 from maxicrawler.domain import DownloadStatus, ResourceKind, ResourceRef
 from maxicrawler.library import Library
 
@@ -489,3 +491,63 @@ def test_an_entry_stored_since_the_last_question_is_seen(tmp_path: Path) -> None
     write(library, "two")
 
     assert service.stored(["https://mega.nz/file/two"]) == frozenset({"https://mega.nz/file/two"})
+
+
+# --- the columns that arrived with judgements ---------------------------------
+
+
+def test_a_table_from_the_previous_release_gains_the_new_columns(tmp_path: Path) -> None:
+    """`CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists."""
+    database = SQLiteDatabase(tmp_path / "library.db")
+    with closing(database.connect()) as connection, connection:
+        connection.execute(
+            "CREATE TABLE library_entries ("
+            "root TEXT NOT NULL, directory TEXT NOT NULL, key TEXT NOT NULL, "
+            "mtime_ns INTEGER NOT NULL, size INTEGER NOT NULL, "
+            "source_url TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '', "
+            "checksum TEXT, entry_id TEXT, document TEXT NOT NULL, "
+            "PRIMARY KEY (root, directory, key))"
+        )
+        connection.execute(
+            "INSERT INTO library_entries("
+            "root, directory, key, mtime_ns, size, source_url, status, document"
+            ") VALUES('/lib', 'mega', 'abc', 1, 2, 'https://mega.nz/file/x', 'completed', '{}')"
+        )
+
+    added = SQLiteLibraryIndex(database).initialize()
+
+    assert set(added) == set(ADDED_COLUMNS)
+    rows = SQLiteLibraryIndex(database).entries("/lib")
+    assert rows[("mega", "abc")].verdict == ""
+    assert rows[("mega", "abc")].favourite is False
+
+
+def test_a_judgement_is_cached_beside_the_document(tmp_path: Path) -> None:
+    index = SQLiteLibraryIndex(SQLiteDatabase(tmp_path / "library.db"))
+    index.initialize()
+
+    index.refresh(
+        "/lib",
+        updated=[
+            IndexedEntry(
+                directory="mega",
+                key="abc",
+                mtime_ns=1,
+                size=2,
+                document="{}",
+                verdict="kept",
+                favourite=True,
+            )
+        ],
+    )
+
+    row = index.entries("/lib")[("mega", "abc")]
+    assert row.verdict == "kept"
+    assert row.favourite is True
+
+
+def test_the_declared_columns_match_the_schema() -> None:
+    """Forgetting an entry here fails a test rather than an operator's library."""
+    created = SCHEMA[0]
+    for column in ADDED_COLUMNS:
+        assert f"{column} " in created

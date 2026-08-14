@@ -23,6 +23,7 @@ from maxicrawler.domain import (
     ResourceKind,
     ResourceMetadata,
     ResourceRef,
+    ReviewVerdict,
 )
 from maxicrawler.downloader import (
     DownloadControl,
@@ -36,7 +37,6 @@ from maxicrawler.library import (
     METADATA_FILENAME,
     Library,
     ReviewRecord,
-    ReviewVerdict,
 )
 from maxicrawler.providers import ProviderRegistry, ProviderTransportError
 

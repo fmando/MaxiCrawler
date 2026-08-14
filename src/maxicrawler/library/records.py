@@ -22,12 +22,17 @@ infrastructure.
 """
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from enum import StrEnum
 from typing import Any
 
-from maxicrawler.domain import Checksum, DownloadStatus, ResourceKind, ResourceRef
+from maxicrawler.domain import (
+    Checksum,
+    DownloadStatus,
+    ResourceKind,
+    ResourceRef,
+    ReviewVerdict,
+)
 from maxicrawler.library.errors import LibraryRecordError
 
 RECORD_SCHEMA = 1
@@ -69,41 +74,6 @@ _KNOWN_KEYS = frozenset(
     }
 )
 """Members this release understands; anything else is carried in ``extra``."""
-
-
-class ReviewVerdict(StrEnum):
-    """What a person decided about a stored resource.
-
-    Deliberately *not* a member of
-    :class:`~maxicrawler.domain.downloads.DownloadStatus`. That enum records how
-    a transfer ended — something that happened to the resource — and this one
-    records what somebody thought of the result. A file can perfectly well have
-    arrived completely and be worthless, and one vocabulary covering both would
-    have to answer "did this download work?" with "the person did not like it".
-    """
-
-    UNREVIEWED = "unreviewed"
-    """Nobody has judged this yet. The state every stored resource starts in."""
-
-    KEPT = "kept"
-    """Worth having. Nothing follows from it except that it has been looked at."""
-
-    IGNORED = "ignored"
-    """Not interesting, but not in the way. The payload stays on disk."""
-
-    DISCARDED = "discarded"
-    """Not wanted, and the payload has been removed.
-
-    The record stays behind as a tombstone, and that is the entire point of it:
-    it is the only thing that stops the next bulk queue from fetching the file
-    again, because "the library holds it" is answered by the record *and* the
-    file, and the file is gone.
-    """
-
-    @property
-    def is_dismissed(self) -> bool:
-        """Return whether this verdict means *do not offer this to me again*."""
-        return self in {ReviewVerdict.IGNORED, ReviewVerdict.DISCARDED}
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +221,17 @@ class ResourceRecord:
         looked at this" a value rather than an absence.
         """
         return ReviewVerdict.UNREVIEWED if self.review is None else self.review.verdict
+
+    def with_review(self, review: ReviewRecord) -> "ResourceRecord":
+        """Return this record carrying *review* and otherwise unchanged.
+
+        The one supported way to write a judgement, and narrow on purpose. A
+        caller that rebuilt the record instead would have to restate every
+        transfer field — and would drop :attr:`extra` while doing it, which is
+        the exact fault ADR-013 exists to prevent and which the downloader had
+        until this sprint.
+        """
+        return replace(self, review=review)
 
     def to_document(self) -> dict[str, Any]:
         """Return the serializable description of this resource.

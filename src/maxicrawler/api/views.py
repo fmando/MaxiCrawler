@@ -53,7 +53,7 @@ from maxicrawler.app.viewing import MediaKind
 from maxicrawler.config import Settings
 from maxicrawler.crawler import PluginUsage
 from maxicrawler.database import StoredCrawl
-from maxicrawler.domain import DownloadStatus
+from maxicrawler.domain import DownloadStatus, ReviewVerdict
 from maxicrawler.plugins.generic import GENERIC_PLUGIN_NAME
 from maxicrawler.utils import elide_middle, format_size, strip_fragment
 from maxicrawler.web.models import LinkKind
@@ -589,6 +589,46 @@ def _item_url(summary: DownloadSummary | None) -> str | None:
     return f"/library/{summary.directory}/{summary.key}"
 
 
+VERDICT_WORDS: Mapping[ReviewVerdict, str] = MappingProxyType(
+    {
+        ReviewVerdict.UNREVIEWED: "unreviewed",
+        ReviewVerdict.KEPT: "kept",
+        ReviewVerdict.IGNORED: "ignored",
+        ReviewVerdict.DISCARDED: "discarded",
+    }
+)
+"""What each judgement is called where somebody filters by it."""
+
+FAVOURITE_LABEL = "starred"
+"""What the star is called in a filter, where it names a set rather than a file."""
+
+FAVOURITE_MARK = "★"
+UNFAVOURITE_MARK = "☆"
+"""Filled and hollow, so the button says which way it would go by looking like it."""
+
+VERDICT_BUTTONS: tuple[tuple[ReviewVerdict, str, str], ...] = (
+    (ReviewVerdict.KEPT, "Keep", "Worth having"),
+    (ReviewVerdict.IGNORED, "Ignore", "Not interesting, but leave the file alone"),
+)
+"""The judgements a button offers, and what each one promises.
+
+Discarding is missing on purpose and arrives with the step that removes the
+payload. A button called "Discard" that only wrote a word would be a button
+whose name is a plan rather than a description.
+
+"Unreviewed" is missing too, and differently: it is not a judgement somebody
+passes but the absence of one, so it is offered as *undo* on an entry that has
+already been judged rather than as a third opinion.
+"""
+
+
+VERDICT_CHOICES: tuple[Mapping[str, str], ...] = tuple(
+    MappingProxyType({"verdict": str(value), "label": label, "hint": hint})
+    for value, label, hint in VERDICT_BUTTONS
+)
+"""The buttons, as a template reads them. Built once; the same on every row."""
+
+
 class LibraryLayout(StrEnum):
     """Which way the library is laid out. Lives in the URL and nowhere else.
 
@@ -656,7 +696,8 @@ def library_view(
     shown = previews if previews is not None else ((None,) * len(page.items))
     return {
         "rows": tuple(
-            _library_row(item, preview) for item, preview in zip(page.items, shown, strict=True)
+            _library_row(item, preview, back=_library_url(query, layout))
+            for item, preview in zip(page.items, shown, strict=True)
         ),
         "columns": tuple(_column(label, sort, query, layout) for label, sort in COLUMNS),
         "layout": str(layout),
@@ -686,6 +727,13 @@ def library_view(
         "direction": "desc" if query.descending else "asc",
         "kind": "" if query.kind is None else str(query.kind),
         "state": "queued" if query.queued else "",
+        "verdict": _enum_value(query.verdict),
+        "fav": "1" if query.favourite else "",
+        # Where the batch of ticked entries is posted, and where it comes back
+        # to: the listing exactly as it is now, so a judgement lands you where
+        # you were rather than at the top of an unfiltered library.
+        "review_action": _review_action("/library/review", _library_url(query, layout)),
+        "verdict_buttons": VERDICT_CHOICES,
         # Shown in the two boxes, and rounded to what `format_size` prints: a
         # bound is a coarse instrument, and "1.2 MB" beside a listing that says
         # "1.3 MB" everywhere else would be the odd one out. What travels in the
@@ -703,7 +751,9 @@ def library_view(
     }
 
 
-def item_view(item: LibraryItem, payload: StoredPayload | None) -> dict[str, Any]:
+def item_view(
+    item: LibraryItem, payload: StoredPayload | None, *, back: str = "/library"
+) -> dict[str, Any]:
     """Return what one stored file's page shows.
 
     *payload* is what the service found on disk, and is ``None`` for two very
@@ -734,7 +784,7 @@ def item_view(item: LibraryItem, payload: StoredPayload | None) -> dict[str, Any
         "checksum": item.checksum,
         "attempts": format_number(item.attempts),
         "error": item.error,
-        "library_url": "/library",
+        "library_url": back,
         "file_url": f"{base}/file" if payload is not None else None,
         "is_stored": payload is not None,
         # How, and whether, the page embeds the file itself. `display` is the
@@ -752,6 +802,11 @@ def item_view(item: LibraryItem, payload: StoredPayload | None) -> dict[str, Any
         # sentence, because the answer is to download it again rather than to
         # wonder what the page means.
         "payload_missing": payload is None and item.is_stored,
+        # Judging from here lands back *here*, not in the listing: somebody
+        # standing on one file is looking at it, and being thrown back to a
+        # table would be the interface deciding they were finished. The listing
+        # they came from rides along so the breadcrumb still knows the way.
+        **_review_of(item, base, _here(base, back)),
     }
 
 
@@ -783,6 +838,18 @@ def _library_facets(page: LibraryPage, layout: LibraryLayout) -> tuple[dict[str,
     """
     query = page.query
     rows = (
+        # First, because it is the row somebody sorting through a crawl works
+        # from: which of these have I not looked at yet.
+        _facet_row(
+            "Review",
+            page.verdicts,
+            query,
+            layout,
+            "verdict",
+            _enum_value(query.verdict),
+            lambda value: VERDICT_WORDS[ReviewVerdict(value)],
+            extra=_favourite_chips(page, layout),
+        ),
         _facet_row("Source", page.providers, query, layout, "provider", query.provider or "", str),
         _facet_row(
             "Type",
@@ -839,6 +906,29 @@ def _facet_row(
     ]
     chips.extend(extra)
     return None if len(chips) < 2 else {"heading": heading, "chips": tuple(chips)}
+
+
+def _favourite_chips(page: LibraryPage, layout: LibraryLayout) -> tuple[dict[str, Any], ...]:
+    """Return the "starred" chip, when anything is starred or it is the filter on.
+
+    Beside the verdicts although it is not one of them, for the reason the queue
+    chip sits beside the download states: the group is what somebody looks
+    through to narrow a listing, and which of its chips come from the same
+    vocabulary is this module's problem rather than theirs.
+    """
+    query = page.query
+    if page.favourites == 0 and not query.favourite:
+        return ()
+    return (
+        _chip(
+            query,
+            layout,
+            FAVOURITE_LABEL,
+            page.favourites,
+            active=query.favourite,
+            favourite=not query.favourite,
+        ),
+    )
 
 
 def _queued_chips(page: LibraryPage, layout: LibraryLayout) -> tuple[dict[str, Any], ...]:
@@ -969,6 +1059,8 @@ def _library_url(query: LibraryQuery, layout: LibraryLayout, **changes: Any) -> 
         "kind": _enum_value(changes.get("kind", query.kind)),
         "min": _number_value(changes.get("min_size", query.min_size)),
         "max": _number_value(changes.get("max_size", query.max_size)),
+        "verdict": _enum_value(changes.get("verdict", query.verdict)),
+        "fav": "1" if changes.get("favourite", query.favourite) else "",
         "state": "queued" if changes.get("queued", query.queued) else "",
         "sort": str(changes.get("sort", query.sort)),
         "dir": "desc" if changes.get("descending", query.descending) else "asc",
@@ -1002,7 +1094,9 @@ def _number_value(value: int | None) -> str:
     return "" if value is None else str(value)
 
 
-def _library_row(item: LibraryItem, preview: Preview | None = None) -> dict[str, Any]:
+def _library_row(
+    item: LibraryItem, preview: Preview | None = None, *, back: str = "/library"
+) -> dict[str, Any]:
     """Return one stored resource as a row, and as a tile.
 
     One dictionary for both layouts rather than two, because they show the same
@@ -1041,7 +1135,56 @@ def _library_row(item: LibraryItem, preview: Preview | None = None) -> dict[str,
         "kind": str(item.kind),
         "kind_word": KIND_WORDS[item.kind],
         "url": base,
+        **_review_of(item, base, back),
     }
+
+
+def _review_of(item: LibraryItem, base: str, back: str) -> dict[str, Any]:
+    """Return what a row says and offers about the judgement passed on it.
+
+    The same keys on a tile, on a table row and on the file's own page, because
+    the four buttons are the same four buttons everywhere — which is most of
+    what makes judging a hundred files feel like one action repeated rather than
+    three interfaces.
+    """
+    return {
+        "verdict": str(item.verdict),
+        "verdict_word": VERDICT_WORDS[item.verdict],
+        "is_reviewed": item.verdict is not ReviewVerdict.UNREVIEWED,
+        "is_favourite": item.favourite,
+        # Filled or hollow, and the value it would send is the opposite of what
+        # it shows: the button says what is true now and does the other thing.
+        "favourite_mark": FAVOURITE_MARK if item.favourite else UNFAVOURITE_MARK,
+        "favourite_value": "0" if item.favourite else "1",
+        "entry_token": f"{item.directory}/{item.key}",
+        "review_action": _review_action(f"{base}/review", back),
+        # Carried on the row rather than beside it, so the partial that renders
+        # the buttons reads the same name whether it is inside a tile, a table
+        # row or one file's own page.
+        "verdict_buttons": VERDICT_CHOICES,
+    }
+
+
+def _here(base: str, back: str) -> str:
+    """Return this file's own page, carrying where the listing was.
+
+    Written out rather than taken from the request, because this module never
+    sees one — which is what lets every link on the page be tested without a
+    server.
+    """
+    return base if back == "/library" else f"{base}?{urlencode({'back': back})}"
+
+
+def _review_action(path: str, back: str) -> str:
+    """Return where a judgement is posted, carrying where to land afterwards.
+
+    On the action rather than in a hidden field, which is the arrangement
+    ADR-039 settled on: the same button sits on a listing, on a tile and on a
+    file's own page, and each of those is a different place to come back to.
+    :func:`~maxicrawler.api.routes._our_path` is what makes the parameter safe
+    to obey.
+    """
+    return f"{path}?{urlencode({'back': back})}"
 
 
 def _entry_label(item: LibraryItem) -> str:

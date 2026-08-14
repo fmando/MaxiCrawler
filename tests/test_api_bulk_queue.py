@@ -179,7 +179,9 @@ def test_the_selection_script_is_served(tmp_path: Path) -> None:
         response = test_client.get("/static/select.js")
 
         assert response.status_code == 200
-        assert "link-selection" in response.text
+        # It finds its boxes by the marker, not by this page's form id: the
+        # library has a selection of its own now and shares the script.
+        assert "data-tick" in response.text
 
 
 def test_the_checkboxes_belong_to_a_form_they_are_not_inside(tmp_path: Path) -> None:

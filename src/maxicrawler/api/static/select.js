@@ -18,13 +18,19 @@
  *
  * "Every link on this page" is meant exactly. The other button queues every
  * link the *filter* matches, which is a different set and is resolved on the
- * server; this one is the rows you can see.
+ * server; this one is the rows you can see. The library's own selection means
+ * the same thing about the files it shows.
  */
 (function () {
   "use strict";
 
+  // Found by a marker attribute rather than by name and form id, because two
+  // pages have a selection now and they tick different things: a report ticks
+  // links to queue, the library ticks files to judge. What they share is the
+  // arrangement -- boxes joined to one form by id -- and that is what this is
+  // about, so the marker names the arrangement instead of either page.
   var boxes = Array.prototype.slice.call(
-    document.querySelectorAll('input[type="checkbox"][name="url"][form="link-selection"]')
+    document.querySelectorAll('input[type="checkbox"][data-tick]')
   );
   if (!boxes.length) {
     return;

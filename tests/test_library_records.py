@@ -7,14 +7,13 @@ from typing import Any
 import pytest
 from doubles import make_ref
 
-from maxicrawler.domain import Checksum, DownloadStatus, ResourceKind
+from maxicrawler.domain import Checksum, DownloadStatus, ResourceKind, ReviewVerdict
 from maxicrawler.library import (
     RECORD_SCHEMA,
     ContentRecord,
     LibraryRecordError,
     ResourceRecord,
     ReviewRecord,
-    ReviewVerdict,
     new_record,
 )
 from maxicrawler.library.records import _KNOWN_KEYS

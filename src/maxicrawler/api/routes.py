@@ -47,6 +47,7 @@ from maxicrawler.app import (
     TargetKind,
     browse_pages,
     crawl_document,
+    parse_verdict,
 )
 from maxicrawler.app.viewing import DOWNLOAD_CONTENT_TYPE, MediaKind
 from maxicrawler.domain import DownloadStatus
@@ -732,6 +733,80 @@ async def library(request: Request) -> Response:
     )
 
 
+async def review_item(request: Request) -> Response:
+    """Record what somebody thinks of one stored file, and go back to it.
+
+    One route for both statements a person can make. A form submits either a
+    ``verdict`` or a ``favourite``, because the buttons that send them are
+    different buttons — and a submit button contributes only its own name and
+    value, which is what lets three of them share one form and one route.
+
+    Lands wherever the form's action said, checked by :func:`_our_path`. Without
+    a ``back`` it lands on the file's own page, which is where somebody judging
+    a single file is standing.
+
+    Raises:
+        HTTPException: nothing here is addressed by those two names, or the
+            form asked for a judgement this route does not write — see
+            :meth:`~maxicrawler.app.LibraryService.review`.
+    """
+    form = await read_form(request)
+    provider = request.path_params["provider"]
+    key = request.path_params["key"]
+    try:
+        item = library_of(request).review(
+            provider,
+            key,
+            verdict=parse_verdict(form.get("verdict")),
+            favourite=_flag(form.get("favourite")),
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if item is None:
+        raise HTTPException(status_code=404, detail="no such stored file")
+    return RedirectResponse(url=_back_to(request, f"/library/{provider}/{key}"), status_code=303)
+
+
+async def review_selection(request: Request) -> Response:
+    """Record the same judgement about every file that was ticked.
+
+    Partial by design, the way queueing a selection is: an entry that has since
+    been removed is skipped rather than turned into a refusal of the other
+    ninety-nine. Nothing is reported back about how many were skipped, because
+    the listing somebody lands on says what each of them is now — which is the
+    same information, about the rows rather than about the request.
+
+    The ticks are gone afterwards and are deliberately not restored. What comes
+    back instead is rows carrying their new verdict, which is what was being
+    asked for.
+    """
+    form = await read_forms(request)
+    verdict = parse_verdict(_one(form, "verdict") or None)
+    favourite = _flag(_one(form, "favourite") or None)
+    shelf = library_of(request)
+    if verdict is not None or favourite is not None:
+        for token in form.get("entry", ()):
+            directory, _, key = token.partition("/")
+            if directory and key:
+                try:
+                    shelf.review(directory, key, verdict=verdict, favourite=favourite)
+                except ValueError as error:
+                    raise HTTPException(status_code=400, detail=str(error)) from error
+    return RedirectResponse(url=_back_to(request, "/library"), status_code=303)
+
+
+def _flag(value: str | None) -> bool | None:
+    """Return the switch *value* sets, or ``None`` when it says nothing.
+
+    ``None`` rather than ``False`` for an absent field, because absent means
+    *this form was not about the star* — and reading it as "not a favourite"
+    would make every verdict button quietly unstar what it judged.
+    """
+    if value is None:
+        return None
+    return value not in {"", "0", "false"}
+
+
 async def library_item(request: Request) -> Response:
     """Show everything one stored file is known to be.
 
@@ -750,7 +825,10 @@ async def library_item(request: Request) -> Response:
     return page(
         request,
         "library_item.html",
-        {"item": views.item_view(item, payload)},
+        # Where "back to the library" goes, and where a judgement passed here
+        # lands: the listing somebody came from, filters and all, when the link
+        # that led here said so.
+        {"item": views.item_view(item, payload, back=_back_to(request, "/library"))},
         section="library",
     )
 
@@ -858,6 +936,8 @@ def _query(request: Request, layout: views.LibraryLayout) -> LibraryQuery:
         provider=values.get("provider") or None,
         status=_status(values.get("status")),
         kind=MediaKind.parse(values.get("kind")),
+        verdict=parse_verdict(values.get("verdict")),
+        favourite=values.get("fav") == "1",
         # Read with the same parser the boxes are labelled by, so "10 MB" typed
         # into a field and 10000000 carried by a chip are one filter.
         min_size=parse_size(values.get("min")),

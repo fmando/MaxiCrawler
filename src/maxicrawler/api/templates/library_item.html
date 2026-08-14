@@ -15,7 +15,7 @@
 
 {% block crumbs %}
 <nav class="crumbs">
-  <a href="/library">Library</a> <span class="muted">/</span> <span>{{ item.name }}</span>
+  <a href="{{ item.library_url }}">Library</a> <span class="muted">/</span> <span>{{ item.name }}</span>
 </nav>
 {% endblock %}
 
@@ -26,6 +26,16 @@
     <span class="url">{{ item.name }}</span>
     {% if item.file_url %}<a class="aside" href="{{ item.file_url }}">Download</a>{% endif %}
   </h2>
+
+  {#
+    The four buttons, in the same order and with the same words as on a tile.
+    Judging from here lands back here, because that is where somebody standing
+    on one file is; judging from a listing lands back in the listing.
+  #}
+  <div class="review-bar">
+    {% include "_library_verdicts.html" %}
+    {% if item.is_reviewed %}<span class="verdict-mark">{{ item.verdict_word }}</span>{% endif %}
+  </div>
 
   <div class="body">
     {% if item.payload_missing %}

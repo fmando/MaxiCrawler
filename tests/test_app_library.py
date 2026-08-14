@@ -24,10 +24,11 @@ from maxicrawler.app import (
     LibrarySort,
     PreviewShape,
     StateResolver,
+    parse_verdict,
 )
 from maxicrawler.app.viewing import MediaKind
 from maxicrawler.config import Settings
-from maxicrawler.domain import DownloadStatus, ResourceKind, ResourceRef
+from maxicrawler.domain import DownloadStatus, ResourceKind, ResourceRef, ReviewVerdict
 from maxicrawler.library import METADATA_FILENAME, Library
 
 PAYLOAD = b"payload"
@@ -119,6 +120,25 @@ def write(
     }
     entry.metadata_path.write_text(json.dumps(document), encoding="utf-8")
     return entry.key
+
+
+def mark_discarded(library: Library, provider: str, key: str) -> None:
+    """Write a discarded verdict straight into the document.
+
+    By hand, because the service refuses to write this one: the word means the
+    payload has been removed, and removing it is a step of its own. Until that
+    step exists, a test that needs a tombstone builds one.
+    """
+    entry = library.entry_at(provider, key)
+    assert entry is not None
+    document = json.loads(entry.metadata_path.read_text(encoding="utf-8"))
+    document["review"] = {
+        "verdict": "discarded",
+        "favourite": False,
+        "reviewed_at": None,
+        "payload_removed_at": None,
+    }
+    entry.metadata_path.write_text(json.dumps(document), encoding="utf-8")
 
 
 # --- what a listing holds -----------------------------------------------------
@@ -951,3 +971,183 @@ def test_previews_answer_in_the_order_they_were_asked(tmp_path: Path) -> None:
         PreviewShape.IMAGE,
         PreviewShape.SYMBOL,
     ]
+
+
+# --- saying what you think of a file ------------------------------------------
+
+
+def test_a_verdict_is_written_and_read_back(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+
+    item = service.review("mega", key, verdict=ReviewVerdict.KEPT)
+
+    assert item is not None
+    assert item.verdict is ReviewVerdict.KEPT
+    assert service.item("mega", key).verdict is ReviewVerdict.KEPT  # type: ignore[union-attr]
+
+
+def test_judging_leaves_every_other_field_alone(tmp_path: Path) -> None:
+    """One writer per set of members; that is the whole of ADR-028 here."""
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+    before = service.item("mega", key)
+    assert before is not None
+
+    service.review("mega", key, verdict=ReviewVerdict.IGNORED)
+    after = service.item("mega", key)
+
+    assert after is not None
+    assert after.status is before.status
+    assert after.size == before.size
+    assert after.checksum == before.checksum
+    assert after.source_url == before.source_url
+    assert after.downloaded_at == before.downloaded_at
+
+
+def test_an_unknown_member_survives_being_judged(tmp_path: Path) -> None:
+    """ADR-013 promises a round trip; a review is a round trip like any other."""
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+    entry = library.entry_at("mega", key)
+    assert entry is not None
+    document = json.loads(entry.metadata_path.read_text(encoding="utf-8"))
+    document["from_the_future"] = {"colour": "green"}
+    entry.metadata_path.write_text(json.dumps(document), encoding="utf-8")
+
+    service.review("mega", key, verdict=ReviewVerdict.KEPT)
+
+    written = json.loads(entry.metadata_path.read_text(encoding="utf-8"))
+    assert written["from_the_future"] == {"colour": "green"}
+    assert written["review"]["verdict"] == "kept"
+
+
+def test_the_star_and_the_verdict_do_not_touch_each_other(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+
+    service.review("mega", key, verdict=ReviewVerdict.KEPT)
+    starred = service.review("mega", key, favourite=True)
+    assert starred is not None
+    assert starred.verdict is ReviewVerdict.KEPT
+    assert starred.favourite is True
+
+    judged = service.review("mega", key, verdict=ReviewVerdict.IGNORED)
+    assert judged is not None
+    assert judged.favourite is True
+
+
+def test_a_verdict_can_be_taken_back(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+    service.review("mega", key, verdict=ReviewVerdict.IGNORED)
+
+    item = service.review("mega", key, verdict=ReviewVerdict.UNREVIEWED)
+
+    assert item is not None
+    assert item.verdict is ReviewVerdict.UNREVIEWED
+
+
+def test_deciding_stamps_the_time_and_starring_does_not(tmp_path: Path) -> None:
+    """`reviewed_at` answers "when was this decided", and a star is not a ruling."""
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+    entry = library.entry_at("mega", key)
+    assert entry is not None
+
+    service.review("mega", key, favourite=True)
+    record = entry.read()
+    assert record is not None and record.review is not None
+    assert record.review.reviewed_at is None
+
+    service.review("mega", key, verdict=ReviewVerdict.KEPT)
+    record = entry.read()
+    assert record is not None and record.review is not None
+    assert record.review.reviewed_at is not None
+
+
+def test_judging_something_that_is_not_there_answers_nothing(tmp_path: Path) -> None:
+    service, _ = make_service(tmp_path)
+
+    assert service.review("mega", "nothing", verdict=ReviewVerdict.KEPT) is None
+    assert service.review("..", "x", verdict=ReviewVerdict.KEPT) is None
+
+
+def test_a_discarded_entry_is_out_of_the_way_until_it_is_asked_for(tmp_path: Path) -> None:
+    """The whole meaning of the verdict: do not offer this to me again."""
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd", name="gone.pdf")
+    write(library, "EeFfGgHh", name="kept.pdf")
+    mark_discarded(library, "mega", key)
+
+    assert [item.name for item in service.browse().items] == ["kept.pdf"]
+    assert [
+        item.name for item in service.browse(LibraryQuery(verdict=ReviewVerdict.DISCARDED)).items
+    ] == ["gone.pdf"]
+
+
+def test_an_ignored_entry_stays_in_the_listing(tmp_path: Path) -> None:
+    """Ignored means "not interesting", not "out of my way"."""
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+    service.review("mega", key, verdict=ReviewVerdict.IGNORED)
+
+    assert len(service.browse().items) == 1
+
+
+def test_the_discarded_are_still_counted_so_they_can_be_found(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+    mark_discarded(library, "mega", key)
+
+    page = service.browse()
+
+    assert page.items == ()
+    assert [(facet.value, facet.count) for facet in page.verdicts] == [("discarded", 1)]
+
+
+def test_the_unreviewed_come_first_among_the_verdicts(tmp_path: Path) -> None:
+    """Declaration order: the pile somebody works through leads the row."""
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+    write(library, "EeFfGgHh")
+    service.review("mega", key, verdict=ReviewVerdict.KEPT)
+
+    assert [facet.value for facet in service.browse().verdicts] == ["unreviewed", "kept"]
+
+
+def test_only_the_starred(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd", name="star.pdf")
+    write(library, "EeFfGgHh", name="plain.pdf")
+    service.review("mega", key, favourite=True)
+
+    page = service.browse(LibraryQuery(favourite=True))
+
+    assert [item.name for item in page.items] == ["star.pdf"]
+    assert page.favourites == 1
+
+
+def test_a_verdict_query_says_it_is_filtered() -> None:
+    assert LibraryQuery(verdict=ReviewVerdict.KEPT).is_filtered is True
+    assert LibraryQuery(favourite=True).is_filtered is True
+
+
+def test_a_verdict_nobody_recognises_filters_nothing() -> None:
+    assert parse_verdict("shrug") is None
+    assert parse_verdict(None) is None
+    assert parse_verdict("") is None
+    assert parse_verdict("kept") is ReviewVerdict.KEPT
+
+
+def test_the_service_refuses_to_write_a_discard(tmp_path: Path) -> None:
+    """Removing the payload is what makes the word true; that step is its own."""
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+
+    with pytest.raises(ValueError, match="discarding"):
+        service.review("mega", key, verdict=ReviewVerdict.DISCARDED)
+
+    item = service.item("mega", key)
+    assert item is not None
+    assert item.verdict is ReviewVerdict.UNREVIEWED

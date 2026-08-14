@@ -31,6 +31,7 @@ from maxicrawler.domain.providers import (
     ResourceRef,
     ResourceSecret,
 )
+from maxicrawler.domain.review import ReviewVerdict
 
 __all__ = [
     "Availability",
@@ -51,6 +52,7 @@ __all__ = [
     "ResourceMetadata",
     "ResourceRef",
     "ResourceSecret",
+    "ReviewVerdict",
     "ScanSession",
     "Statistics",
     "UrlCategory",

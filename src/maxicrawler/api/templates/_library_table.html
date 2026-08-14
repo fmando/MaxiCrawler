@@ -8,18 +8,25 @@
 <table class="grid library-rows">
   <thead>
     <tr>
+      <th class="tick"></th>
       <th class="shot"></th>
       {% for column in library.columns %}
         <th{% if column.active %} class="sorted"{% endif %}>
           <a href="{{ column.url }}">{{ column.label }}{% if column.mark %} <span class="mark">{{ column.mark }}</span>{% endif %}</a>
         </th>
       {% endfor %}
+      <th>Review</th>
       <th>Path</th>
     </tr>
   </thead>
   <tbody>
     {% for item in library.rows %}
-      <tr>
+      <tr class="{{ item.verdict }}">
+        <td class="tick">
+          <input type="checkbox" form="library-selection" name="entry"
+                 value="{{ item.entry_token }}" data-tick
+                 aria-label="Select {{ item.name }}">
+        </td>
         <td class="shot">
           <a href="{{ item.url }}">{% include "_library_preview.html" %}</a>
         </td>
@@ -31,6 +38,7 @@
         <td class="num right">{{ item.size }}</td>
         <td class="num">{{ item.downloaded_at }}</td>
         <td><span class="badge {{ item.state_tone }}">{{ item.state_label }}</span></td>
+        <td>{% include "_library_verdicts.html" %}</td>
         <td class="url muted small">{{ item.path }}</td>
       </tr>
     {% endfor %}
