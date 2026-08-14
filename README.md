@@ -98,7 +98,7 @@ Run the test suite and checks:
 uv run pytest
 uv run ruff format --check .
 uv run ruff check .
-uv run mypy src
+uv run mypy src scripts
 ```
 
 ## The chain
