@@ -59,10 +59,27 @@ over this directory like any other.
 | `prune_small_payloads.py` | Discards stored files below a size, the way the interface would. For the thumbnails and icons collected before `min_download_size` existed (ADR-042). |
 | `survey_library.py` | Describes the whole shelf: how much, of what, how big, and how many pixels the images have. Reports only. |
 | `check_library.py` | Compares every record against the disk and reports where they have come apart. Repairs the two faults that are already decided. |
+| `start_over.py` | Moves the library and its database aside under a timestamp and leaves an empty one in their place. Renames; never deletes. |
 
 `_shelf.py` is not a script — it holds the four lines each of them needs to find
 a library and read all of it, and the underscore keeps it out of the pass that
 tests the others.
+
+## Starting over
+
+Emptying a library is two lines at a shell. What `start_over.py` adds is not the
+deleting — it is the **not** deleting. The library and its database are renamed
+under a timestamp, an empty library takes their place, and the commands to
+change your mind are printed. The disk is exactly as full afterwards; freeing it
+is a second, deliberate act by somebody who has already seen the new state work.
+
+It refuses three ways before it touches anything: if the directory carries no
+`library.json` descriptor, so a mistyped path moves nothing; if something is
+already sitting at the names it would move to; and if the database will not open
+for writing, which usually means the server is still running. That last check is
+a hint and not a guarantee — on Linux a file can be renamed while it is open —
+so stop the server yourself. A server writing into a database that has been
+moved out from under it helps nobody.
 
 ## What the doctor will and will not do
 

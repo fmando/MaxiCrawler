@@ -10,9 +10,11 @@ Output is checked for the facts it has to carry, never line by line. A test that
 pins the wording turns every improvement to a message into a red build.
 """
 
+import ast
 import hashlib
 import importlib.util
 import json
+import sqlite3
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -30,8 +32,9 @@ SCRIPTS = REPOSITORY / "scripts"
 PRUNE = SCRIPTS / "prune_small_payloads.py"
 SURVEY = SCRIPTS / "survey_library.py"
 CHECK = SCRIPTS / "check_library.py"
+START_OVER = SCRIPTS / "start_over.py"
 
-WRITING = {"prune_small_payloads.py", "check_library.py"}
+WRITING = {"prune_small_payloads.py", "check_library.py", "start_over.py"}
 """Scripts that can change the library, and must therefore ask with ``--apply``.
 
 Named rather than detected, so that a script gaining the ability to write is a
@@ -137,8 +140,13 @@ def write(
 
 
 def a_mixed_library(tmp_path: Path) -> Library:
-    """Return a library holding files either side of a hundred thousand bytes."""
+    """Return a library holding files either side of a hundred thousand bytes.
+
+    Initialized, so it carries the descriptor a real one has — which is what
+    ``start_over.py`` checks before it renames anything.
+    """
     library = Library(tmp_path / "library")
+    library.initialize()
     write(library, "small", filename="icon.png", size=4_000)
     write(library, "exactly", filename="exactly.jpg", size=100_000)
     write(library, "large", filename="photo.jpg", size=400_000)
@@ -189,6 +197,37 @@ def test_a_script_asks_before_writing_and_only_if_it_can(script: Path, tmp_path:
     finished = run(script, config, "--help")
 
     assert ("--apply" in finished.stdout) is (script.name in WRITING)
+
+
+@pytest.mark.parametrize("script", every_script(), ids=lambda path: path.name)
+def test_what_a_script_prints_is_ascii(script: Path) -> None:
+    """An em dash arrives on a Windows console as a replacement character.
+
+    These are run in a terminal, and a terminal here is often cp1252 rather than
+    UTF-8, where a sentence explaining a refusal turns into one with a black
+    diamond in the middle of it. The docstrings keep their typography; the
+    strings that reach a screen do not get any. The ``--help`` description is
+    checked too, since it is the module docstring's first line.
+    """
+    tree = ast.parse(script.read_text(encoding="utf-8"))
+    offenders: list[str] = []
+
+    doc = ast.get_docstring(tree) or ""
+    if doc and not doc.splitlines()[0].isascii():
+        offenders.append(f"the --help description: {doc.splitlines()[0]!r}")
+
+    for node in ast.walk(tree):
+        printed = isinstance(node, ast.Call) and getattr(node.func, "id", "") == "print"
+        helped = isinstance(node, ast.keyword) and node.arg == "help"
+        if not (printed or helped):
+            continue
+        for piece in ast.walk(node):
+            if not isinstance(piece, ast.Constant) or not isinstance(piece.value, str):
+                continue
+            if not piece.value.isascii():
+                offenders.append(f"line {piece.lineno}: {piece.value!r}")
+
+    assert not offenders, "\n".join(offenders)
 
 
 @pytest.mark.parametrize("script", every_script(), ids=lambda path: path.name)
@@ -650,6 +689,107 @@ def test_applying_leaves_everything_it_did_not_decide_alone(tmp_path: Path) -> N
     record = document_of(library, lost)
     assert record["content"], "a record whose file is gone is left as it was"
     assert record["review"] == {"verdict": "unreviewed", "favourite": False}
+
+
+def test_starting_over_moves_the_library_aside_rather_than_deleting_it(tmp_path: Path) -> None:
+    """The whole design: afterwards everything is still there, under a new name."""
+    config = settings_file(tmp_path)
+    library = a_mixed_library(tmp_path)
+    before = shelf_contents(library)
+
+    finished = run(START_OVER, config, "--apply")
+
+    assert finished.returncode == 0, finished.stderr
+    moved = [path for path in tmp_path.glob("library.*") if path.is_dir()]
+    assert len(moved) == 1, "the old library is set aside under one timestamped name"
+    kept = {
+        str(path.relative_to(moved[0])): path.read_bytes()
+        for path in sorted(moved[0].rglob("*"))
+        if path.is_file()
+    }
+    assert kept == before
+    # And what takes its place is a library, not a hole: a descriptor, and
+    # nothing else at all.
+    assert (library.root / "library.json").is_file()
+    assert [path.name for path in library.root.iterdir()] == ["library.json"]
+
+
+def test_starting_over_says_how_to_change_your_mind(tmp_path: Path) -> None:
+    config = settings_file(tmp_path)
+    a_mixed_library(tmp_path)
+
+    finished = run(START_OVER, config, "--apply")
+
+    assert "rename these back" in finished.stdout
+
+
+def test_nothing_of_the_old_database_is_left_beside_the_new_library(tmp_path: Path) -> None:
+    """Not the database, and not the write-ahead log that belonged to it.
+
+    A log beside a database that has moved is worse than one beside nothing, and
+    which of the two ways it goes is not worth pinning down: the script renames
+    it, or SQLite collects an orphaned one while the script is checking whether
+    anything holds the database open. What matters is that neither is still
+    sitting there when the next run starts.
+    """
+    config = settings_file(tmp_path)
+    a_mixed_library(tmp_path)
+    (tmp_path / "maxicrawler.db").write_bytes(b"SQLite format 3\x00")
+    (tmp_path / "maxicrawler.db-wal").write_bytes(b"log")
+
+    finished = run(START_OVER, config, "--apply")
+
+    assert finished.returncode == 0, finished.stderr
+    assert not (tmp_path / "maxicrawler.db").exists()
+    assert not (tmp_path / "maxicrawler.db-wal").exists()
+    assert len(list(tmp_path.glob("maxicrawler.db.*"))) == 1
+
+
+def test_a_directory_that_is_not_a_library_is_refused(tmp_path: Path) -> None:
+    """A mistyped path moves nothing.
+
+    The descriptor is the only thing that says a directory is one of ours, and
+    this is the one script that acts on a whole library at once.
+    """
+    config = settings_file(tmp_path)
+    somewhere_else = tmp_path / "library"
+    somewhere_else.mkdir()
+    (somewhere_else / "important.txt").write_text("not ours", encoding="utf-8")
+
+    finished = run(START_OVER, config, "--apply")
+
+    assert finished.returncode == 1
+    assert "not a library" in finished.stdout
+    assert (somewhere_else / "important.txt").exists()
+
+
+def test_a_busy_database_stops_it(tmp_path: Path) -> None:
+    """Standing in for a running server, which must be stopped first."""
+    config = settings_file(tmp_path)
+    library = a_mixed_library(tmp_path)
+    database = tmp_path / "maxicrawler.db"
+    holding = sqlite3.connect(database)
+    holding.execute("CREATE TABLE IF NOT EXISTS t (x)")
+    holding.execute("BEGIN IMMEDIATE")
+    try:
+        finished = run(START_OVER, config, "--apply")
+    finally:
+        holding.rollback()
+        holding.close()
+
+    assert finished.returncode == 1
+    assert "running server" in finished.stdout
+    assert library.root.is_dir(), "nothing is renamed while something holds the database"
+    assert not list(tmp_path.glob("library.*"))
+
+
+def test_an_absent_library_is_nothing_to_do(tmp_path: Path) -> None:
+    config = settings_file(tmp_path)
+
+    finished = run(START_OVER, config, "--apply")
+
+    assert finished.returncode == 0, finished.stderr
+    assert "no library at that path" in finished.stdout
 
 
 def test_a_second_run_finds_the_repairs_done(tmp_path: Path) -> None:
