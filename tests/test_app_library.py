@@ -79,8 +79,14 @@ def write(
     payload: bytes | None = PAYLOAD,
     checksum: str | None = "abc123",
     error: str | None = None,
+    source_url: str | None = None,
 ) -> str:
-    """Write one library entry by hand and return its key."""
+    """Write one library entry by hand and return its key.
+
+    *source_url* overrides where the record says it came from, which is how two
+    entries end up recorded under one link: a share naming a folder is stored as
+    one entry per file inside it, all under the container's own URL.
+    """
     ref = ResourceRef(
         provider=provider,
         resource_id=handle,
@@ -109,7 +115,7 @@ def write(
         "parent_id": None,
         "kind": "file",
         "name": name,
-        "source_url": ref.url,
+        "source_url": ref.url if source_url is None else source_url,
         "source_document": None,
         "status": status.value,
         "discovered_at": None,
@@ -1267,6 +1273,89 @@ def test_nothing_is_served_from_an_entry_whose_file_was_discarded(tmp_path: Path
     service.discard("mega", key)
 
     assert service.payload("mega", key) is None
+
+
+# --- what a report is told not to offer again ---------------------------------
+
+
+def source_url(handle: str, provider: str = "mega") -> str:
+    """Return the URL `write` records for *handle*."""
+    return f"https://{provider}.nz/file/{handle}"
+
+
+def test_an_ignored_entry_puts_its_link_out_of_reach(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+    service.review("mega", key, verdict=ReviewVerdict.IGNORED)
+
+    assert service.dismissed([source_url("AaBbCcDd")]) == frozenset({source_url("AaBbCcDd")})
+
+
+def test_a_discarded_entry_does_the_same(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+    service.discard("mega", key)
+
+    assert service.dismissed([source_url("AaBbCcDd")]) == frozenset({source_url("AaBbCcDd")})
+
+
+def test_what_was_kept_or_never_looked_at_is_not_dismissed(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    kept = write(library, "AaBbCcDd")
+    write(library, "EeFfGgHh")
+    service.review("mega", kept, verdict=ReviewVerdict.KEPT)
+
+    assert service.dismissed([source_url("AaBbCcDd"), source_url("EeFfGgHh")]) == frozenset()
+
+
+def test_a_link_nothing_was_recorded_under_is_not_dismissed(tmp_path: Path) -> None:
+    """Nobody has said anything about it, which is where every URL starts."""
+    service, _ = make_service(tmp_path)
+
+    assert service.dismissed(["https://mega.nz/file/Unknown"]) == frozenset()
+
+
+def test_one_dismissed_file_does_not_put_a_whole_folder_out_of_reach(tmp_path: Path) -> None:
+    """A container is recorded by each file inside it, under its own URL.
+
+    So *something here is unwanted* would take a folder of two hundred out of
+    circulation because of one thumbnail — and the download of the container is
+    still the right thing to queue while a single file in it is wanted.
+    """
+    service, library = make_service(tmp_path)
+    container = "https://mega.nz/folder/FolderAA"
+    first = write(library, "AaBbCcDd", source_url=container)
+    write(library, "EeFfGgHh", source_url=container)
+    service.review("mega", first, verdict=ReviewVerdict.IGNORED)
+
+    assert service.dismissed([container]) == frozenset()
+
+
+def test_a_folder_whose_every_file_was_waved_away_is_dismissed(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    container = "https://mega.nz/folder/FolderAA"
+    first = write(library, "AaBbCcDd", source_url=container)
+    second = write(library, "EeFfGgHh", source_url=container)
+    service.review("mega", first, verdict=ReviewVerdict.IGNORED)
+    service.discard("mega", second)
+
+    assert service.dismissed([container]) == frozenset({container})
+
+
+def test_the_answer_keeps_the_fragment_it_was_asked_with(tmp_path: Path) -> None:
+    """A share link carries its key there; a record never does (ADR-020)."""
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+    service.discard("mega", key)
+    asked = f"{source_url('AaBbCcDd')}#0123456789abcdef"
+
+    assert service.dismissed([asked]) == frozenset({asked})
+
+
+def test_asking_about_nothing_reads_no_library(tmp_path: Path) -> None:
+    service, _ = make_service(tmp_path)
+
+    assert service.dismissed([]) == frozenset()
 
 
 def test_a_discarded_entry_shows_a_symbol_rather_than_a_missing_picture(tmp_path: Path) -> None:

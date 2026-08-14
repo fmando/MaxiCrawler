@@ -108,6 +108,10 @@ def create_app(
             states={
                 LinkState.IN_LIBRARY: shelf.stored,
                 LinkState.IN_QUEUE: transfers.pending,
+                # A third member and a third bound method, which is the whole of
+                # adding a state — nothing about how a report asks, counts,
+                # filters or renders changed to admit it.
+                LinkState.DISMISSED: shelf.dismissed,
             },
         )
     )

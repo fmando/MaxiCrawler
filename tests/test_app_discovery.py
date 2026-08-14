@@ -627,6 +627,82 @@ def test_an_installation_with_no_providers_matches_nothing() -> None:
     assert service.fetchable(SESSION, limit=10).urls == ()
 
 
+def test_what_was_dismissed_is_not_queued_again() -> None:
+    """The promise, kept where two hundred jobs would otherwise be made."""
+    rows = [make_url(MEGA_LINK, "mega"), make_url(OTHER_LINK, "mega")]
+    service = make_service(
+        rows,
+        downloadable=[MEGA_LINK, OTHER_LINK],
+        states={LinkState.DISMISSED: [MEGA_LINK]},
+    )
+
+    matches = service.fetchable(SESSION, limit=10)
+
+    assert matches.urls == (OTHER_LINK,)
+    assert matches.total == 1
+
+
+def test_dismissed_links_are_left_out_even_of_a_filter_that_asks_for_them() -> None:
+    """Looking at what you threw away is not asking for it back."""
+    service = make_service(
+        [make_url(MEGA_LINK, "mega")],
+        downloadable=[MEGA_LINK],
+        states={LinkState.DISMISSED: [MEGA_LINK]},
+    )
+
+    matches = service.fetchable(SESSION, LinkQuery(state="dismissed"), limit=10)
+
+    assert matches.urls == ()
+
+
+def test_without_anything_to_ask_nothing_is_left_out() -> None:
+    """A client with no library does not get to guess either way."""
+    service = make_service([make_url(MEGA_LINK, "mega")], downloadable=[MEGA_LINK])
+
+    assert service.fetchable(SESSION, limit=10).urls == (MEGA_LINK,)
+
+
+def test_the_dismissed_are_asked_about_once_however_many_links_there_are() -> None:
+    """The one state resolved whether or not the filter mentions it.
+
+    So it has to cost what every other bulk question costs: one pass, asked
+    about the whole set, rather than one library walk per link.
+    """
+    asked: list[tuple[str, ...]] = []
+
+    def resolve(candidates: Iterable[str]) -> frozenset[str]:
+        asked.append(tuple(candidates))
+        return frozenset()
+
+    links = [make_url(f"https://mega.nz/file/{index:04d}", "mega") for index in range(25)]
+    service = DiscoveryService(
+        Settings(),
+        repository=FakeRepository(links),  # type: ignore[arg-type]
+        downloadable=lambda candidates: frozenset(candidates),
+        states={LinkState.DISMISSED: resolve},
+    )
+
+    matches = service.fetchable(SESSION, LinkQuery(), limit=100)
+
+    assert len(asked) == 1
+    assert len(asked[0]) == len(links)
+    assert len(matches.urls) == len(links)
+
+
+def test_a_dismissed_link_is_still_shown_and_still_marked() -> None:
+    """Only the queueing leaves it out. A row that vanished would be a deletion."""
+    service = make_service(
+        [make_url(MEGA_LINK, "mega")],
+        downloadable=[MEGA_LINK],
+        states={LinkState.DISMISSED: [MEGA_LINK]},
+    )
+
+    page = service.browse(SESSION)
+
+    assert urls_of(page) == [MEGA_LINK]
+    assert page.known[LinkState.DISMISSED] == frozenset({MEGA_LINK})
+
+
 def test_a_negative_limit_is_a_mistake_rather_than_an_empty_answer() -> None:
     service = make_service([make_url(MEGA_LINK, "mega")], downloadable=[MEGA_LINK])
 

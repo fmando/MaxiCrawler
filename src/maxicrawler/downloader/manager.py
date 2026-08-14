@@ -107,6 +107,12 @@ class DownloadWorker:
                 reason="the library already holds it",
                 path=stored,
             )
+        dismissed = _dismissed(record)
+        if dismissed is not None:
+            # Nothing is written. The record already says everything true about
+            # this entry, and rebuilding it would reset the status and drop the
+            # account of what was once downloaded — for a job that did nothing.
+            return self._finish(job, DownloadStatus.REFUSED, started, reason=dismissed)
         return self._transfer(job, entry, record, started)
 
     def _transfer(
@@ -357,6 +363,33 @@ def _stored_payload(entry: LibraryEntry, record: ResourceRecord | None) -> Path 
         return None
     path = entry.path / record.content.path
     return path if path.is_file() else None
+
+
+def _dismissed(record: ResourceRecord | None) -> str | None:
+    """Return why this resource is not fetched, or ``None`` when it is.
+
+    The place the library's promise is actually kept. A verdict of *ignored* or
+    *discarded* means somebody has already decided, and a download that ran
+    anyway would undo that decision by hand — for the discarded it would put the
+    very bytes back that removing them was the point of.
+
+    Read from the entry's own record rather than passed in, so the rule holds
+    for every route into the queue: a bulk queue, a single button, and a command
+    line all arrive here. The bulk queue leaves these out earlier as well, and
+    the two are not redundant — that one keeps two hundred pointless jobs off
+    the queue, and this one is what makes the promise true.
+
+    Deliberately *after* the check for a payload that is already stored. The two
+    only disagree about an entry that was ignored and whose file is still there,
+    and about that one "the library already holds it" is the better answer: it
+    is the more useful fact, and it comes with the path.
+
+    The reason names the verdict and the way out of it, which is what
+    :attr:`~maxicrawler.domain.DownloadStatus.REFUSED` is documented to require.
+    """
+    if record is None or not record.verdict.is_dismissed:
+        return None
+    return f"{record.verdict.value} here, and not fetched again until that is taken back"
 
 
 def _utc_now() -> datetime:

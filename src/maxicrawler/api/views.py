@@ -1510,6 +1510,7 @@ LINK_STATE_LABELS: dict[str, str] = {
     UNTRACKED: "new",
     LinkState.IN_LIBRARY: "in library",
     LinkState.IN_QUEUE: "in queue",
+    LinkState.DISMISSED: "dismissed",
 }
 """What each state is called, keyed the way a query string spells it.
 
@@ -1522,6 +1523,10 @@ LINK_STATE_TONES: dict[str, str] = {
     UNTRACKED: "idle",
     LinkState.IN_LIBRARY: "good",
     LinkState.IN_QUEUE: "busy",
+    # Quiet like "new". It marks a row nobody has to act on, and a colour that
+    # asked for attention would be asking for it on behalf of a decision that
+    # has already been made.
+    LinkState.DISMISSED: "idle",
 }
 """Which badge colour each state wears. "New" is the quiet one deliberately: on
 a first crawl it is every row, and a table shouting at all three thousand of

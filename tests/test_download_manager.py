@@ -308,6 +308,102 @@ def test_a_judgement_survives_a_download_that_fails(tmp_path: Path) -> None:
     assert again.verdict is ReviewVerdict.KEPT
 
 
+def test_a_discarded_resource_is_refused_rather_than_fetched_again(tmp_path: Path) -> None:
+    """The promise the headstone exists for, kept where every route arrives."""
+    provider = make_provider()
+    manager, library = make_manager(tmp_path, provider)
+    first = manager.download(FILE_URL)
+    entry = library.entry(first.completed[0].job.ref)
+    stored = entry.read()
+    assert stored is not None
+    entry.remove_content()
+    entry.write(replace(stored, review=ReviewRecord(verdict=ReviewVerdict.DISCARDED)))
+
+    report = manager.download(FILE_URL)
+
+    assert len(report.refused) == 1
+    assert report.refused[0].reason == (
+        "discarded here, and not fetched again until that is taken back"
+    )
+    assert len(provider.downloaded) == 1
+    assert not entry.content_directory.exists()
+
+
+def test_an_ignored_resource_with_no_payload_is_refused_too(tmp_path: Path) -> None:
+    """Ignoring leaves the file alone; it does not promise to fetch it back."""
+    provider = make_provider()
+    manager, library = make_manager(tmp_path, provider)
+    first = manager.download(FILE_URL)
+    entry = library.entry(first.completed[0].job.ref)
+    stored = entry.read()
+    assert stored is not None
+    assert first.completed[0].path is not None
+    first.completed[0].path.unlink()
+    entry.write(replace(stored, review=ReviewRecord(verdict=ReviewVerdict.IGNORED)))
+
+    report = manager.download(FILE_URL)
+
+    assert len(report.refused) == 1
+    assert "ignored here" in str(report.refused[0].reason)
+    assert len(provider.downloaded) == 1
+
+
+def test_an_ignored_resource_that_is_still_there_is_reported_as_already_stored(
+    tmp_path: Path,
+) -> None:
+    """Both answers are true, and this is the more useful one — it has the path."""
+    manager, library = make_manager(tmp_path)
+    first = manager.download(FILE_URL)
+    entry = library.entry(first.completed[0].job.ref)
+    stored = entry.read()
+    assert stored is not None
+    entry.write(replace(stored, review=ReviewRecord(verdict=ReviewVerdict.IGNORED)))
+
+    report = manager.download(FILE_URL)
+
+    assert len(report.skipped) == 1
+    assert report.skipped[0].reason == "the library already holds it"
+    assert report.skipped[0].path is not None
+
+
+def test_a_refusal_over_a_verdict_leaves_the_record_exactly_as_it_was(tmp_path: Path) -> None:
+    """Nothing happened, so nothing is written — least of all a rebuilt record.
+
+    Rebuilding would reset the status and drop the account of what was once
+    downloaded, which is the whole of what a discarded entry still has to say.
+    """
+    manager, library = make_manager(tmp_path)
+    first = manager.download(FILE_URL)
+    entry = library.entry(first.completed[0].job.ref)
+    stored = entry.read()
+    assert stored is not None
+    entry.remove_content()
+    entry.write(replace(stored, review=ReviewRecord(verdict=ReviewVerdict.DISCARDED)))
+    before = stored_record(library, entry.path)
+
+    manager.download(FILE_URL)
+
+    assert stored_record(library, entry.path) == before
+
+
+def test_a_kept_resource_is_fetched_again_like_any_other(tmp_path: Path) -> None:
+    """Only the two words that mean "do not offer this" stop a download."""
+    provider = make_provider()
+    manager, library = make_manager(tmp_path, provider)
+    first = manager.download(FILE_URL)
+    entry = library.entry(first.completed[0].job.ref)
+    stored = entry.read()
+    assert stored is not None
+    assert first.completed[0].path is not None
+    first.completed[0].path.unlink()
+    entry.write(replace(stored, review=ReviewRecord(verdict=ReviewVerdict.KEPT)))
+
+    report = manager.download(FILE_URL)
+
+    assert len(report.completed) == 1
+    assert len(provider.downloaded) == 2
+
+
 def test_a_first_download_records_no_judgement_of_its_own(tmp_path: Path) -> None:
     manager, library = make_manager(tmp_path)
 

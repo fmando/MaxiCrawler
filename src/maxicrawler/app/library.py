@@ -714,11 +714,60 @@ class LibraryService:
         known = self._source_urls()
         return frozenset(url for url in asked if strip_fragment(url) in known)
 
-    def _source_urls(self) -> frozenset[str]:
-        """Return every URL the library has stored something from.
+    def dismissed(self, urls: Iterable[str]) -> frozenset[str]:
+        """Return which of *urls* hold nothing but what somebody has waved away.
 
-        Off the index's own column where there is one, which reads no document
-        and parses no JSON, and off the entries themselves where there is not.
+        The second question of :data:`~maxicrawler.app.discovery.StateResolver`
+        shape this service answers, and the counterpart to :meth:`stored`: that
+        one says *there is something here*, this one says *and none of it is
+        wanted*. What reads it is a report — as a badge, and as the set that
+        *"queue every match"* leaves out.
+
+        **Every entry recorded under the URL has to be dismissed**, which is the
+        one place this differs from :meth:`stored` and the reason it is not a
+        one-line filter over it. A share naming a folder is recorded by each file
+        inside it under the container's own URL; *something* here being ignored
+        would put a folder of two hundred out of reach because of one thumbnail,
+        and a promise that turns into that is worse than no promise. A download
+        of the container is still the right thing to queue while a single file in
+        it is wanted, and the worker turns away the individual entries — which it
+        decides per entry, where the question has no ambiguity at all.
+
+        A URL nothing was recorded under is not dismissed. Nobody has said
+        anything about it, which is the state every URL starts in.
+
+        Fragments are stripped before comparing and kept in the answer, for the
+        reason :meth:`stored` gives.
+        """
+        asked = tuple(urls)
+        if not asked:
+            return frozenset()
+        known = self._dismissed_urls()
+        return frozenset(url for url in asked if strip_fragment(url) in known)
+
+    def _dismissed_urls(self) -> frozenset[str]:
+        """Return every URL whose entries are, without exception, dismissed."""
+        tallies: dict[str, tuple[int, int]] = {}
+        for url, verdict in self._verdicts():
+            recorded, waved = tallies.get(url, (0, 0))
+            tallies[url] = (recorded + 1, waved + int(verdict.is_dismissed))
+        return frozenset(url for url, (recorded, waved) in tallies.items() if recorded == waved)
+
+    def _source_urls(self) -> frozenset[str]:
+        """Return every URL the library has stored something from."""
+        return frozenset(url for url, _ in self._verdicts())
+
+    def _verdicts(self) -> Iterator[tuple[str, ReviewVerdict]]:
+        """Yield where each entry came from and what was decided about it.
+
+        Off the index's own columns where there is one, which reads no document
+        and parses no JSON — both are columns on it, filled since the release
+        that introduced judgements — and off the entries themselves where there
+        is not. The one place that knows a set question can be answered two ways,
+        so the two callers above do not each have to.
+
+        Entries whose document would not parse are left out. They have no source
+        URL to be about, and a row that says nothing is not evidence of anything.
         """
         index = self._index()
         if index is not None:
@@ -727,8 +776,13 @@ class LibraryService:
             except sqlite3.Error:
                 pass
             else:
-                return frozenset(row.source_url for row in rows if row.source_url)
-        return frozenset(item.source_url for item in self._read_entries())
+                for row in rows:
+                    if row.source_url:
+                        yield row.source_url, parse_verdict(row.verdict) or ReviewVerdict.UNREVIEWED
+                return
+        for item in self._read_entries():
+            if item.source_url:
+                yield item.source_url, item.verdict
 
     def _marked(self, items: tuple[LibraryItem, ...]) -> tuple[LibraryItem, ...]:
         """Return *items* with those the queue is working on flagged.
