@@ -130,6 +130,7 @@ def test_the_library_path_round_trips_through_toml(tmp_path: Path) -> None:
         ({"max_page_bytes": 0}, "max_page_bytes must be at least 1"),
         ({"max_redirects": -1}, "max_redirects must not be negative"),
         ({"max_links": 0}, "max_links must be at least 1"),
+        ({"max_stream_bytes": -1}, "max_stream_bytes must not be negative"),
     ],
 )
 def test_crawl_settings_reject_impossible_values(kwargs: dict[str, int], message: str) -> None:

@@ -36,7 +36,12 @@ MEGA_URL = f"https://mega.nz/file/AaBbCcDd#{MEGA_KEY}"
 
 @contextmanager
 def client(
-    tmp_path: Path, *, provider: StubProvider | None = None, max_view_bytes: int | None = None
+    tmp_path: Path,
+    *,
+    provider: StubProvider | None = None,
+    max_view_bytes: int | None = None,
+    max_stream_bytes: int | None = None,
+    preview_inline_bytes: int | None = None,
 ) -> Iterator[TestClient]:
     """Yield a client over an application with a throwaway database and library.
 
@@ -51,7 +56,12 @@ def client(
         # refuses; see tests/test_api_pages.py::test_a_private_address_is_refused
         # for the default's own behaviour.
         allow_private_networks=True,
+        # And no minimum download size: the fixtures serve a few bytes each,
+        # and what is being tested is the page rather than the floor.
+        min_download_size=0,
         **({} if max_view_bytes is None else {"max_view_bytes": max_view_bytes}),
+        **({} if max_stream_bytes is None else {"max_stream_bytes": max_stream_bytes}),
+        **({} if preview_inline_bytes is None else {"preview_inline_bytes": preview_inline_bytes}),
     )
     service = CrawlService(settings)
     jobs = CrawlJobs(service, persist=False)
@@ -66,7 +76,11 @@ def client(
         service=service,
         jobs=jobs,
         downloads=downloads,
-        library=LibraryService(settings, library=Library(settings.library_path)),
+        # Wired the way `create_app` wires its own, queue included, so these
+        # tests exercise the arrangement the server really runs.
+        library=LibraryService(
+            settings, library=Library(settings.library_path), queued=downloads.pending
+        ),
     )
     try:
         with TestClient(application) as test_client:
@@ -371,13 +385,36 @@ def test_the_library_can_be_filtered_by_provider_and_status(tmp_path: Path) -> N
     assert "stub.bin" not in dropped
 
 
-def test_the_library_can_be_sorted_by_a_link(tmp_path: Path) -> None:
+def test_the_library_can_be_filtered_by_what_kind_of_file_it_is(tmp_path: Path) -> None:
     with client(tmp_path, provider=make_provider()) as test_client:
         finished_download(test_client)
-        body = test_client.get("/library").text
 
-        assert 'href="/library?sort=name&amp;dir=asc"' in body
-        assert test_client.get("/library?sort=name&dir=asc").status_code == 200
+        kept = test_client.get("/library?kind=other").text
+        dropped = test_client.get("/library?kind=video").text
+
+    assert "stub.bin" in kept
+    assert "stub.bin" not in dropped
+
+
+def test_a_category_nobody_recognises_filters_nothing(tmp_path: Path) -> None:
+    """Lenient like every other parameter here: a stale bookmark is ordinary."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+
+        response = test_client.get("/library?kind=sculpture")
+
+    assert response.status_code == 200
+    assert "stub.bin" in response.text
+
+
+def test_the_library_can_be_sorted_by_a_link(tmp_path: Path) -> None:
+    """The sortable headings belong to the dense layout, which is where this looks."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+        body = test_client.get("/library?view=list").text
+
+        assert 'href="/library?view=list&amp;sort=name&amp;dir=asc"' in body
+        assert test_client.get("/library?view=list&sort=name&dir=asc").status_code == 200
 
 
 def test_a_nonsense_query_string_still_answers(tmp_path: Path) -> None:
@@ -404,13 +441,14 @@ def test_a_row_links_to_the_file_it_describes(tmp_path: Path) -> None:
         finished_download(test_client)
         body = test_client.get("/library").text
 
-    assert re.search(r'href="/library/mega/[a-z0-9-]+"', body)
+    # Carrying the listing it was opened from, which is what makes it a walk.
+    assert re.search(r'href="/library/mega/[a-z0-9-]+\?back=', body)
 
 
 def test_the_library_lists_what_was_downloaded(tmp_path: Path) -> None:
     with client(tmp_path, provider=make_provider()) as test_client:
         finished_download(test_client)
-        body = test_client.get("/library").text
+        body = test_client.get("/library?view=list").text
 
     assert "stub.bin" in body
     assert ">mega</td>" in body
@@ -472,6 +510,12 @@ def wait_until_finished(test_client: TestClient, job_id: str, *, timeout: float 
     fool: a report saying "7 still queued" used to read as a running crawl.
 
     A crawl that failed never produces a report, so the refusal is asked too.
+
+    Both conditions rest on one invariant, which is asserted where it lives
+    rather than worked around here: a job says it is finished once its report is
+    in, or once it is known there will never be one. ``test_api_jobs.py`` holds
+    that, and without it this loop would return during the write that stores the
+    report — on a page that then renders without a link table.
     """
     from time import monotonic, sleep
 
@@ -1900,7 +1944,8 @@ def test_the_detail_page_shows_the_path_in_a_field_it_can_be_copied_from(
     with client(tmp_path, provider=make_provider()) as test_client:
         where = stored_item(test_client)
         body = unescape(test_client.get(where).text)
-        listing = unescape(test_client.get("/library").text)
+        # The path is a column of the dense layout; a tile does not carry one.
+        listing = unescape(test_client.get("/library?view=list").text)
 
     assert 'class="path"' in body
     assert "readonly" in body
@@ -1911,6 +1956,88 @@ def test_the_detail_page_shows_the_path_in_a_field_it_can_be_copied_from(
     stored = next((tmp_path / "library").rglob("stub.bin"))
     assert str(stored) in body
     assert str(stored) in listing
+
+
+def test_the_library_opens_as_tiles(tmp_path: Path) -> None:
+    """Sorting through a crawl is looking, not reading, so this is the default."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+        body = test_client.get("/library").text
+
+    assert 'class="tiles"' in body
+    assert "<table" not in body
+
+
+def test_both_layouts_show_the_same_entry(tmp_path: Path) -> None:
+    """One listing, two renderings — never two answers about what is stored."""
+    with client(tmp_path, provider=make_provider()) as test_client:
+        finished_download(test_client)
+        tiles = test_client.get("/library").text
+        rows = test_client.get("/library?view=list").text
+
+    assert "stub.bin" in tiles
+    assert "stub.bin" in rows
+    assert 'class="tiles"' not in rows
+    assert 'href="/library?view=list"' in tiles
+
+
+def test_a_picture_small_enough_is_the_tile(tmp_path: Path) -> None:
+    """No generated file anywhere: the tile points at the viewer's own route."""
+    picture = StubProvider(
+        "mega",
+        url_prefix="https://mega.nz/",
+        capabilities=frozenset({ProviderCapability.INSPECT, ProviderCapability.DOWNLOAD}),
+        payload=b"\x89PNG\r\n\x1a\n" + b"0" * 200,
+        content_name="shot.png",
+    )
+    with client(tmp_path, provider=picture) as test_client:
+        finished_download(test_client)
+        body = test_client.get("/library").text
+
+    assert 'class="shot-image"' in body
+    assert 'loading="lazy"' in body
+    assert "/view" in body
+
+
+def test_a_picture_above_the_limit_never_reaches_a_tile(tmp_path: Path) -> None:
+    """The whole point of the limit: sixty originals must not be one page."""
+    picture = StubProvider(
+        "mega",
+        url_prefix="https://mega.nz/",
+        capabilities=frozenset({ProviderCapability.INSPECT, ProviderCapability.DOWNLOAD}),
+        payload=b"\x89PNG\r\n\x1a\n" + b"0" * 200,
+        content_name="shot.png",
+    )
+    with client(tmp_path, provider=picture, preview_inline_bytes=1) as test_client:
+        finished_download(test_client)
+        body = test_client.get("/library").text
+
+    assert 'class="shot-image"' not in body
+    assert 'class="shot-symbol image"' in body
+
+
+def test_a_file_being_fetched_again_reads_as_waiting_in_the_library(
+    tmp_path: Path,
+) -> None:
+    """The one fact the record cannot hold, arriving on the page it belongs on.
+
+    Queued with the queue held, so nothing races: the request sits in the line
+    for as long as the assertions take, which is what the library is asked about.
+    """
+    with client(tmp_path, provider=make_provider()) as test_client:
+        where = stored_item(test_client)
+        assert "completed" in test_client.get(where).text
+
+        test_client.post("/downloads/pause", data={"paused": "1"})
+        test_client.post("/downloads", data={"url": MEGA_URL})
+
+        listing = test_client.get("/library").text
+        detail = test_client.get(where).text
+
+    assert '<span class="badge idle">waiting</span>' in listing
+    assert '<span class="badge good">completed</span>' not in listing
+    assert "state=queued" in listing
+    assert '<span class="badge idle">waiting</span>' in detail
 
 
 def test_the_detail_page_never_shows_a_key(tmp_path: Path) -> None:
@@ -2036,6 +2163,8 @@ def store(tmp_path: Path, filename: str, payload: bytes = b"hello") -> str:
         ("photo.png", "image/png", "<img"),
         ("drawing.svg", "image/svg+xml", "<img"),
         ("page.html", "text/html; charset=utf-8", "<iframe"),
+        ("clip.mp4", "video/mp4", "<video"),
+        ("song.mp3", "audio/mpeg", "<audio"),
     ],
 )
 def test_a_file_the_browser_can_show_is_shown(
@@ -2047,10 +2176,49 @@ def test_a_file_the_browser_can_show_is_shown(
         body = test_client.get(where).text
         response = test_client.get(f"{where}/view")
 
-    assert f'{element} src="{where}/view"' in body
+    assert f'{element} class="shown" src="{where}/view"' in body
     assert response.status_code == 200
     assert response.headers["content-type"] == content_type
     assert "inline" in response.headers["content-disposition"]
+
+
+def test_a_recording_can_be_asked_for_in_pieces(tmp_path: Path) -> None:
+    """What makes a two-gigabyte video start playing at once.
+
+    Checked rather than assumed: a player that could not seek would have to
+    fetch the whole file to reach the middle of it, and then the ceiling this
+    release lifts for recordings would have been the right ceiling after all.
+    """
+    where = store(tmp_path, "clip.mp4", b"0123456789")
+
+    with client(tmp_path) as test_client:
+        response = test_client.get(f"{where}/view", headers={"Range": "bytes=4-6"})
+
+    assert response.status_code == 206
+    assert response.headers["content-range"] == "bytes 4-6/10"
+    assert response.content == b"456"
+
+
+def test_a_recording_is_not_turned_away_for_being_large(tmp_path: Path) -> None:
+    """The document ceiling does not reach it; nothing else is in its way."""
+    where = store(tmp_path, "clip.mp4", b"0" * 1024)
+
+    with client(tmp_path, max_view_bytes=10) as test_client:
+        body = test_client.get(where).text
+
+        assert f'<video class="shown" src="{where}/view"' in body
+        assert test_client.get(f"{where}/view").status_code == 200
+
+
+def test_a_recording_over_its_own_ceiling_is_offered_as_a_download(tmp_path: Path) -> None:
+    where = store(tmp_path, "clip.mp4", b"0" * 1024)
+
+    with client(tmp_path, max_stream_bytes=10) as test_client:
+        body = test_client.get(where).text
+
+        assert "<video" not in body
+        # Escaped in the page, so the assertion stops before the apostrophe.
+        assert "above the viewer" in body
 
 
 @pytest.mark.parametrize("filename", ["page.html", "drawing.svg"])
@@ -2122,7 +2290,7 @@ def test_an_svg_is_never_framed(tmp_path: Path) -> None:
     with client(tmp_path) as test_client:
         body = test_client.get(where).text
 
-    assert f'<img src="{where}/view"' in body
+    assert f'<img class="shown" src="{where}/view"' in body
     assert "<iframe" not in body
 
 

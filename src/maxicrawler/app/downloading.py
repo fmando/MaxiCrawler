@@ -142,6 +142,14 @@ class DownloadSummary:
     files_total: int = 0
     files_completed: int = 0
     files_skipped: int = 0
+    files_refused: int = 0
+    """How many payloads a configured limit turned away.
+
+    Counted apart from the skipped ones, because the two mean opposite things
+    about the library: skipped is *it is already here*, refused is *it is not
+    here and was not meant to be*.
+    """
+
     files_failed: int = 0
     path: Path | None = None
     """Where the payload landed, when exactly one resource was transferred."""
@@ -209,6 +217,7 @@ class DownloadService:
             self._library(output),
             reporter=reporter if reporter is not None else NullProgressReporter(),
             control=control,
+            minimum_size=self._settings.min_download_size,
         )
 
     def download(
@@ -464,9 +473,17 @@ def _summarize(report: DownloadReport, *, url: str) -> DownloadSummary:
     Stopped outranks completed but not failed. A folder whose third file broke
     and whose fourth was cancelled did both, and the one worth telling somebody
     about is the one they did not choose.
+
+    A refusal is the last verdict considered, and only when nothing arrived and
+    nothing was already here. A folder of five stored files and one thumbnail
+    under the floor is not a refused request — five sixths of it is present, and
+    "already stored" is the truer sentence. A folder of nothing but thumbnails
+    is exactly a refused request, and saying "completed" about it would be the
+    lie this branch exists to prevent.
     """
     completed = report.completed
     skipped = report.skipped
+    refused = report.refused
     failed = report.failed
     cancelled = report.cancelled
     if not report.plan.jobs:
@@ -487,6 +504,8 @@ def _summarize(report: DownloadReport, *, url: str) -> DownloadSummary:
         status = DownloadStatus.CANCELLED
     elif skipped and not completed:
         status = DownloadStatus.SKIPPED
+    elif refused and not completed:
+        status = DownloadStatus.REFUSED
     return DownloadSummary(
         url=url,
         status=status,
@@ -496,6 +515,7 @@ def _summarize(report: DownloadReport, *, url: str) -> DownloadSummary:
         files_total=len(report.plan.jobs),
         files_completed=len(completed),
         files_skipped=len(skipped),
+        files_refused=len(refused),
         files_failed=len(failed),
         path=None if single is None else single.path,
         directory=None if single is None else provider_directory(single.job.ref.provider),
@@ -513,6 +533,10 @@ def _reason(report: DownloadReport) -> str | None:
         return outcome.reason
     if report.unresolved:
         return report.unresolved[0].reason
+    # Before "already stored": a payload turned away names a limit and two
+    # sizes, which is the one thing somebody looking for a missing file needs.
+    for outcome in report.refused:
+        return outcome.reason
     for outcome in report.skipped:
         return outcome.reason
     return None

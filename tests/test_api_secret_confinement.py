@@ -47,6 +47,9 @@ def _settings(tmp_path: Path) -> Settings:
         user_agent="MaxiCrawler/test",
         database_path=tmp_path / "urls.db",
         library_path=tmp_path / "library",
+        # No floor: the stub payload is twelve bytes, and a refused transfer
+        # would prove nothing about where a decryption key travels.
+        min_download_size=0,
     )
 
 

@@ -26,17 +26,36 @@ resource is a decision about the *download* path — the record is rebuilt on
 every status change today — and it is deliberately not made here. The column
 exists so that making it later is a write rather than a migration, which
 ``CREATE TABLE IF NOT EXISTS`` would not give us: it does nothing at all to a
-table that already exists. **If a further column is needed after this release,
-adding it below is not enough**; see :data:`maxicrawler.database.crawls.ADDED_COLUMNS`
-for how an appended column is handled, and copy that.
+table that already exists. **A column added after a release therefore has to be
+declared in** :data:`ADDED_COLUMNS` **as well as in the schema below** — which is
+what happened when judgements arrived, and what the two entries there are.
 """
 
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from contextlib import closing
 from dataclasses import dataclass
 
 from maxicrawler.database.sqlite import SQLiteDatabase
+
+TABLE = "library_entries"
+"""The one table this adapter owns."""
+
+ADDED_COLUMNS: Mapping[str, str] = {
+    "verdict": "TEXT NOT NULL DEFAULT ''",
+    "favourite": "INTEGER NOT NULL DEFAULT 0",
+}
+"""Columns that arrived after ``library_entries`` was first released.
+
+Exactly what the module docstring below predicted would be needed, handled the
+way :data:`maxicrawler.database.crawls.ADDED_COLUMNS` handles it: ``CREATE TABLE
+IF NOT EXISTS`` does nothing to a table that already exists, so a database from
+the previous release keeps its old shape until these are appended.
+
+Each definition carries a default, because an existing row has to stay valid
+without being rewritten. A row written before this release therefore reads as
+unreviewed and unstarred, which is the truth about it.
+"""
 
 SCHEMA = (
     """
@@ -48,6 +67,8 @@ SCHEMA = (
         size INTEGER NOT NULL,
         source_url TEXT NOT NULL DEFAULT '',
         status TEXT NOT NULL DEFAULT '',
+        verdict TEXT NOT NULL DEFAULT '',
+        favourite INTEGER NOT NULL DEFAULT 0,
         checksum TEXT,
         entry_id TEXT,
         document TEXT NOT NULL,
@@ -92,6 +113,16 @@ class IndexedEntry:
     """
 
     status: str = ""
+    verdict: str = ""
+    """What somebody decided about it, empty for a document that would not parse.
+
+    Written from the release that introduced judgements although nothing reads
+    it yet, for the reason :attr:`checksum` gives: counting how many entries are
+    unreviewed is a query over this column, and a column filled from the start
+    needs no reindex to become one.
+    """
+
+    favourite: bool = False
     checksum: str | None = None
     """The SHA-256 of the payload, when the record states one.
 
@@ -129,11 +160,16 @@ class SQLiteLibraryIndex:
         """Return the underlying database adapter."""
         return self._database
 
-    def initialize(self) -> None:
-        """Create the cache table if it does not exist yet."""
+    def initialize(self) -> tuple[str, ...]:
+        """Create the cache table if it does not exist, and return what was added.
+
+        A table from an earlier release is brought up to the shape above rather
+        than left behind; see :data:`ADDED_COLUMNS`.
+        """
         with closing(self._database.connect()) as connection, connection:
             for statement in SCHEMA:
                 connection.execute(statement)
+        return self._database.add_missing_columns(TABLE, ADDED_COLUMNS)
 
     def entries(self, root: str) -> dict[tuple[str, str], IndexedEntry]:
         """Return everything cached for the library at *root*, by identity.
@@ -169,11 +205,12 @@ class SQLiteLibraryIndex:
             connection.executemany(
                 "INSERT INTO library_entries("
                 "root, directory, key, mtime_ns, size, source_url, status, "
-                "checksum, entry_id, document"
-                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "verdict, favourite, checksum, entry_id, document"
+                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(root, directory, key) DO UPDATE SET "
                 "mtime_ns = excluded.mtime_ns, size = excluded.size, "
                 "source_url = excluded.source_url, status = excluded.status, "
+                "verdict = excluded.verdict, favourite = excluded.favourite, "
                 "checksum = excluded.checksum, entry_id = excluded.entry_id, "
                 "document = excluded.document",
                 tuple(
@@ -185,6 +222,8 @@ class SQLiteLibraryIndex:
                         entry.size,
                         entry.source_url,
                         entry.status,
+                        entry.verdict,
+                        int(entry.favourite),
                         entry.checksum,
                         entry.entry_id,
                         entry.document,
@@ -224,6 +263,8 @@ def _to_entry(row: sqlite3.Row) -> IndexedEntry:
         document=str(row["document"]),
         source_url=str(row["source_url"]),
         status=str(row["status"]),
+        verdict=str(row["verdict"]),
+        favourite=bool(row["favourite"]),
         checksum=None if checksum is None else str(checksum),
         entry_id=None if entry_id is None else str(entry_id),
     )

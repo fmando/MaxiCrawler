@@ -11,6 +11,19 @@ The digest is computed while writing rather than by re-reading the file
 afterwards. It costs nothing extra on a stream that is being written anyway,
 and it means a stored resource always carries a checksum without a second pass
 over a file that may be gigabytes long.
+
+**A floor on what is worth keeping lives here too**, and here rather than in a
+provider or in the crawler. A provider answers *"what can I do with this
+resource?"* and has no business holding an opinion about whether it is worth
+having; the provider protocol already names discarding as the business of
+whoever created the sink. The crawler is further away still — it knows URLs, and
+learning a size would mean a request per discovered file against somebody else's
+server.
+
+It is checked twice, because a size is not always known in advance. Announced
+before the transfer, it saves the bytes; discovered only at the end, it is
+caught at :meth:`LibrarySink.commit`, where the payload is still under
+``.incomplete`` and is discarded without ever having been visible (ADR-012).
 """
 
 import hashlib
@@ -21,8 +34,13 @@ from typing import BinaryIO
 
 from maxicrawler.domain import Checksum, ContentDescriptor
 from maxicrawler.downloader.control import DownloadControl
-from maxicrawler.downloader.errors import DownloadCancelledError, DownloadError
+from maxicrawler.downloader.errors import (
+    DownloadCancelledError,
+    DownloadError,
+    DownloadRefusedError,
+)
 from maxicrawler.library import ContentRecord, LibraryEntry, safe_filename
+from maxicrawler.utils import format_size
 
 DEFAULT_HASH_ALGORITHM = "sha256"
 """Digest recorded for every stored payload.
@@ -55,6 +73,7 @@ class LibrarySink:
         "_entry",
         "_filename",
         "_handle",
+        "_minimum_size",
         "_on_progress",
         "_staged",
         "_written",
@@ -67,11 +86,13 @@ class LibrarySink:
         algorithm: str = DEFAULT_HASH_ALGORITHM,
         on_progress: ProgressCallback | None = None,
         control: DownloadControl | None = None,
+        minimum_size: int = 0,
     ) -> None:
         self._entry = entry
         self._algorithm = algorithm
         self._on_progress = on_progress
         self._control = control
+        self._minimum_size = minimum_size
         self._digest = hashlib.new(algorithm)
         self._descriptor: ContentDescriptor | None = None
         self._handle: BinaryIO | None = None
@@ -103,13 +124,22 @@ class LibrarySink:
     def begin(self, content: ContentDescriptor) -> None:
         """Open the staging file for the payload *content* describes.
 
+        A payload the provider announces as smaller than the configured floor is
+        turned away here, before a byte is transferred and before a staging file
+        exists. An *unknown* size is not a small one — :attr:`ContentDescriptor.size`
+        is ``None`` when the host stated no length — so that case passes and is
+        caught at :meth:`commit` instead.
+
         Raises:
+            DownloadRefusedError: the announced payload is under the floor.
             DownloadError: the transfer already began, or the staging file
                 could not be opened.
         """
         if self._handle is not None:
             msg = "a transfer announced its content twice"
             raise DownloadError(msg)
+        if content.size is not None:
+            self._refuse_if_small(content.size)
         self._descriptor = content
         self._filename = safe_filename(content.name)
         self._staged = self._entry.reserve(self._filename)
@@ -158,11 +188,17 @@ class LibrarySink:
         claims to be complete while holding a truncated file, which is the one
         failure a library must never contain.
 
+        A payload under the configured floor is discarded here as well, which is
+        what catches every host that announced no length. It has cost its bytes
+        by this point and nothing else: the file is still under ``.incomplete``
+        and never becomes visible.
+
         The staging directory is removed afterwards, so a finished entry
         contains only what it holds — an empty ``.incomplete`` left behind
         would read as a transfer that never finished.
 
         Raises:
+            DownloadRefusedError: the payload is under the floor.
             DownloadError: nothing was announced, or the payload is not the
                 size it was supposed to be.
         """
@@ -174,6 +210,11 @@ class LibrarySink:
             self.abort()
             msg = f"transfer is incomplete: {self._written} of {expected} bytes arrived"
             raise DownloadError(msg)
+        try:
+            self._refuse_if_small(self._written)
+        except DownloadRefusedError:
+            self.abort()
+            raise
         self._close()
         stored = self._entry.commit(self._staged, self._filename)
         self._committed = True
@@ -190,6 +231,22 @@ class LibrarySink:
         """Close the staging file and remove it."""
         self._close()
         self._entry.discard()
+
+    def _refuse_if_small(self, size: int) -> None:
+        """Turn *size* away when it is under the floor, naming both numbers.
+
+        Raises:
+            DownloadRefusedError: *size* is below the configured minimum. The
+                message carries the two sizes, because "refused" without them
+                is a file that disappeared for a reason nobody can check.
+        """
+        if self._minimum_size <= 0 or size >= self._minimum_size:
+            return
+        msg = (
+            f"under the minimum download size: {format_size(size)} "
+            f"of {format_size(self._minimum_size)}"
+        )
+        raise DownloadRefusedError(msg)
 
     def __enter__(self) -> "LibrarySink":
         """Return the sink itself, so it can be used in a ``with`` block."""

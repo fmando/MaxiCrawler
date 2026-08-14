@@ -20,7 +20,11 @@ from pathlib import Path
 
 from maxicrawler.domain import Checksum, DownloadStatus
 from maxicrawler.downloader.control import DownloadControl
-from maxicrawler.downloader.errors import DownloadCancelledError, DownloadError
+from maxicrawler.downloader.errors import (
+    DownloadCancelledError,
+    DownloadError,
+    DownloadRefusedError,
+)
 from maxicrawler.downloader.models import (
     DownloadJob,
     DownloadOutcome,
@@ -72,6 +76,7 @@ class DownloadWorker:
         clock: Clock | None = None,
         algorithm: str = DEFAULT_HASH_ALGORITHM,
         control: DownloadControl | None = None,
+        minimum_size: int = 0,
     ) -> None:
         self._providers = providers
         self._library = library
@@ -79,6 +84,7 @@ class DownloadWorker:
         self._clock = clock if clock is not None else _utc_now
         self._algorithm = algorithm
         self._control = control
+        self._minimum_size = minimum_size
 
     def execute(self, job: DownloadJob) -> DownloadOutcome:
         """Transfer *job* into the library and report what happened."""
@@ -101,6 +107,12 @@ class DownloadWorker:
                 reason="the library already holds it",
                 path=stored,
             )
+        dismissed = _dismissed(record)
+        if dismissed is not None:
+            # Nothing is written. The record already says everything true about
+            # this entry, and rebuilding it would reset the status and drop the
+            # account of what was once downloaded — for a job that did nothing.
+            return self._finish(job, DownloadStatus.REFUSED, started, reason=dismissed)
         return self._transfer(job, entry, record, started)
 
     def _transfer(
@@ -120,9 +132,21 @@ class DownloadWorker:
                 algorithm=self._algorithm,
                 on_progress=lambda written: self._reporter.advanced(job, written),
                 control=self._control,
+                minimum_size=self._minimum_size,
             ) as sink:
                 descriptor = provider.download(job.ref, sink)
                 content = sink.commit()
+        except DownloadRefusedError as error:
+            # A rule here turned it away. Recorded, and that is the point of it:
+            # without a record the same file is fetched again by the next bulk
+            # queue, refused again, and the decision is never actually made.
+            # Before the generic clause below, which would call it a failure.
+            reason = str(error)
+            self._store(
+                entry,
+                self._record(job, entry, DownloadStatus.REFUSED, attempts, previous, error=reason),
+            )
+            return self._finish(job, DownloadStatus.REFUSED, started, reason=reason)
         except DownloadCancelledError:
             # Nothing is recorded. A cancelled transfer leaves the library
             # exactly as it was, and a stored record saying "failed" would turn
@@ -132,7 +156,8 @@ class DownloadWorker:
         except (ProviderError, LibraryError, DownloadError, OSError) as error:
             reason = str(error)
             self._store(
-                entry, self._record(job, entry, DownloadStatus.FAILED, attempts, error=reason)
+                entry,
+                self._record(job, entry, DownloadStatus.FAILED, attempts, previous, error=reason),
             )
             return self._finish(job, DownloadStatus.FAILED, started, reason=reason)
         self._store(
@@ -142,6 +167,7 @@ class DownloadWorker:
                 entry,
                 DownloadStatus.COMPLETED,
                 attempts,
+                previous,
                 name=descriptor.name or job.name,
                 content=content,
             ),
@@ -161,12 +187,25 @@ class DownloadWorker:
         entry: LibraryEntry,
         status: DownloadStatus,
         attempts: int,
+        previous: ResourceRecord | None,
         *,
         name: str | None = None,
         content: ContentRecord | None = None,
         error: str | None = None,
     ) -> ResourceRecord:
-        """Return the metadata document describing *job* in *status*."""
+        """Return the metadata document describing *job* in *status*.
+
+        Built fresh from the job rather than edited into the old document, so
+        what a completed transfer says is decided by the transfer and not by
+        whatever the entry happened to hold before it.
+
+        Two members are the exception, and they are the ones this layer has no
+        opinion about. **A judgement and an unrecognised member are carried
+        forward from *previous* verbatim.** Rebuilding them away would mean
+        somebody's decision to keep a file was erased by fetching it a second
+        time — and would quietly break the promise ADR-013 makes about unknown
+        members surviving, which `to_document` keeps and this method used not to.
+        """
         record = new_record(
             job.ref,
             entry.key,
@@ -181,6 +220,8 @@ class DownloadWorker:
             attempts=attempts,
             error=error,
             content=content,
+            review=None if previous is None else previous.review,
+            extra={} if previous is None else previous.extra,
         )
 
     @staticmethod
@@ -241,6 +282,7 @@ class DownloadManager:
         reporter: ProgressReporter | None = None,
         clock: Clock | None = None,
         control: DownloadControl | None = None,
+        minimum_size: int = 0,
     ) -> None:
         self._providers = providers
         self._library = library
@@ -256,7 +298,12 @@ class DownloadManager:
             worker
             if worker is not None
             else DownloadWorker(
-                providers, library, reporter=self._reporter, clock=clock, control=control
+                providers,
+                library,
+                reporter=self._reporter,
+                clock=clock,
+                control=control,
+                minimum_size=minimum_size,
             )
         )
 
@@ -316,6 +363,33 @@ def _stored_payload(entry: LibraryEntry, record: ResourceRecord | None) -> Path 
         return None
     path = entry.path / record.content.path
     return path if path.is_file() else None
+
+
+def _dismissed(record: ResourceRecord | None) -> str | None:
+    """Return why this resource is not fetched, or ``None`` when it is.
+
+    The place the library's promise is actually kept. A verdict of *ignored* or
+    *discarded* means somebody has already decided, and a download that ran
+    anyway would undo that decision by hand — for the discarded it would put the
+    very bytes back that removing them was the point of.
+
+    Read from the entry's own record rather than passed in, so the rule holds
+    for every route into the queue: a bulk queue, a single button, and a command
+    line all arrive here. The bulk queue leaves these out earlier as well, and
+    the two are not redundant — that one keeps two hundred pointless jobs off
+    the queue, and this one is what makes the promise true.
+
+    Deliberately *after* the check for a payload that is already stored. The two
+    only disagree about an entry that was ignored and whose file is still there,
+    and about that one "the library already holds it" is the better answer: it
+    is the more useful fact, and it comes with the path.
+
+    The reason names the verdict and the way out of it, which is what
+    :attr:`~maxicrawler.domain.DownloadStatus.REFUSED` is documented to require.
+    """
+    if record is None or not record.verdict.is_dismissed:
+        return None
+    return f"{record.verdict.value} here, and not fetched again until that is taken back"
 
 
 def _utc_now() -> datetime:

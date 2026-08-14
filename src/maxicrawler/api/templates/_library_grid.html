@@ -1,0 +1,12 @@
+{#
+  The library as tiles: the layout `/library` means, and the one to sort in.
+
+  A list, because that is what it is — sixty entries, one after another. The
+  columns are the stylesheet's business, so the number of them follows the
+  window without a media query per width and without a line of script.
+#}
+<ul class="tiles">
+  {% for item in library.rows %}
+    {% include "_library_card.html" %}
+  {% endfor %}
+</ul>

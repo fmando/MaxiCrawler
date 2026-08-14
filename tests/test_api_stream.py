@@ -11,6 +11,8 @@ import threading
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
+from test_api_views import make_report
+
 from maxicrawler.api.jobs import CrawlJob, JobSnapshot
 from maxicrawler.api.stream import (
     DEFAULT_HEARTBEAT_SECONDS,
@@ -40,6 +42,22 @@ def page_crawled(url: str = "https://example.test/a", links: int = 7) -> PageCra
     return PageCrawled(
         session_id="job-1", url=url, final_url=url, depth=1, status=200, link_count=links
     )
+
+
+def crawl_ended(job: CrawlJob, *, pages: int = 1) -> None:
+    """End *job* the way a finishing crawl ends it, in both of its steps.
+
+    The engine announces that it has stopped crawling, and the registry hands
+    the report over once it has been written — two moments with a SQLite write
+    between them, and the stream ends on the second. Ending on the first is
+    what this used to do, and it sent a browser reloading on ``finished`` to a
+    report that did not exist yet. Called from the same thread the events come
+    from, because that is where the registry calls it.
+    """
+    job.bus.publish(
+        CrawlFinished(session_id=job.id, state="completed", pages_visited=pages, pages_failed=0)
+    )
+    job.complete(make_report())
 
 
 def run[T](coroutine: Callable[[], Awaitable[T]], *, timeout: float = 5.0) -> T:
@@ -156,9 +174,7 @@ def test_the_first_frame_describes_the_present() -> None:
 
 def test_a_crawl_that_already_finished_says_so_immediately() -> None:
     job = make_job()
-    job.bus.publish(
-        CrawlFinished(session_id="job-1", state="completed", pages_visited=1, pages_failed=0)
-    )
+    crawl_ended(job)
 
     async def collect() -> list[ServerEvent]:
         return [event async for event in crawl_events(job, heartbeat=0.05)]
@@ -197,11 +213,7 @@ def test_progress_from_a_worker_thread_reaches_the_stream() -> None:
             job.bus.publish(CrawlStarted(session_id="job-1", seed_url="x", max_depth=1))
             job.bus.publish(page_crawled())
             job.bus.publish(page_crawled("https://example.test/b"))
-            job.bus.publish(
-                CrawlFinished(
-                    session_id="job-1", state="completed", pages_visited=2, pages_failed=0
-                )
-            )
+            crawl_ended(job, pages=2)
 
         worker = threading.Thread(target=crawl, daemon=True)
         worker.start()
@@ -231,11 +243,7 @@ def test_a_slow_reader_gets_the_latest_state_not_a_backlog() -> None:
                 # Everything below happens before the reader asks again.
                 for index in range(20):
                     job.bus.publish(page_crawled(f"https://example.test/{index}"))
-                job.bus.publish(
-                    CrawlFinished(
-                        session_id="job-1", state="completed", pages_visited=20, pages_failed=0
-                    )
-                )
+                crawl_ended(job, pages=20)
         return events
 
     events = run(collect)
@@ -319,9 +327,7 @@ def test_two_streams_watch_the_same_crawl() -> None:
         second = asyncio.create_task(watch())
         await asyncio.sleep(0.05)
         job.bus.publish(page_crawled())
-        job.bus.publish(
-            CrawlFinished(session_id="job-1", state="completed", pages_visited=1, pages_failed=0)
-        )
+        crawl_ended(job)
         return await first, await second
 
     left, right = run(collect)

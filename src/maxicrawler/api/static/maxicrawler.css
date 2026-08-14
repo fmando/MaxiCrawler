@@ -570,6 +570,8 @@ footer {
 }
 .filters label { display: flex; flex-direction: column; gap: 4px; }
 .filters label.wide { flex: 1 1 260px; }
+/* A size bound is four characters wide however much room the row has. */
+.filters label.narrow input { width: 92px; }
 .filters span {
   font-size: 10px;
   letter-spacing: 0.08em;
@@ -802,25 +804,75 @@ footer {
  * the content is inside a sandboxed frame of its own origin, so nothing here
  * can measure it, and a frame that guessed would jump on every load.
  */
-.viewer {
-  margin-top: 16px;
+/* --- one file, and somewhere to work through a listing of them ----------- */
+
+/*
+ * Two columns, and the proportions are the argument: the question being
+ * answered on this page is "do I want this?", which is answered by looking at
+ * the thing rather than by reading its checksum. So the file takes the room and
+ * the facts take a column beside it.
+ *
+ * One column below 900px, file first. A narrow window is a window where the
+ * facts are a scroll away rather than a layout to preserve.
+ */
+.workplace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 16px;
+  padding: 16px;
+}
+@media (max-width: 900px) {
+  .workplace { grid-template-columns: minmax(0, 1fr); }
+}
+
+.stage {
+  min-width: 0;
   background: var(--bg);
   border: 1px solid var(--border-strong);
+  padding: 12px;
 }
-.viewer iframe {
+/*
+ * `70vh` rather than a fixed height: what makes a picture worth judging at a
+ * glance is that it fills the screen it is on, and the screens this runs on
+ * differ by a factor of three.
+ */
+.stage .shown {
   display: block;
+  max-width: 100%;
+  max-height: 70vh;
+  margin: 0 auto;
+  border: 0;
+}
+.stage iframe.shown {
   width: 100%;
   height: 70vh;
   min-height: 320px;
-  border: 0;
   background: #fff;
 }
-.viewer img {
-  display: block;
-  max-width: 100%;
-  height: auto;
-  margin: 0 auto;
+.stage video.shown { width: 100%; background: #000; }
+.stage audio.shown { width: 100%; max-height: none; }
+
+.facts { min-width: 0; }
+.facts .review-bar { padding: 0 0 10px; }
+.facts .grid td { padding: 5px 8px; }
+.facts .url { word-break: break-all; }
+
+/*
+ * Where in the listing this file stands. Both ends are always named; at the
+ * first and last file the link is simply not a link, so the bar does not change
+ * width as somebody walks through it.
+ */
+.walk {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
 }
+.walk-step { text-decoration: none; }
+.walk-count { color: var(--muted); font-variant-numeric: tabular-nums; }
+.walk .aside { margin-left: auto; }
 
 /*
  * One line about the transfer that is running, on the pages you would be on
@@ -838,3 +890,290 @@ footer {
   font-size: 13px;
 }
 .running .url { flex: 1 1 auto; }
+
+/* --- the library, as tiles ---------------------------------------------- */
+
+/*
+ * Two layouts over one listing. The tiles are the default because sorting
+ * through a few hundred files is looking, not reading, and the list stays for
+ * when the path and the source link are what is wanted.
+ *
+ * `auto-fill` rather than a column count: the number of columns follows the
+ * window, so there is no media query per width and no line of script deciding
+ * anything. A tile is 200px at its narrowest and stretches to fill the row,
+ * which keeps the last row from being a ragged half.
+ */
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+  padding: 16px;
+  margin: 0;
+  list-style: none;
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+.tile:hover { border-color: var(--border-strong); }
+/* Something is being fetched for this entry right now. */
+.tile.busy { border-color: var(--busy); }
+
+/*
+ * A fixed square rather than the picture's own shape, so the rows line up and
+ * scrolling does not jump as images arrive. `cover` crops rather than letterboxes:
+ * the question here is "which file is this", and a crop answers it.
+ */
+.tile-shot {
+  display: block;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.tile-shot:hover { text-decoration: none; }
+
+.tile-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  font-size: 12px;
+}
+.tile-name {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.tile-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+}
+.tile-meta .num { font-family: var(--mono); }
+
+/* --- what stands in for a file ------------------------------------------ */
+
+.shot-image,
+.shot-text,
+.shot-symbol {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.shot-image { object-fit: cover; }
+
+/*
+ * The first lines of a text file, shown small and clipped. Not scrollable:
+ * a preview that could be read to the end would be a viewer, and there is one
+ * of those a click away.
+ */
+.shot-text {
+  margin: 0;
+  padding: 8px;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/*
+ * Category marks, drawn by this file. Inline SVG in a data URI, so a library of
+ * ten thousand files still generates no image, writes no cache directory and
+ * makes no extra request — and so the whole set is one line to change.
+ *
+ * The colour is baked into each mark rather than inherited, which is the price
+ * of a background image. There is one theme, so the price is not being paid
+ * twice; a second theme would move these to `mask-image` and `background-color`.
+ */
+.shot-symbol {
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 44px 44px;
+}
+.shot-symbol.image {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='1.4'%3E%3Crect x='3' y='5' width='18' height='14'/%3E%3Ccircle cx='8.5' cy='10' r='1.6'/%3E%3Cpath d='M3 16.5l5-4.5 4 3.5 3-2.5 6 5'/%3E%3C/svg%3E");
+}
+.shot-symbol.video {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='1.4'%3E%3Crect x='3' y='5' width='18' height='14'/%3E%3Cpath d='M10 9l5 3-5 3z'/%3E%3C/svg%3E");
+}
+.shot-symbol.audio {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='1.4'%3E%3Cpath d='M9 17V5l10-2v12'/%3E%3Ccircle cx='6.5' cy='17' r='2.5'/%3E%3Ccircle cx='16.5' cy='15' r='2.5'/%3E%3C/svg%3E");
+}
+.shot-symbol.pdf {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='1.4'%3E%3Cpath d='M6 3h8l4 4v14H6z'/%3E%3Cpath d='M14 3v4h4'/%3E%3Cpath d='M9 13h6M9 16h6'/%3E%3C/svg%3E");
+}
+.shot-symbol.document {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='1.4'%3E%3Cpath d='M6 3h8l4 4v14H6z'/%3E%3Cpath d='M14 3v4h4'/%3E%3C/svg%3E");
+}
+.shot-symbol.archive {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='1.4'%3E%3Crect x='4' y='4' width='16' height='16'/%3E%3Cpath d='M4 9h16'/%3E%3Cpath d='M11 4v5M13 9v3M11 12v3'/%3E%3C/svg%3E");
+}
+.shot-symbol.text {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='1.4'%3E%3Cpath d='M5 5h14M5 9h14M5 13h10M5 17h6'/%3E%3C/svg%3E");
+}
+.shot-symbol.other {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='1.4'%3E%3Cpath d='M6 3h8l4 4v14H6z'/%3E%3Cpath d='M14 3v4h4'/%3E%3Cpath d='M12 12v3'/%3E%3Ccircle cx='12' cy='17.5' r='0.6' fill='%236b7280'/%3E%3C/svg%3E");
+}
+
+/* The same mark in the dense layout, at the size a row can spare. */
+.library-rows td.shot,
+.library-rows th.shot { width: 44px; padding: 4px 8px 4px 16px; }
+.library-rows td.shot a {
+  display: block;
+  width: 36px;
+  height: 36px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+.library-rows .shot-symbol { background-size: 22px 22px; }
+.library-rows .shot-text { padding: 2px; font-size: 5px; line-height: 1.2; }
+
+/* --- switching between the two ------------------------------------------ */
+
+.layouts { display: flex; gap: 2px; }
+.layout {
+  padding: 2px 10px;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+}
+.layout:hover { color: var(--text); text-decoration: none; }
+.layout.active { color: var(--text); border-color: var(--accent); }
+
+/* --- saying what you think of a file ------------------------------------ */
+
+/*
+ * The same four controls on a tile, on a table row and on one file's own page.
+ * Small and quiet: they are pressed a few hundred times in a sitting, so they
+ * have to be reachable without being the loudest thing on the page.
+ */
+.verdicts {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.verdict {
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+}
+.verdict:hover { color: var(--text); border-color: var(--accent); }
+.verdict.active { color: var(--text); border-color: var(--accent); background: var(--raised); }
+.verdict.undo { margin-left: auto; }
+.verdict.star { font-size: 13px; line-height: 1; padding: 1px 7px; }
+.verdict.star.active { color: var(--warn); }
+
+/*
+ * The one button that deletes something, wherever it sits. Outlined rather than
+ * filled: it is on every tile, and sixty red blocks would be a page shouting at
+ * somebody who is only sorting through pictures. It shows what it is on hover
+ * and on focus, which is when it is about to be pressed.
+ */
+.verdict.verdict-discarded:hover,
+.verdict.verdict-discarded:focus-visible { color: var(--bad); border-color: var(--bad); }
+.verdict.verdict-discarded.active { color: var(--bad); border-color: var(--bad); }
+
+/* In the batch row it is coloured at rest, because there it acts on rows
+ * somebody cannot all see at once. */
+.batch button.verdict-discarded { color: var(--bad); border-color: var(--bad); }
+
+/* --- before deleting a batch of files ------------------------------------ */
+
+/*
+ * A warning rather than a failure, and coloured as one: `.error` is what a page
+ * says when something went wrong, and nothing has gone wrong here yet.
+ */
+.caution {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  color: var(--warn);
+  border: 1px solid var(--warn);
+  background: rgba(201, 146, 47, 0.08);
+}
+
+.discard-list {
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+.discard-list li {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.discard-list .num { margin-left: auto; }
+
+button.danger {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+button.danger:hover { background: rgba(192, 83, 83, 0.12); }
+
+/* What a row already decided reads as, beside the transfer's own badge. */
+.verdict-mark {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+/* A judged tile steps back; the unreviewed ones are the work in front of you. */
+.tile.ignored,
+.tile.discarded { opacity: 0.55; }
+.tile.kept .verdict-mark { color: var(--good); }
+
+.review-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tile-tick {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+}
+.tile { position: relative; }
+
+.library-rows td.tick,
+.library-rows th.tick { width: 28px; padding-left: 16px; }
+
+.tick-every { display: flex; align-items: center; gap: 6px; }
+.tick-every input[hidden] { display: none; }
+
+/*
+ * Present for screen readers and gone for everyone else. A tick with no label
+ * is a control nobody using a reader can identify; a visible label on sixty
+ * tiles is sixty repetitions of the same words.
+ */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

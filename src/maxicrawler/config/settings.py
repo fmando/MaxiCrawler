@@ -43,6 +43,60 @@ class Settings:
     nothing about what may be stored.
     """
 
+    max_stream_bytes: int = 0
+    """Largest audio or video file the interface will play, or 0 for no limit.
+
+    Its own bound rather than :attr:`max_view_bytes`, because the two limits
+    exist for opposite reasons. That one is about a browser being handed a whole
+    file at once: a 400 MB text document has to arrive and be laid out before
+    anything appears. An ``<audio>`` or ``<video>`` element does not work that
+    way — it asks for the ranges it needs, plays from the first of them, and
+    never holds the file. A two-gigabyte recording therefore starts as quickly as
+    a two-megabyte one, and refusing it would be applying a rule whose reason
+    does not reach it.
+
+    Unbounded by default for the same reason, and configurable anyway: what a
+    person is really bounding here is a network they share, not a browser they
+    might hang.
+    """
+
+    preview_inline_bytes: int = 1_000_000
+    """Largest image a tile shows as itself, in bytes.
+
+    A grid of sixty tiles that each loaded the original is a page that transfers
+    what sixty originals weigh — and this server does not usually run on the
+    machine somebody is looking at it from, so those bytes cross a network. The
+    second cost is worse and is not a file size at all: a browser holds a decoded
+    image as a bitmap of four bytes per pixel, so a 300 kB photograph at
+    6000×4000 occupies roughly 96 MB while it is on screen.
+
+    Above the limit a tile shows a symbol and the size, never a scaled-down
+    original — scaling in the browser means the original was transferred and
+    decoded first, which is precisely the cost being avoided.
+
+    One megabyte is a starting value covering the web-sized pictures a crawl
+    mostly returns, and is meant to be measured against a real library rather
+    than trusted. Zero shows no image in any tile.
+    """
+
+    min_download_size: int = 100_000
+    """Smallest payload worth putting in the library, in bytes.
+
+    100 kB, decimal, the same unit sizes are shown in. A crawl of an image
+    directory returns a thumbnail, a sprite and an icon for every picture worth
+    having, and clearing those out by hand does not work: the next bulk queue
+    fetches them again, because "the library holds it" is answered by a record
+    and a file, and both are gone.
+
+    It is applied in the download sink, so it applies to every transfer — one
+    clicked by hand as much as one out of a batch. Two rules would be two
+    explanations, and the sink does not know who asked.
+
+    Zero switches it off. Nothing is ever silently dropped either way: a refused
+    payload is recorded with both sizes and appears in the library under its own
+    state, which is the whole difference between a limit and a disappearance.
+    """
+
     crawl_depth: int = 0
     """Default link distance a crawl follows; zero fetches the seed alone."""
 
@@ -191,6 +245,15 @@ class Settings:
         if self.max_view_bytes < 1:
             msg = "max_view_bytes must be at least 1"
             raise ValueError(msg)
+        if self.max_stream_bytes < 0:
+            msg = "max_stream_bytes must not be negative"
+            raise ValueError(msg)
+        if self.preview_inline_bytes < 0:
+            msg = "preview_inline_bytes must not be negative"
+            raise ValueError(msg)
+        if self.min_download_size < 0:
+            msg = "min_download_size must not be negative"
+            raise ValueError(msg)
         if self.crawl_depth < 0:
             msg = "crawl_depth must not be negative"
             raise ValueError(msg)
@@ -235,6 +298,13 @@ class Settings:
             max_redirects=_int_value(app_config, "max_redirects", defaults.max_redirects),
             max_links=_int_value(app_config, "max_links", defaults.max_links),
             max_view_bytes=_int_value(app_config, "max_view_bytes", defaults.max_view_bytes),
+            max_stream_bytes=_int_value(app_config, "max_stream_bytes", defaults.max_stream_bytes),
+            preview_inline_bytes=_int_value(
+                app_config, "preview_inline_bytes", defaults.preview_inline_bytes
+            ),
+            min_download_size=_int_value(
+                app_config, "min_download_size", defaults.min_download_size
+            ),
             crawl_depth=_int_value(app_config, "crawl_depth", defaults.crawl_depth),
             crawl_max_pages=_int_value(app_config, "crawl_max_pages", defaults.crawl_max_pages),
             crawl_same_domain=_bool_value(
@@ -278,6 +348,8 @@ class Settings:
             f"max_redirects = {self.max_redirects}\n"
             f"max_links = {self.max_links}\n"
             f"max_view_bytes = {self.max_view_bytes}\n"
+            f"preview_inline_bytes = {self.preview_inline_bytes}\n"
+            f"min_download_size = {self.min_download_size}\n"
             f"crawl_depth = {self.crawl_depth}\n"
             f"crawl_max_pages = {self.crawl_max_pages}\n"
             f"crawl_same_domain = {str(self.crawl_same_domain).lower()}\n"

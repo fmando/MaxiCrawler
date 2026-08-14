@@ -37,8 +37,12 @@ The mission, core principles, and non-goals are described in
 -   0.15 The report as a workspace ✅ — what is already known about each link,
     a way back from a batch that keeps the filter you queued it from, and a
     queue you can watch a hundred files through without reloading a page
--   0.16 Scheduler & Automation
--   0.17 REST API
+-   0.16 The library as a workspace ✅ — tiles you can judge a file from, four
+    verdicts that survive the next download, a discard that takes the bytes back
+    and is not offered again, and a viewer you can walk a filtered listing
+    through
+-   0.17 Scheduler & Automation
+-   0.18 REST API
 -   1.0 Stable Release
 
 The desktop GUI that used to sit at 0.11 is superseded by 0.10. A local server
@@ -87,15 +91,33 @@ not change.
     bounds how much a transfer may be, which was academic while the only
     reachable host was Mega and is not now that one filter and one click can
     queue a site's image directory. A setting rather than a rule — the queue's
-    own limit is what bounds a run today
+    own limit is what bounds a run today. The shape is settled since 0.16: the
+    floor at the other end is `min_download_size`, checked in the sink at both
+    the moment a size is announced and the moment the last byte lands (ADR-042),
+    and a ceiling is the same two checkpoints with the comparison turned around
+-   Thumbnails, and with them a tile view that does not care how large the
+    picture behind it is. 0.16 draws a tile from the stored file itself below
+    `preview_inline_bytes` and from a symbol above it, which is honest and is
+    also why a directory of 20-megapixel photographs shows mostly symbols. Two
+    rules are already fixed for whenever this is built: a thumbnail is
+    exclusively a cache, deletable in full at any time and never a statement an
+    entry makes about itself, and it never lives inside `library/`
+-   Columns for what a listing filters and sorts by, so the index stops handing
+    back a document to parse. The saving today is the file read, not the parse:
+    two thousand rows come back in one database read and are parsed one JSON
+    string at a time. The columns a judgement needs exist and already answer
+    *stored* and *dismissed* without parsing; the rest waits for a measurement
+    that says it is worth the extraction rules
 -   Deduplicating what is queued. `TransferQueue.submit` will happily hold the
     same URL twice, and "queue every match" pressed after a partial drain
     re-queues what already arrived. Half of this landed in 0.15: the set
     questions are answered — `LibraryService.stored` and `TransferQueue.pending`
     are what mark a report's rows *in library* and *in queue* (ADR-037) — and a
-    report now shows you before you click. What is missing is the queue itself
-    declining, which is a decision about what a refusal means rather than about
-    where the answer comes from
+    report now shows you before you click. 0.16 added the first refusal: what
+    somebody ignored or discarded is left out of *"queue every match"* and turned
+    away by the worker (ADR-041). What is missing is the queue declining a URL it
+    already holds, which is a decision about what a refusal means rather than
+    about where the answer comes from
 -   A politeness schedule shared across concurrent crawls. Today a `HostSchedule`
     lives per crawl, which is exactly right while `serve` runs one worker and
     wrong the moment it runs two
@@ -127,8 +149,18 @@ not change.
     for the key an entry already has. The natural anchor is the checksum, which
     is address-independent and recomputable both — so the column stays empty
     until this question is asked properly, and this question chooses the answer
--   `library` commands — list, verify, prune. `LibraryService` already answers
-    the first two questions; what is missing is the command that asks them
+-   `library` commands — list, verify, prune, and now judge. `LibraryService`
+    answers listing, verifying, reviewing and discarding already; what is
+    missing is the command that asks them, and it is also the client that would
+    show the browser is not the only way to reach a verdict. Pruning is still
+    nobody's question: discarding takes the payload and deliberately keeps the
+    record, so removing an entry outright is a different decision
+-   One writer at a time per entry. A download finishing while somebody judges
+    the same file can lose one of the two writes: the read and the write are
+    consecutive and nothing locks the directory. The damage is bounded by the
+    two writers touching disjoint members (ADR-040), so the worst case is one
+    judgement lost rather than a document describing a file that is not there —
+    which is why this is named rather than urgent
 -   Per-host politeness for downloads. The queue drains one at a time, and that
     is a decision rather than a limit (ADR-033) — but the reason to keep it is
     a host's patience, which nothing currently measures. A schedule like the
@@ -141,7 +173,10 @@ not change.
     dependency (ADR-038). The question is how many more places want their own
     forty lines
 -   Authentication, before the interface is anything but loopback. Until then
-    `serve` refuses a public address unless `--allow-remote` asks for it
+    `serve` refuses a public address unless `--allow-remote` asks for it. More
+    pressing since 0.16, because a button deletes files now: the same-origin
+    check (ADR-043) stops a page somebody else wrote from pressing it through a
+    browser, and stops nobody who can reach the port directly
 -   Further providers: Pixeldrain, GoFile, MediaFire. Less urgent than they
     were: a share on one of those still needs its own provider to be *read*,
     but every ordinary file on the web is now fetched by `DirectProvider`

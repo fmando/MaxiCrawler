@@ -211,6 +211,57 @@ class LibraryEntry:
             raise LibraryError(msg) from error
         return destination
 
+    def remove_content(self) -> None:
+        """Delete the payload, leaving the entry and its account of itself.
+
+        The half of discarding that only this layer may do: deciding where a
+        file lives is what this module is for, and a caller joining a path of
+        its own would be a second opinion about the layout. The record stays,
+        and is what the removal is written into afterwards — an entry whose
+        directory simply vanished would be fetched again by the next run, which
+        is the whole reason a discarded resource keeps a headstone.
+
+        Nothing to remove is not a failure. A payload somebody moved away by
+        hand is already in the state this produces, and refusing would leave the
+        entry unmarked forever.
+
+        Failures are raised rather than suppressed, unlike :meth:`discard` — the
+        one caller writes "the file is gone" into the record immediately
+        afterwards, and a sentence like that has to be true. A file that is
+        still open in another program is the ordinary way this fails.
+
+        Raises:
+            LibraryError: something under ``content`` is still there.
+        """
+        directory = self.content_directory
+        if not directory.is_dir():
+            return
+        try:
+            held = tuple(directory.iterdir())
+        except OSError as error:
+            msg = f"payload could not be read: {directory}"
+            raise LibraryError(msg) from error
+        for path in held:
+            if path.is_dir():
+                # Nothing here writes one, so one being here means somebody
+                # else did — and emptying a directory this module did not
+                # create is not a thing to do quietly. Checked over the whole
+                # listing before anything is unlinked, so the refusal leaves the
+                # payload as it found it rather than half of it.
+                msg = f"payload holds a directory, which is not removed here: {path}"
+                raise LibraryError(msg)
+        for path in held:
+            try:
+                path.unlink()
+            except OSError as error:
+                msg = f"payload could not be removed: {path}"
+                raise LibraryError(msg) from error
+        try:
+            directory.rmdir()
+        except OSError as error:
+            msg = f"payload directory could not be removed: {directory}"
+            raise LibraryError(msg) from error
+
     def discard(self) -> None:
         """Remove anything left under ``.incomplete``.
 

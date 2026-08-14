@@ -76,17 +76,24 @@
           {% endif %}
           <a class="action" href="/library">Open Library</a>
         </p>
+      {#
+        A limit here turned it away. A notice rather than an error, because
+        nothing went wrong: the rule did what it was configured to do, and red
+        text would send somebody looking for a fault they would not find.
+      #}
+      {% elif download.was_refused %}
+        <p class="notice">{{ download.reason or "a limit here declined it" }}</p>
       {% elif not download.error %}
         <p class="error">{{ download.reason or "the download did not finish" }}</p>
       {% endif %}
 
       {#
         A new request rather than a reset of this one, so what happened here
-        stays readable. Offered for everything that finished without the file
-        arriving -- a dead share, a broken transfer, a stop somebody has since
-        changed their mind about.
+        stays readable. Offered where asking again could end differently -- a
+        dead share, a broken transfer, a stop somebody has since changed their
+        mind about -- and not where it could only be refused again.
       #}
-      {% if not download.succeeded %}
+      {% if download.can_retry %}
         <form class="retry" method="post" action="/downloads/{{ download.download_id }}/retry">
           <button type="submit">Try again</button>
         </form>

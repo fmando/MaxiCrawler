@@ -3,7 +3,7 @@
 Pure functions, so none of this needs HTTP, a database or a crawl.
 """
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -15,6 +15,7 @@ from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.api.views import (
     ABANDONED_LABEL,
     KIND_LABELS,
+    LAYOUT_PER_PAGE,
     LINK_COLUMNS,
     LINK_PARAMS,
     LINK_STATE_LABELS,
@@ -23,15 +24,21 @@ from maxicrawler.api.views import (
     PANELS,
     STATE_LABELS,
     STATE_TONES,
+    STATUS_LABELS,
+    STATUS_TONES,
+    TILE_NAME_LENGTH,
     TRANSIENT_PARAMS,
+    LibraryLayout,
     QueuedBatch,
     crawl_rows,
     describe_options,
     describe_scope,
+    discard_view,
     download_view,
     format_bytes,
     format_duration,
     format_number,
+    item_view,
     library_view,
     link_rows,
     link_view,
@@ -51,8 +58,10 @@ from maxicrawler.app import (
     UNTRACKED,
     DownloadProgress,
     DownloadSummary,
+    LibraryFacet,
     LibraryItem,
     LibraryPage,
+    LibraryPlace,
     LibraryQuery,
     LibrarySort,
     LinkFacet,
@@ -63,12 +72,16 @@ from maxicrawler.app import (
     LinkState,
     PageQuery,
     PageState,
+    Preview,
+    PreviewShape,
     TargetKind,
     browse_pages,
     target_of,
 )
+from maxicrawler.app.viewing import MediaKind
 from maxicrawler.crawler import DiscoverySummary, PluginUsage
-from maxicrawler.domain import DownloadStatus, ScanSession, Statistics
+from maxicrawler.domain import DownloadStatus, ReviewVerdict, ScanSession, Statistics
+from maxicrawler.utils import format_size
 from maxicrawler.web.models import LinkKind
 from maxicrawler.web.report import CrawlReport, CrawlStatistics, PageOutcome, SkipReason
 from maxicrawler.web.session import CrawlOptions, CrawlSession, CrawlState
@@ -1774,6 +1787,53 @@ def test_a_download_the_library_already_held_is_a_success() -> None:
     assert shown["reason"] == "the library already holds it"
 
 
+def test_a_refused_download_is_neither_a_success_nor_a_failure() -> None:
+    summary = make_summary(
+        status=DownloadStatus.REFUSED,
+        bytes_written=0,
+        reason="under the minimum download size: 12 B of 100.0 KB",
+    )
+
+    shown = download_view(make_download_snapshot(status=DownloadStatus.REFUSED, summary=summary))
+
+    assert shown["state_label"] == "not kept"
+    assert shown["state_tone"] == "idle"
+    assert shown["succeeded"] is False
+    assert shown["was_refused"] is True
+    assert shown["reason"] == "under the minimum download size: 12 B of 100.0 KB"
+
+
+def test_a_refused_download_is_not_offered_a_second_attempt() -> None:
+    """The rule would turn it away identically, so the button cannot work."""
+    shown = download_view(
+        make_download_snapshot(
+            status=DownloadStatus.REFUSED, summary=make_summary(status=DownloadStatus.REFUSED)
+        )
+    )
+
+    assert shown["can_retry"] is False
+
+
+@pytest.mark.parametrize("status", [DownloadStatus.FAILED, DownloadStatus.CANCELLED])
+def test_what_could_end_differently_is_offered_again(status: DownloadStatus) -> None:
+    shown = download_view(
+        make_download_snapshot(status=status, summary=make_summary(status=status))
+    )
+
+    assert shown["can_retry"] is True
+    assert shown["was_refused"] is False
+
+
+def test_every_download_state_has_a_word_and_a_tone() -> None:
+    """A state added to the domain and forgotten here is a KeyError on a page.
+
+    Which is a 500 rather than a missing badge, so it is worth catching from
+    the enum instead of from whichever template happens to render it first.
+    """
+    assert set(STATUS_LABELS) == set(DownloadStatus)
+    assert set(STATUS_TONES) == set(DownloadStatus)
+
+
 def test_a_failed_download_carries_its_reason() -> None:
     summary = make_summary(status=DownloadStatus.FAILED, reason="the provider reports it as gone")
 
@@ -1838,11 +1898,28 @@ def library_page(items: tuple[LibraryItem, ...] = (), **overrides: object) -> Li
         "stored": len(items),
         "page": 1,
         "pages": 1,
-        "providers": tuple(sorted({item.directory for item in items})),
-        "statuses": tuple(sorted({item.status for item in items})),
+        "providers": _facets(items, lambda item: item.directory, sorted),
+        "statuses": _facets(items, lambda item: item.status.value, sorted),
+        "kinds": _facets(
+            items,
+            lambda item: item.kind.value,
+            lambda values: [kind.value for kind in MediaKind if kind.value in set(values)],
+        ),
     }
     values.update(overrides)
     return LibraryPage(**values)  # type: ignore[arg-type]
+
+
+def _facets(
+    items: tuple[LibraryItem, ...],
+    value_of: Callable[[LibraryItem], str],
+    order: Callable[[Iterable[str]], list[str]],
+) -> tuple[LibraryFacet, ...]:
+    """Return the facets a real page would carry, so the view sees one shape."""
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[value_of(item)] = counts.get(value_of(item), 0) + 1
+    return tuple(LibraryFacet(value=value, count=counts[value]) for value in order(counts))
 
 
 def test_the_library_table_has_the_columns_it_promises() -> None:
@@ -1855,7 +1932,7 @@ def test_the_library_table_has_the_columns_it_promises() -> None:
     assert row["downloaded_at"] == "2026-08-09 14:30"
     assert row["path"] == str(Path("library") / "mega" / "abc" / "content" / "Jump.pdf")
     assert row["state_label"] == "completed"
-    assert row["url"] == "/library/mega/abc"
+    assert row["url"] == "/library/mega/abc?back=%2Flibrary"
 
 
 def test_a_failed_row_says_so_and_shows_no_path() -> None:
@@ -1887,6 +1964,429 @@ def test_a_filtered_listing_counts_both_numbers() -> None:
     assert shown["stored"] == "9"
     assert shown["is_filtered"] is True
     assert shown["search"] == "jump"
+
+
+def group(shown: Mapping[str, Any], heading: str) -> dict[str, Any]:
+    """Return the chip row called *heading*."""
+    (found,) = (row for row in shown["facets"] if row["heading"] == heading)
+    assert isinstance(found, dict)
+    return found
+
+
+def test_the_type_chips_offer_only_the_categories_present() -> None:
+    """A library of pictures should not offer to show only the videos."""
+    shown = library_view(
+        library_page(
+            (
+                make_item("holiday.jpg", kind=MediaKind.IMAGE),
+                make_item("Jump.pdf", kind=MediaKind.PDF),
+            )
+        )
+    )
+
+    chips = group(shown, "Type")["chips"]
+    assert [chip["label"] for chip in chips] == ["images", "PDF"]
+    assert [chip["count"] for chip in chips] == ["1", "1"]
+
+
+def test_the_categories_are_offered_in_the_order_somebody_reaches_for_them() -> None:
+    """Declaration order, not alphabetical: "archive" is not the first thing."""
+    shown = library_view(
+        library_page(
+            (
+                make_item("release.zip", kind=MediaKind.ARCHIVE),
+                make_item("holiday.jpg", kind=MediaKind.IMAGE),
+                make_item("talk.mp4", kind=MediaKind.VIDEO),
+            )
+        )
+    )
+
+    assert [chip["label"] for chip in group(shown, "Type")["chips"]] == [
+        "images",
+        "video",
+        "archives",
+    ]
+
+
+def test_a_group_with_one_value_in_it_is_not_offered() -> None:
+    """Its two states show the same rows, so it is a control that does nothing."""
+    shown = library_view(library_page((make_item(), make_item("other.pdf"))))
+
+    assert [row["heading"] for row in shown["facets"]] == ["Size"]
+
+
+def test_a_chip_you_are_standing_on_links_back_to_the_listing_without_it() -> None:
+    """A toggle rather than a one-way door."""
+    shown = library_view(
+        library_page(
+            (
+                make_item("holiday.jpg", kind=MediaKind.IMAGE),
+                make_item("Jump.pdf", kind=MediaKind.PDF),
+            ),
+            query=LibraryQuery(kind=MediaKind.IMAGE),
+        )
+    )
+
+    chips = {chip["label"]: chip for chip in group(shown, "Type")["chips"]}
+    assert chips["images"]["active"] is True
+    assert "kind=" not in chips["images"]["url"]
+    assert "kind=pdf" in chips["PDF"]["url"]
+
+
+def test_the_size_bands_are_offered_whatever_the_library_holds() -> None:
+    """Unlike the others they are not derived from what is there: a band with
+    nothing in it is still the band somebody wants to rule out."""
+    shown = library_view(library_page((make_item(),)))
+
+    chips = group(shown, "Size")["chips"]
+    assert [chip["label"] for chip in chips] == [
+        "under 1 MB",
+        "1–10 MB",
+        "10–100 MB",
+        "over 100 MB",
+    ]
+
+
+def test_a_size_band_carries_both_bounds_and_switches_off_again() -> None:
+    shown = library_view(
+        library_page((make_item(),), query=LibraryQuery(min_size=1_000_000, max_size=10_000_000))
+    )
+
+    chips = {chip["label"]: chip for chip in group(shown, "Size")["chips"]}
+    assert chips["1–10 MB"]["active"] is True
+    assert "min=" not in chips["1–10 MB"]["url"]
+    assert "min=10000000" in chips["10–100 MB"]["url"]
+    assert "max=100000000" in chips["10–100 MB"]["url"]
+
+
+def test_the_size_boxes_show_what_the_listing_prints() -> None:
+    shown = library_view(
+        library_page((make_item(),), query=LibraryQuery(min_size=100_000, max_size=2_000_000_000))
+    )
+
+    assert shown["min_size"] == "100.0 KB"
+    assert shown["max_size"] == "2.0 GB"
+
+
+def test_an_unbounded_listing_leaves_the_size_boxes_empty() -> None:
+    shown = library_view(library_page((make_item(),)))
+
+    assert shown["min_size"] == ""
+    assert shown["max_size"] == ""
+
+
+def test_a_size_bound_survives_every_other_link() -> None:
+    shown = library_view(
+        library_page((make_item(),), query=LibraryQuery(min_size=1_000_000), total=1, stored=9)
+    )
+
+    assert all("min=1000000" in column["url"] for column in shown["columns"])
+
+
+def test_a_row_carries_its_category() -> None:
+    row = library_view(library_page((make_item("talk.mp4", kind=MediaKind.VIDEO),)))["rows"][0]
+
+    assert row["kind"] == "video"
+
+
+def test_the_chosen_category_survives_every_other_link() -> None:
+    """A sort link that dropped the type filter would undo it on every click."""
+    shown = library_view(
+        library_page((make_item(),), query=LibraryQuery(kind=MediaKind.IMAGE), total=1, stored=9)
+    )
+
+    assert shown["kind"] == "image"
+    assert all("kind=image" in column["url"] for column in shown["columns"])
+
+
+# --- what the queue adds to it ------------------------------------------------
+
+
+def test_the_queue_is_a_chip_beside_the_download_states() -> None:
+    """Where somebody looks for it, though it comes from somewhere else entirely."""
+    shown = library_view(
+        library_page(
+            (make_item(), make_item("gone.pdf", status=DownloadStatus.FAILED)),
+            queued=2,
+        )
+    )
+
+    chips = {chip["label"]: chip for chip in group(shown, "State")["chips"]}
+    assert chips["waiting"]["count"] == "2"
+    assert "state=queued" in chips["waiting"]["url"]
+
+
+def test_a_page_that_cannot_ask_a_queue_offers_no_such_chip() -> None:
+    """The command line's answer, and a listing that must not invent one."""
+    shown = library_view(
+        library_page((make_item(), make_item("gone.pdf", status=DownloadStatus.FAILED)))
+    )
+
+    assert [chip["label"] for chip in group(shown, "State")["chips"]] == [
+        "completed",
+        "failed",
+    ]
+
+
+def test_an_empty_queue_is_not_worth_a_chip() -> None:
+    shown = library_view(
+        library_page(
+            (make_item(), make_item("gone.pdf", status=DownloadStatus.FAILED)),
+            queued=0,
+        )
+    )
+
+    assert "waiting" not in [chip["label"] for chip in group(shown, "State")["chips"]]
+
+
+def test_the_queue_chip_can_carry_a_group_on_its_own() -> None:
+    """One status and one thing being fetched again are still two states to pick."""
+    shown = library_view(library_page((make_item(), make_item("other.pdf")), queued=1))
+
+    assert [chip["label"] for chip in group(shown, "State")["chips"]] == [
+        "completed",
+        "waiting",
+    ]
+
+
+def test_the_queue_chip_switches_off_again() -> None:
+    shown = library_view(
+        library_page((make_item(queued=True),), query=LibraryQuery(queued=True), queued=1)
+    )
+
+    (chip,) = (row for row in group(shown, "State")["chips"] if row["label"] == "waiting")
+    assert chip["active"] is True
+    assert "state=" not in chip["url"]
+
+
+def test_the_filter_stays_offered_while_it_is_the_one_in_use() -> None:
+    """The last transfer finishing must not strand somebody inside the filter."""
+    shown = library_view(
+        library_page(
+            (make_item(), make_item("gone.pdf", status=DownloadStatus.FAILED)),
+            query=LibraryQuery(queued=True),
+            queued=0,
+        )
+    )
+
+    (chip,) = (row for row in group(shown, "State")["chips"] if row["label"] == "waiting")
+    assert chip["active"] is True
+
+
+def test_a_row_being_fetched_again_says_so_rather_than_failed() -> None:
+    """The queue is the newer of the two facts, so it is the one shown."""
+    row = library_view(
+        library_page(
+            (make_item(status=DownloadStatus.FAILED, queued=True),),
+            queued=1,
+        )
+    )["rows"][0]
+
+    assert row["state_label"] == "waiting"
+    assert row["state_tone"] == "idle"
+    assert row["status"] == "failed"
+    assert row["is_queued"] is True
+
+
+def test_the_queue_filter_survives_every_other_link() -> None:
+    shown = library_view(
+        library_page((make_item(queued=True),), query=LibraryQuery(queued=True), queued=1)
+    )
+
+    assert shown["state"] == "queued"
+    assert all("state=queued" in column["url"] for column in shown["columns"])
+
+
+# --- two ways to look at the same listing -------------------------------------
+
+
+def test_the_grid_is_what_the_plain_address_means() -> None:
+    """So a link in the navigation and a bookmark of the default agree."""
+    shown = library_view(library_page((make_item(),)))
+
+    assert shown["layout"] == "grid"
+    assert shown["is_grid"] is True
+    assert all("view=" not in column["url"] for column in shown["columns"])
+
+
+def test_the_list_carries_itself_through_every_link() -> None:
+    """A sort link that dropped the layout would throw somebody out of it."""
+    shown = library_view(
+        library_page((make_item(),), query=LibraryQuery(min_size=1000)),
+        layout=LibraryLayout.LIST,
+    )
+
+    assert shown["is_grid"] is False
+    assert all("view=list" in column["url"] for column in shown["columns"])
+    assert "view=list" in shown["reset_url"]
+    assert all("view=list" in chip["url"] for row in shown["facets"] for chip in row["chips"])
+
+
+def test_both_layouts_are_always_offered_with_the_current_one_marked() -> None:
+    shown = library_view(library_page((make_item(),)), layout=LibraryLayout.LIST)
+
+    offered = {option["label"]: option for option in shown["layouts"]}
+    assert set(offered) == {"Tiles", "List"}
+    assert offered["List"]["active"] is True
+    assert offered["Tiles"]["active"] is False
+    assert offered["Tiles"]["url"] == "/library"
+
+
+def test_the_grid_shows_more_at_once_than_the_list() -> None:
+    """A tile is glanced at, a row is read, so the page sizes differ."""
+    assert LAYOUT_PER_PAGE[LibraryLayout.GRID] > LAYOUT_PER_PAGE[LibraryLayout.LIST]
+
+
+def test_a_layout_nobody_recognises_is_the_grid() -> None:
+    assert LibraryLayout.parse("mosaic") is LibraryLayout.GRID
+    assert LibraryLayout.parse(None) is LibraryLayout.GRID
+    assert LibraryLayout.parse("list") is LibraryLayout.LIST
+
+
+# --- one file, and the listing it is being walked through ----------------------
+
+
+def test_a_file_page_opened_on_its_own_has_no_walk() -> None:
+    shown = item_view(make_item(), None)
+
+    assert shown["walk"] is None
+    # And judging it stays on it, which is what a page with no listing means.
+    assert "walk=" not in shown["review_action"]
+
+
+def test_a_walk_says_which_of_how_many_and_links_both_ways() -> None:
+    place = LibraryPlace(
+        item=make_item("b.pdf", key="two"),
+        position=2,
+        total=3,
+        previous=make_item("a.pdf", key="one"),
+        following=make_item("c.pdf", key="three"),
+    )
+
+    walk = item_view(make_item("b.pdf", key="two"), None, back="/library?fav=1", place=place)[
+        "walk"
+    ]
+
+    assert walk["position"] == "2"
+    assert walk["total"] == "3"
+    assert walk["previous_url"] == "/library/mega/one?back=%2Flibrary%3Ffav%3D1"
+    assert walk["next_url"] == "/library/mega/three?back=%2Flibrary%3Ffav%3D1"
+    assert walk["next_name"] == "c.pdf"
+
+
+def test_the_ends_of_a_walk_offer_nothing_beyond_them() -> None:
+    place = LibraryPlace(item=make_item(), position=1, total=1)
+
+    walk = item_view(make_item(), None, place=place)["walk"]
+
+    assert walk["previous_url"] is None
+    assert walk["next_url"] is None
+
+
+def test_judging_a_file_being_walked_carries_the_listing_with_it() -> None:
+    """Two parameters, two questions: where to land, and what to walk."""
+    place = LibraryPlace(item=make_item(), position=1, total=2, following=make_item(key="two"))
+
+    action = item_view(make_item(), None, back="/library?fav=1", place=place)["review_action"]
+
+    assert "walk=%2Flibrary%3Ffav%3D1" in action
+    assert "back=%2Flibrary%2Fmega%2Fabc%3Fback%3D" in action
+
+
+# --- before deleting a batch of files ------------------------------------------
+
+
+def test_the_question_names_every_file_rather_than_counting_them() -> None:
+    view = discard_view(
+        (make_item("one.pdf"), make_item("two.pdf", key="def")),
+        action="/library/discard?back=%2Flibrary",
+        back="/library",
+    )
+
+    assert view["count"] == "2"
+    assert view["is_one"] is False
+    assert [row["name"] for row in view["rows"]] == ["one.pdf", "two.pdf"]
+    assert [row["token"] for row in view["rows"]] == ["mega/abc", "mega/def"]
+    assert view["rows"][1]["url"] == "/library/mega/def"
+
+
+def test_one_file_is_a_file_and_not_files() -> None:
+    assert discard_view((make_item(),), action="/library/discard", back="/library")["is_one"]
+
+
+def test_what_is_already_discarded_frees_nothing_further() -> None:
+    """The one number the page exists to state must not be inflated."""
+    view = discard_view(
+        (make_item(), make_item("two.pdf", key="def", verdict=ReviewVerdict.DISCARDED)),
+        action="/library/discard",
+        back="/library",
+    )
+
+    assert view["freed"] == format_size(1_300_000)
+    assert view["rows"][1]["is_discarded"] is True
+
+
+def test_an_entry_that_never_held_a_file_frees_nothing() -> None:
+    view = discard_view(
+        (make_item(status=DownloadStatus.FAILED, path=None),),
+        action="/library/discard",
+        back="/library",
+    )
+
+    assert view["freed"] == format_size(0)
+
+
+# --- what a tile puts where the file would be ---------------------------------
+
+
+def test_a_small_picture_becomes_the_file_itself() -> None:
+    row = library_view(
+        library_page((make_item("holiday.jpg", kind=MediaKind.IMAGE),)),
+        (Preview(shape=PreviewShape.IMAGE, kind=MediaKind.IMAGE),),
+    )["rows"][0]
+
+    assert row["preview_shape"] == "image"
+    assert row["preview_url"] == "/library/mega/abc/view"
+
+
+def test_a_symbol_names_no_url_at_all() -> None:
+    """The one property that keeps a large original off a page of sixty."""
+    row = library_view(
+        library_page((make_item("raw.jpg", kind=MediaKind.IMAGE),)),
+        (Preview(shape=PreviewShape.SYMBOL, kind=MediaKind.IMAGE),),
+    )["rows"][0]
+
+    assert row["preview_shape"] == "symbol"
+    assert row["preview_url"] is None
+    assert row["kind"] == "image"
+    assert row["kind_word"] == "images"
+
+
+def test_an_excerpt_travels_as_text() -> None:
+    row = library_view(
+        library_page((make_item("notes.txt", kind=MediaKind.TEXT),)),
+        (Preview(shape=PreviewShape.EXCERPT, kind=MediaKind.TEXT, excerpt="first line"),),
+    )["rows"][0]
+
+    assert row["preview_shape"] == "excerpt"
+    assert row["excerpt"] == "first line"
+    assert row["preview_url"] is None
+
+
+def test_without_previews_every_row_falls_back_to_its_symbol() -> None:
+    row = library_view(library_page((make_item(),)))["rows"][0]
+
+    assert row["preview_shape"] == "symbol"
+    assert row["preview_url"] is None
+
+
+def test_a_tile_elides_the_middle_of_a_long_name_and_keeps_the_whole_one() -> None:
+    long_name = "a-very-long-holiday-photograph-name-from-crete.jpeg"
+    row = library_view(library_page((make_item(long_name),)))["rows"][0]
+
+    assert row["name"] == long_name
+    assert row["short_name"].endswith(".jpeg")
+    assert len(row["short_name"]) == TILE_NAME_LENGTH
 
 
 # --- the links the table is navigated by --------------------------------------

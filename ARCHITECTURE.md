@@ -87,6 +87,13 @@ und eine gespeicherte Datei ausliefern, ohne `downloader`, `providers` oder
 Fragen an denselben Speicher, getrennt gehalten, damit keine der beiden das
 Vokabular der anderen bekommt (ADR-028).
 
+Seit Sprint 16 schreibt `LibraryService` eine Sache doch: das Urteil. Das ist
+keine Aufweichung, sondern die schärfere Fassung derselben Regel — **zwei
+Schreiber mit disjunkten Feldern.** Der Downloader baut alle Transferfelder neu
+und trägt `review` und `extra` unverändert mit; `LibraryService.review` baut
+`review` neu und trägt alles andere unverändert mit. Ein Urteil ist keine
+Übertragung, und deshalb überlebt es die nächste (ADR-040).
+
 Dieselbe Trennung gilt seit Sprint 15 für die Discovery: `CrawlService`
 schreibt, was ein Crawl gefunden hat, und `DiscoveryService` liest es zurück —
 gesucht, gefiltert, sortiert und geblättert. Ein Report ist damit keine Ansicht
@@ -183,6 +190,69 @@ Skript entscheidet dabei nichts: der Server schreibt in ein leeres Element,
 welcher Strom zu hören ist, wo nachzufragen ist und wohin die Antwort gehört.
 Fehlt der Strom, während die Warteschlange noch etwas vorhat, ist das der
 Moment zwischen zwei Transfers — dann wird kurz darauf erneut gefragt.
+
+## Die Library als Arbeitsoberfläche
+
+Seit Sprint 16 endet der Weg nicht bei „liegt da", sondern bei „und was davon
+will ich behalten". Vier Verben — behalten, ignorieren, verwerfen, und der
+Favoritenstern quer dazu — gibt es an jeder Stelle, an der eine Datei erscheint:
+Kachel, Zeile, Detailseite.
+
+**Drei Achsen, drei Vokabulare, ein Query-String.** Sie werden ausdrücklich
+nicht zu einem Enum verschmolzen:
+
+```text
+Transfer   DownloadStatus   completed | skipped | failed          auf Platte
+Urteil     ReviewVerdict    unreviewed | kept | ignored | discarded   auf Platte
+Queue      TransferQueue    pending | running                     im Speicher
+```
+
+`status=`, `verdict=` und `state=queued` sind deshalb drei Parameter. Ein
+Download kann fehlerfrei gelaufen und das Ergebnis trotzdem wertlos sein; ein
+gemeinsames Wort dafür müsste „hat der Download geklappt?" mit „gefällt ihm
+nicht" beantworten.
+
+**Das Urteil lebt im Metadatendokument, nicht in der Datenbank.** Der Index ist
+ein Cache und darf gelöscht werden (ADR-037); ein Urteil, das ein Rebuild
+verliert, ist keins. Das Dateisystem bleibt die Autorität (ADR-010), also
+überlebt eine Bewertung auch ein `rsync` der Library. Die Schema-Nummer bleibt
+dabei 1 — ein hinzugefügtes optionales Member ist genau der Fall, für den `extra`
+gebaut wurde (ADR-013, ADR-040).
+
+**Verwerfen ist die einzige Stelle der Oberfläche, die löscht.** Datei zuerst,
+Dokument danach, in einem Aufruf: getrennt entstünde entweder ein Eintrag, den
+der nächste Sammel-Auftrag fröhlich neu holt, oder ein Grabstein über einer Datei,
+die noch da ist. Dass sie nicht wiederkommt, wird an drei Orten eingelöst — im
+Worker, im Report als eigener `LinkState`, und beim Auflösen von „Queue every
+fetchable match" (ADR-041). Zurückgenommen wird sie mit demselben Aufruf wie
+jedes andere Urteil; die Datei holt das nicht zurück, aber der erneute Download
+kann es (ADR-012).
+
+**Eine Untergrenze liegt in der Senke**, nicht im Crawler und nicht im Provider:
+`min_download_size`, geprüft beim angekündigten und beim tatsächlich
+angekommenen Umfang. Unter der Grenze bleibt nichts liegen, weil die Datei zu
+diesem Zeitpunkt noch im Staging steht (ADR-012, ADR-042). Übersprungen wird mit
+Grund und mit Record — sonst ist die Entscheidung nach einem Neustart weg.
+
+**Jede unsichere Methode muss von einer Seite von uns kommen.** Ohne
+Authentifizierung (ADR-025) war das folgenlos, solange ein fremdes Formular
+höchstens einen Crawl starten konnte; seit ein Knopf löscht, ist es das nicht
+mehr. `SameOriginMiddleware` liest `Sec-Fetch-Site`, ersatzweise `Origin` — kein
+Token, keine Session, kein Cookie, und damit funktioniert jedes Formular
+weiterhin ohne JavaScript (ADR-043).
+
+**Die Kachelansicht erzeugt nichts.** Ein Bild unterhalb `preview_inline_bytes`
+wird über dieselbe `/view`-Route geladen, die die Detailseite benutzt, darüber
+steht ein Symbol mit Größenangabe; ein Textauszug ist ein kurzer Lesevorgang,
+kein gerendertes Bild. Thumbnails gibt es nicht, und falls sie je kommen: nur als
+Cache, jederzeit vollständig löschbar, und niemals innerhalb von `library/`.
+
+**Ein Rundgang ist eine Abfrage, keine Sitzung.** Wer aus einer Liste kommt,
+bekommt „12 von 340" samt Nachbarn; wer die Seite direkt öffnet, bekommt die
+Seite, die sie vorher war. Die Liste reist als eigener Parameter `walk` mit,
+weil `back` eine andere Frage beantwortet, und der Nachfolger wird **vor** dem
+Schreiben ermittelt — sonst überspringt jeder Klick unter dem Filter
+„ungesichtet" genau eine Datei (ADR-040).
 
 ## Ausblick: Crawl Jobs
 
@@ -306,6 +376,26 @@ weiß.
 -   Was Skript ausführen kann — HTML und SVG — wird nur mit
     `Content-Security-Policy: sandbox` ausgeliefert. Ohne das hätte eine
     heruntergeladene Seite jede Befugnis dieser Oberfläche.
+-   Was ein Browser anzeigen darf, ist eine **Allow-Liste** und bleibt eine.
+    Welche Art Datei etwas *ist*, ist eine Einordnung und darf großzügig sein:
+    `KINDS` gibt einem `.rar` eine Kategorie und trotzdem keinen Content-Type.
+    Zwei Tabellen, damit eine Sicherheitsgrenze nicht an einem Anzeigedetail
+    hängt.
+-   Ein Urteil ist keine Übertragung. Der Downloader baut die Transferfelder neu
+    und trägt `review` und `extra` mit; `LibraryService.review` baut das Urteil
+    neu und trägt alles andere mit. Zwei Schreiber, disjunkte Felder — sonst
+    löscht der nächste Download eine Bewertung, die niemand zurückholen kann.
+-   Nutzdaten entfernt ausschließlich die Library (`LibraryEntry.remove_content`),
+    und ein Verwerfen ist ein Aufruf: erst die Datei, dann der Grabstein. Der
+    Grabstein ist das Einzige, was den nächsten Sammel-Auftrag davon abhält, sie
+    erneut zu holen.
+-   Was zu klein ist, wird in der Senke abgewiesen — bei der angekündigten Größe
+    und noch einmal bei der angekommenen. Eine Regel an einem Ort, auch für den
+    ausdrücklich angeklickten Einzeldownload.
+-   Jede unsichere Methode muss von einer Seite von uns gekommen sein. Geprüft
+    wird an einem Header, den ein Browser setzt und kein Skript erreicht — kein
+    Token, keine Session, kein Cookie, damit jedes Formular ohne JavaScript
+    funktioniert.
 -   Kein Kernpaket importiert `maxicrawler.api`. Einzige Ausnahme ist
     `maxicrawler.cli`, weil dort `serve` liegt, und dort auch nur `api.errors`.
 -   Diese Grenzen werden gelesen, nicht geglaubt: `tests/test_api_boundaries.py`

@@ -1,0 +1,35 @@
+{#
+  One file as a tile.
+
+  The question a tile answers is "do I want to keep this?", not "what exactly
+  is this?" — so it carries the preview, the name, the size and the state, and
+  the source URL, the path and the checksum stay on the detail page.
+
+  The name is elided in the middle by the view, because the end of it is the
+  extension and a column of names all ending in an ellipsis has thrown away the
+  one part that says what each of them is. The full name is in the `title`.
+#}
+<li class="tile{% if item.is_queued %} busy{% endif %} {{ item.verdict }}">
+  <a class="tile-shot" href="{{ item.url }}" title="{{ item.name }}">
+    {% include "_library_preview.html" %}
+  </a>
+  {#
+    Outside every form on the tile although it sits inside one: the `form`
+    attribute associates it with the batch above, which is the arrangement
+    ADR-034 settled on for the report's own selection.
+  #}
+  <label class="tile-tick">
+    <input type="checkbox" form="library-selection" name="entry"
+           value="{{ item.entry_token }}" data-tick>
+    <span class="visually-hidden">Select {{ item.name }}</span>
+  </label>
+  <div class="tile-facts">
+    <a class="tile-name" href="{{ item.url }}" title="{{ item.name }}">{{ item.short_name }}</a>
+    <div class="tile-meta">
+      <span class="num">{{ item.size }}</span>
+      {% if item.is_reviewed %}<span class="verdict-mark">{{ item.verdict_word }}</span>{% endif %}
+      <span class="badge {{ item.state_tone }}">{{ item.state_label }}</span>
+    </div>
+    {% include "_library_verdicts.html" %}
+  </div>
+</li>

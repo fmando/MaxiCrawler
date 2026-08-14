@@ -123,6 +123,23 @@ class LinkState(StrEnum):
     IN_QUEUE = "queue"
     """This URL is waiting to be fetched, or is being fetched right now."""
 
+    DISMISSED = "dismissed"
+    """Everything stored from this URL was ignored or discarded.
+
+    *Everything*, not *something*, and the difference is what makes the state
+    usable. A folder share is recorded by each file inside it under the
+    container's own URL, so one dismissed file among two hundred would otherwise
+    put the whole folder out of reach — the resolver decides that, and
+    :meth:`~maxicrawler.app.library.LibraryService.dismissed` is where the rule
+    is written down.
+
+    The one state that does more than mark a row: it is also what
+    :meth:`DiscoveryService.fetchable` leaves out, so *"queue everything I am
+    looking at"* cannot re-fetch what somebody has already said they do not
+    want. One resolver for the badge and for the exclusion, so a row that says
+    *dismissed* and a row that is skipped are the same row.
+    """
+
     @classmethod
     def parse(cls, value: str | None) -> "LinkState | None":
         """Return the state *value* names, or ``None`` when it names none.
@@ -529,8 +546,32 @@ class DiscoveryService:
         known = self._known(recorded, asked)
         matching = tuple(item for item in recorded if _matches(item, asked, known))
         fetchable = self._resolve(matching)
-        wanted = tuple(item.url for item in _ordered(matching, asked) if item.url in fetchable)
+        # Asked for even when the filter did not, which is the one state this
+        # method resolves on its own account: what somebody has dismissed is the
+        # thing this button must not put back in the queue. Leaving it to the
+        # worker would mean two hundred jobs queued to be turned away one at a
+        # time, and a wall of refusals reads as a fault rather than as a decision
+        # already made.
+        dismissed = self._dismissed(matching)
+        wanted = tuple(
+            item.url
+            for item in _ordered(matching, asked)
+            if item.url in fetchable and item.url not in dismissed
+        )
         return Matches(urls=wanted[:limit], total=len(wanted))
+
+    def _dismissed(self, items: Iterable[LinkItem]) -> frozenset[str]:
+        """Return which of *items* somebody has said they do not want again.
+
+        Empty when nothing was wired up to answer, which is the same reading
+        every other resolver gets: a client that cannot ask does not get to
+        pretend the answer was "none of them are wanted" or "all of them are".
+        Without a library there is nothing to have been dismissed.
+        """
+        resolver = self._states.get(LinkState.DISMISSED)
+        if resolver is None:
+            return frozenset()
+        return frozenset(resolver(tuple(item.url for item in items)))
 
     def _resolve(self, items: Iterable[LinkItem]) -> frozenset[str]:
         """Return which of *items* some provider here could fetch."""

@@ -202,6 +202,51 @@ def test_discarding_without_a_staging_directory_is_harmless(tmp_path: Path) -> N
     make_library(tmp_path).entry(make_ref()).discard()
 
 
+def test_removing_the_content_leaves_the_entry_and_its_record(tmp_path: Path) -> None:
+    """The headstone is the point: an entry with no record is fetched again."""
+    entry = make_library(tmp_path).entry(make_ref())
+    complete(entry, "holiday.jpg")
+
+    entry.remove_content()
+
+    assert not entry.content_directory.exists()
+    assert entry.metadata_path.is_file()
+    assert entry.read() is not None
+
+
+def test_removing_the_content_takes_every_file_in_it(tmp_path: Path) -> None:
+    entry = make_library(tmp_path).entry(make_ref())
+    store_payload(entry, "one.jpg")
+    store_payload(entry, "two.jpg")
+
+    entry.remove_content()
+
+    assert not entry.content_directory.exists()
+
+
+def test_removing_content_that_is_already_gone_is_not_a_failure(tmp_path: Path) -> None:
+    """Somebody deleted it by hand, and the entry still has to be markable."""
+    entry = make_library(tmp_path).entry(make_ref())
+    complete(entry, "holiday.jpg")
+    entry.remove_content()
+
+    entry.remove_content()
+
+    assert not entry.content_directory.exists()
+
+
+def test_a_directory_below_the_content_is_refused_rather_than_emptied(tmp_path: Path) -> None:
+    """Nothing here writes one, so one being there means somebody else did."""
+    entry = make_library(tmp_path).entry(make_ref())
+    complete(entry, "holiday.jpg")
+    (entry.content_directory / "extras").mkdir()
+
+    with pytest.raises(LibraryError, match="directory"):
+        entry.remove_content()
+
+    assert entry.content_path("holiday.jpg").is_file()
+
+
 def test_completeness_needs_both_the_record_and_the_file(tmp_path: Path) -> None:
     library = make_library(tmp_path)
     entry = library.entry(make_ref())

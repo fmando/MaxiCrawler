@@ -23,6 +23,7 @@ what the project deliberately will not do.
 - A crawl report you can search, filter, sort, page and bookmark, with every link classified by what it points at.
 - A download queue you can reorder, pause and retry, and one click to queue everything a filter matches.
 - Downloads for the rest of the web: any file at a plain HTTP(S) URL, through the same library, behind the same private-network guard.
+- A library you can work through: tiles or rows, filters for kind, size and verdict, four judgements that survive the next download, and a discard that takes the bytes back and is not fetched again.
 - Typed interfaces and strict static checking with mypy.
 - Fast formatting and linting with Ruff.
 - Test-first baseline with pytest.
@@ -2127,6 +2128,205 @@ since 0.14. This is the point at which htmx would earn being vendored, and there
 is a measurement behind that now: the fragment swap this milestone needed cost
 about forty lines and no dependency (ADR-038). The question is how many more
 places want their own forty.
+
+## The library as a workspace
+
+A crawl of an image directory leaves nine hundred files, and the question after
+that is not *what is in here* — the listing has answered that since 0.12 — but
+*which of these do I want to keep*. Answering it used to mean a page per file
+and a way back per file: eighteen hundred page loads and eighteen hundred lost
+scroll positions.
+
+The library shows tiles now, every file carries four judgements wherever it
+appears, and a file opened from a listing knows it is the twelfth of forty.
+
+### Tiles, or rows
+
+`?view=grid` and `?view=list`, grid by default, and the state lives in the URL —
+a bookmarked filtered grid opens as a filtered grid. Both render from the same
+listing; what differs is the template and how many fit on a page (sixty against
+fifty).
+
+A tile shows the file, its name shortened in the middle so the extension
+survives, its size, and its judgement. **Nothing is generated to draw it.** An
+image below `preview_inline_bytes` (1 MB by default) is loaded through the same
+`/view` route the file's own page uses; above that a tile shows a symbol and the
+size, and never the original. That ceiling is the whole reason this needs no
+thumbnails: sixty twenty-megabyte photographs are more than a gigabyte on the
+wire, and the decoded bitmaps are sized by pixel count rather than by file size —
+a 300 KB 6000×4000 JPEG is 96 MB inside the tab. Text and Markdown show their
+first lines, read from the file; everything else shows a symbol.
+
+### Four verbs
+
+| Button | What it records | The file | Offered again? |
+| --- | --- | --- | --- |
+| **Keep** | `kept` | stays | it is already here |
+| **Ignore** | `ignored` | stays | **no** |
+| **Discard** | `discarded` | **deleted** | **no** |
+| **★** | a switch, independent of the verdict | stays | — |
+
+Ignoring and discarding are two decisions, not one with a stronger adverb: *this
+does not interest me but it is not in the way*, against *take the bytes back*.
+Every judgement can be taken back, including a discard — which does not bring the
+file back, but lifts the block, so downloading the link again restores it.
+
+They are on the tile, on the row, and on the file's own page, and a selection of
+them can be judged at once through the same checkbox mechanism the report uses.
+Discarding a batch asks first, on a page naming every file and how much space it
+frees.
+
+### A judgement survives the next download
+
+It is written into that file's own metadata document, not into the database. The
+index is a cache that may be deleted and rebuilt, and a judgement a rebuild loses
+is not a judgement — this way a library moved to another machine arrives with
+everything anybody decided about it.
+
+A re-download used to rebuild the record from the job, which is what made this a
+question at all: it would have silently dropped the review. It now carries the
+review across untouched, along with the unknown members a document is promised to
+keep (ADR-013). Two writers, disjoint fields (ADR-040): a download rebuilds the
+transfer fields and touches nothing else, judging rebuilds the review and touches
+nothing else.
+
+### What was thrown away is not fetched again
+
+The record stays behind as a headstone — with the file's name, size and checksum
+— and it is the only thing that stops the next *"queue every match"* from
+downloading the file again, because *"the library holds this"* is answered by the
+record **and** the file.
+
+The promise is kept in three places, because two would make it a lie: the
+download worker turns such a request away, a report marks the link *dismissed*
+beside *in library* and *in queue*, and *"queue every fetchable match"* leaves it
+out — so it never enters the queue only to be refused at the far end, where a
+refusal reads as a fault.
+
+A link counts as dismissed only when **everything** recorded under it is. A Mega
+folder gives every file inside it the folder's own URL, and one dismissed
+thumbnail must not put a folder of two hundred out of reach.
+
+### Filters for the question being asked
+
+The chips above the listing narrow it in one click and carry their counts:
+review, source, type, state, and size. Type is new — image, video, audio, PDF,
+document, archive, text, other — and is a classification of its own beside the
+table that decides what a browser may be shown. The two are deliberately
+separate: the second is a security boundary and an allow-list, so a `.rar` gets
+a category and still never gets a content type.
+
+The size chips are the four usual bands and are the one row without counts: a
+band's count would have to be computed over the whole library, and the number
+that matters — how many the chosen band holds — is already at the top of the
+page. Beside them are `Larger than` and `Smaller than`, which read what they
+print, so `10 MB` typed into a box and 10000000 carried by a chip are one
+filter.
+
+Every chip is a toggle: standing on one, it links back to the listing without it.
+A group holding a single chip is not drawn at all, because its two states would
+show the same rows.
+
+### One file, and somewhere to work through a listing of them
+
+A file's page is two columns: the file as large as the space allows, and a narrow
+column of what is known about it with the buttons underneath. Audio and video
+join the things a browser is handed directly, with their own ceiling —
+`max_view_bytes` exists because a browser chokes on a 400 MB text file, which is
+not the situation a `<video>` requesting ranges is in.
+
+Opened **from a listing**, the page says `12 of 340`, links either way, and a
+verdict moves on to the next file in that listing. Opened on its own it is the
+page it always was. The successor is worked out *before* the verdict is written:
+under the *unreviewed* filter the file being judged leaves the set as the verdict
+lands, so looking afterwards would skip one file on every click. Taking a
+judgement back and starring stay where they are — a correction belongs on the
+thing it corrects.
+
+With scripting on, `k`, `i`, `x` and `f` are the four verbs, the arrow keys are
+the two neighbours, and `Enter` opens the file on its own. Every one of them
+presses a control that is on the page anyway; nothing is reachable by keyboard
+only. **`x` deletes a file with one keystroke and does not ask** — it is the one
+key here worth knowing about before using the others.
+
+### Too small to be worth having
+
+An image directory answers with a thumbnail, a sprite and an icon for every
+picture in it. `min_download_size` (100 000 bytes by default, `0` turns it off)
+refuses those, and it does it in the sink where every provider's bytes pass
+anyway: once when a size is announced, so nothing is transferred, and once when
+the last byte lands, for a server that announced none. In the second case the
+file is still staged outside the library and is discarded without ever having
+been visible.
+
+It applies to a single download somebody clicked as well. One rule in one place;
+two rules would need two explanations. Every refusal is visible with both sizes
+in the queue's history, and writes a record — otherwise the decision is gone
+after a restart and the next bulk queue fetches the same file again.
+
+### A form of ours, or none at all
+
+The interface has no authentication and says so (ADR-025). That was bounded while
+the worst a stray request could do was start a crawl; it stopped being bounded
+when a button began deleting files, because a page in any other tab can submit a
+form at this server and the browser will send it.
+
+Every unsafe method now has to have come from a page of ours, decided from
+`Sec-Fetch-Site` — set by the browser, unreachable from script — and from
+`Origin` where that header is missing. A request with neither is allowed, which
+is a decision: what sends neither is `curl`, a script, a test, something already
+on the machine. No token, no session, no cookie, so every form still works
+without JavaScript. It is not authentication and does not become any (ADR-043).
+
+### Configuration
+
+```toml
+[maxicrawler]
+min_download_size = 100000     # 0 turns the floor off
+preview_inline_bytes = 1000000 # above this a tile is a symbol
+max_view_bytes = 33554432      # inline documents
+max_stream_bytes = 0           # audio and video; 0 is no limit
+```
+
+### The part that needed care
+
+**A tombstone is a promise about three places.** Refusing a discarded record in
+the worker is the obvious one and the least useful on its own: what somebody
+actually presses is *"queue every match"*, and a link that goes into the queue to
+be turned away at the far end looks like a failure rather than like a decision.
+The worker also writes nothing when it refuses — a record rebuilt to say
+"refused" would lose the status and the file details the entry already had.
+
+**Auto-advance was verified by watching a number shrink.** Pressing *Keep* on
+`1 of 6` of an unreviewed listing lands on the next file, whose page reads
+`1 of 5`. That is the proof the successor was chosen before the write: the judged
+row had left the set.
+
+**Two things were checked in a browser rather than asserted.** A range request
+against a stored video is answered with `206` and a `content-range`, which is
+what makes seeking possible; and a cross-site POST at the discard route is
+answered with `403` while the same form from the interface goes through.
+
+### Still not done, on purpose
+
+**No thumbnails.** The ceiling on inline images is what makes a tile view
+possible without them, and it is also why a directory of 20-megapixel
+photographs shows mostly symbols. If they are ever built, two rules are already
+fixed: a thumbnail is exclusively a cache, deletable in full at any time, and it
+never lives inside `library/`.
+
+**No comments and no tags**, not even as a reserved member. An empty field in a
+document is a promise.
+
+**No duplicate detection.** The checksum is recorded and the chips take another
+group without changing how a query is written, which is the whole of the
+preparation — the question about identity that would decide it is the one 0.15
+deliberately left open.
+
+**Nothing locks an entry.** A download finishing at the same moment as a
+judgement can lose one of the two writes. What bounds it is that the two writers
+touch different members, so the worst case is one judgement lost rather than a
+document describing a file that is not there.
 
 ## Documentation
 

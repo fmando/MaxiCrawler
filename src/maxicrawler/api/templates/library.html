@@ -20,6 +20,16 @@
     <span class="count">
       {% if library.is_filtered %}{{ library.total }} of {{ library.stored }}{% else %}{{ library.stored }} stored{% endif %}
     </span>
+    {#
+      Both layouts named at all times, with the current one marked rather than
+      removed. A control that vanishes once it is active is one nobody can find
+      their way back from.
+    #}
+    <span class="layouts">
+      {% for option in library.layouts %}
+        <a class="layout{% if option.active %} active{% endif %}" href="{{ option.url }}">{{ option.label }}</a>
+      {% endfor %}
+    </span>
   </h2>
 
   <form class="filters" method="get" action="/library">
@@ -29,25 +39,39 @@
              autocomplete="off" spellcheck="false">
     </label>
 
-    <label>
-      <span>Provider</span>
-      <select name="provider">
-        <option value="">any</option>
-        {% for provider in library.providers %}
-          <option value="{{ provider }}"{% if provider == library.provider %} selected{% endif %}>{{ provider }}</option>
-        {% endfor %}
-      </select>
+    {#
+      Two boxes rather than a pair of dropdowns, because a range is a range.
+      They take what the listing prints -- "10 MB" -- as well as a bare number
+      of bytes, read by the same parser that formats the sizes in the table.
+    #}
+    <label class="narrow">
+      <span>Larger than</span>
+      <input type="text" name="min" value="{{ library.min_size }}" placeholder="100 KB"
+             autocomplete="off" spellcheck="false" inputmode="text">
     </label>
 
-    <label>
-      <span>Status</span>
-      <select name="status">
-        <option value="">any</option>
-        {% for status in library.statuses %}
-          <option value="{{ status.value }}"{% if status.value == library.status %} selected{% endif %}>{{ status.label }}</option>
-        {% endfor %}
-      </select>
+    <label class="narrow">
+      <span>Smaller than</span>
+      <input type="text" name="max" value="{{ library.max_size }}" placeholder="2 GB"
+             autocomplete="off" spellcheck="false" inputmode="text">
     </label>
+
+    {#
+      The source, the type and the state are chosen from the chips below rather
+      than from a box: a chip carries its count, and how many of a thing there
+      are is most of what decides whether you want only those. They travel as
+      hidden fields here, so losing the type you had picked because you then
+      typed a search cannot happen. The same arrangement the report uses.
+    #}
+    <input type="hidden" name="provider" value="{{ library.provider }}">
+    <input type="hidden" name="kind" value="{{ library.kind }}">
+    <input type="hidden" name="status" value="{{ library.status }}">
+    <input type="hidden" name="state" value="{{ library.state }}">
+    <input type="hidden" name="verdict" value="{{ library.verdict }}">
+    <input type="hidden" name="fav" value="{{ library.fav }}">
+
+    {# So a search does not throw you out of the layout you were working in. #}
+    <input type="hidden" name="view" value="{{ library.layout }}">
 
     {# The order survives a search rather than resetting to the default. #}
     <input type="hidden" name="sort" value="{{ library.sort_value }}">
@@ -57,34 +81,55 @@
     {% if library.is_filtered %}<a class="aside" href="{{ library.reset_url }}">Clear</a>{% endif %}
   </form>
 
+  {% for group in library.facets %}
+    <div class="chips">
+      <span class="chips-heading">{{ group.heading }}</span>
+      {% for chip in group.chips %}
+        <a class="chip{% if chip.active %} active{% endif %}" href="{{ chip.url }}">
+          {{ chip.label }}{% if chip.count %} <span class="num">{{ chip.count }}</span>{% endif %}
+        </a>
+      {% endfor %}
+    </div>
+  {% endfor %}
+
   {% if library.has_rows %}
-    <table class="grid">
-      <thead>
-        <tr>
-          {% for column in library.columns %}
-            <th{% if column.active %} class="sorted"{% endif %}>
-              <a href="{{ column.url }}">{{ column.label }}{% if column.mark %} <span class="mark">{{ column.mark }}</span>{% endif %}</a>
-            </th>
-          {% endfor %}
-          <th>Path</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for item in library.rows %}
-          <tr>
-            <td>{{ item.provider }}</td>
-            <td>
-              <a href="{{ item.url }}">{{ item.name }}</a>
-              <div class="muted small url">{{ item.source_url }}</div>
-            </td>
-            <td class="num right">{{ item.size }}</td>
-            <td class="num">{{ item.downloaded_at }}</td>
-            <td><span class="badge {{ item.state_tone }}">{{ item.state_label }}</span></td>
-            <td class="url muted small">{{ item.path }}</td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+    {#
+      The batch, and the ticks that feed it. The form holds no rows: the
+      checkboxes join it by id, which is what the HTML `form` attribute is for
+      and what lets a tile carry one without nesting a form inside a form
+      (ADR-034, the same arrangement the report's selection uses).
+
+      Without script this is still usable -- tick the boxes and press a button.
+      What `select.js` adds is the header tick and the counter, both rendered
+      hidden and revealed only once something is there to count.
+    #}
+    <form class="batch" id="library-selection" method="post" action="{{ library.review_action }}">
+      <label class="tick-every">
+        <input type="checkbox" class="tick-all" hidden>
+        <span>Select every file on this page</span>
+      </label>
+      {#
+        "Discard selected" is in this row like the others and does not act like
+        them: it asks first, on a page that names every file. Which one that is
+        is decided by the route, not here -- this row only knows it is posting a
+        verdict, and that is what keeps the batch a single form.
+      #}
+      {% for button in library.verdict_buttons %}
+        <button type="submit" name="verdict" value="{{ button.verdict }}"
+                class="verdict-{{ button.verdict }}">{{ button.label }} selected</button>
+      {% endfor %}
+      <button type="submit" name="favourite" value="1">Star selected</button>
+      <span class="chosen muted small" hidden><span class="num">0</span> selected</span>
+    </form>
+
+    {% if library.is_grid %}
+      {% include "_library_grid.html" %}
+    {% else %}
+      {% include "_library_table.html" %}
+    {% endif %}
+
+    {# Loaded only where there are boxes to tick, as on the report. #}
+    <script src="/static/select.js" defer></script>
 
     <p class="paging">
       <span class="muted">{{ library.shown }} of {{ library.total }}</span>

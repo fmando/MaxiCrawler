@@ -1,5 +1,14 @@
 {#
-  Everything one stored file is known to be.
+  One stored file, and somewhere to work through a listing of them.
+
+  Two columns: the file as large as the space allows, and a narrow column of
+  what is known about it with the buttons underneath. The proportions are the
+  point -- the question being answered here is "do I want this?", and the answer
+  comes from looking at the thing rather than from reading its checksum.
+
+  The header appears only when this page was reached from a listing. Then it
+  says which of how many, and links either way; opened on its own, the page is
+  what it always was and none of it is shown.
 
   Read from that entry's own metadata document, so this page says what is on
   disk rather than what a database remembers being put there.
@@ -15,99 +24,157 @@
 
 {% block crumbs %}
 <nav class="crumbs">
-  <a href="/library">Library</a> <span class="muted">/</span> <span>{{ item.name }}</span>
+  <a href="{{ item.library_url }}">Library</a> <span class="muted">/</span> <span>{{ item.name }}</span>
 </nav>
 {% endblock %}
 
 {% block content %}
-<section class="panel">
+<section class="panel viewer-panel">
+  {% if item.walk %}
+    {#
+      Both ends of the walk are named at all times; at the first and the last
+      file the link is simply absent rather than the whole bar. A control that
+      moves is worth keeping in one place.
+    #}
+    <nav class="walk">
+      {% if item.walk.previous_url %}
+        <a class="walk-step" href="{{ item.walk.previous_url }}" rel="prev"
+           title="{{ item.walk.previous_name }}" data-walk="previous">← previous</a>
+      {% else %}
+        <span class="walk-step muted">← previous</span>
+      {% endif %}
+      <span class="walk-count">{{ item.walk.position }} of {{ item.walk.total }}</span>
+      {% if item.walk.next_url %}
+        <a class="walk-step" href="{{ item.walk.next_url }}" rel="next"
+           title="{{ item.walk.next_name }}" data-walk="next">next →</a>
+      {% else %}
+        <span class="walk-step muted">next →</span>
+      {% endif %}
+      <a class="aside" href="{{ item.library_url }}">Back to the library</a>
+    </nav>
+  {% endif %}
+
   <h2>
     <span class="badge {{ item.state_tone }}">{{ item.state_label }}</span>
     <span class="url">{{ item.name }}</span>
     {% if item.file_url %}<a class="aside" href="{{ item.file_url }}">Download</a>{% endif %}
   </h2>
 
-  <div class="body">
-    {% if item.payload_missing %}
-      <p class="error">
-        The record says a file is stored here and there is none. It was moved or
-        deleted outside MaxiCrawler; downloading the link again would restore it.
-      </p>
-    {% elif item.error %}
-      <p class="error">{{ item.error }}</p>
-    {% endif %}
+  <div class="workplace">
+    <div class="stage">
+      {#
+        Two ways of having no file, and they must not read alike. One is a fault
+        to repair; the other is a decision somebody made on purpose, and telling
+        them their own decision was an accident is how a page loses their trust.
+      #}
+      {% if item.is_discarded %}
+        <p class="caution">
+          This was discarded and the file deleted. Everything beside it is what
+          the entry still records; downloading the link again would bring the
+          file back.
+        </p>
+      {% elif item.payload_missing %}
+        <p class="error">
+          The record says a file is stored here and there is none. It was moved or
+          deleted outside MaxiCrawler; downloading the link again would restore it.
+        </p>
+      {% elif item.error %}
+        <p class="error">{{ item.error }}</p>
+      {% endif %}
 
-    <table class="grid tight">
-      <tbody>
-        <tr><td>Provider</td><td>{{ item.provider }}</td></tr>
-        <tr><td>Size</td><td class="num">{{ item.size }}</td></tr>
-        <tr>
-          <td>Downloaded</td>
-          <td class="num">{{ item.downloaded_at or "—" }}</td>
-        </tr>
-        {% if item.discovered_at %}
-          <tr><td>Found</td><td class="num">{{ item.discovered_at }}</td></tr>
-        {% endif %}
-        <tr><td>Original URL</td><td class="url">{{ item.source_url }}</td></tr>
-        {% if item.filename %}
-          <tr><td>File</td><td class="url">{{ item.filename }}</td></tr>
-        {% endif %}
-        {% if item.checksum %}
-          <tr><td>SHA-256</td><td class="url small">{{ item.checksum }}</td></tr>
-        {% endif %}
-        {% if item.attempts != "0" %}
-          <tr><td>Attempts</td><td class="num">{{ item.attempts }}</td></tr>
-        {% endif %}
-      </tbody>
-    </table>
+      {#
+        The file itself, shown by the browser rather than by us.
 
-    {#
-      The file itself, shown by the browser rather than by us.
+        A frame holding something that could execute script is sandboxed as well
+        as the response being sandboxed by its own header -- a stored HTML page
+        must not reach the interface that framed it, and saying so twice costs
+        nothing. A PDF is framed *without* the attribute, because Chrome will not
+        render its viewer inside a sandboxed frame, and a PDF cannot reach our
+        origin in the first place.
 
-      A frame holding something that could execute script is sandboxed as well
-      as the response being sandboxed by its own header -- a stored HTML page
-      must not reach the interface that framed it, and saying so twice costs
-      nothing. A PDF is framed *without* the attribute, because Chrome will not
-      render its viewer inside a sandboxed frame, and a PDF cannot reach our
-      origin in the first place.
+        An SVG arrives as an `<img>`, never as a frame, because an image element
+        runs no script even when the file behind it contains some.
 
-      An SVG arrives as an `<img>`, never as a frame, because an image element
-      runs no script even when the file behind it contains some.
-    #}
-    {% if item.view_url %}
-      <div class="viewer">
+        Audio and video get the browser's own player. `preload="metadata"` asks
+        for the header and nothing else: enough to draw a timeline, and not the
+        two gigabytes behind it -- which is also what makes a limit on their size
+        unnecessary in a way it is not for a framed document.
+      #}
+      {% if item.view_url %}
         {% if item.display == "image" %}
-          <img src="{{ item.view_url }}" alt="{{ item.name }}">
+          <img class="shown" src="{{ item.view_url }}" alt="{{ item.name }}">
+        {% elif item.display == "video" %}
+          <video class="shown" src="{{ item.view_url }}" controls preload="metadata"></video>
+        {% elif item.display == "audio" %}
+          <audio class="shown" src="{{ item.view_url }}" controls preload="metadata"></audio>
         {% else %}
-          <iframe src="{{ item.view_url }}"{% if item.sandboxed %} sandbox{% endif %}
+          <iframe class="shown" src="{{ item.view_url }}"{% if item.sandboxed %} sandbox{% endif %}
                   title="{{ item.name }}"></iframe>
         {% endif %}
-      </div>
-      <p class="muted small">
-        <a href="{{ item.view_url }}">Open on its own</a>
-      </p>
-    {% elif item.is_stored and item.view_reason %}
-      <p class="empty">
-        {{ item.view_reason }}.
-        <a href="{{ item.file_url }}">Download it</a> to open it elsewhere.
-      </p>
-    {% endif %}
+        <p class="muted small">
+          <a href="{{ item.view_url }}" data-open>Open on its own</a>
+        </p>
+      {% elif item.is_stored and item.view_reason %}
+        <p class="empty">
+          {{ item.view_reason }}.
+          <a href="{{ item.file_url }}" data-open>Download it</a> to open it elsewhere.
+        </p>
+      {% endif %}
+    </div>
 
-    {% if item.path %}
-      <div class="pathbox">
-        <label>
-          <span>Path</span>
-          <input class="path" type="text" value="{{ item.path }}" readonly
-                 spellcheck="false" onclick="this.select()">
-        </label>
-        {#
-          Hidden until the script un-hides it: a button that cannot work is
-          worse than no button.
-        #}
-        <button type="button" class="copy" data-copy=".path" hidden>Copy</button>
+    <aside class="facts">
+      <div class="review-bar">
+        {% include "_library_verdicts.html" %}
+        {% if item.is_reviewed %}<span class="verdict-mark">{{ item.verdict_word }}</span>{% endif %}
       </div>
-      <script src="/static/copy.js" defer></script>
-    {% endif %}
+
+      <table class="grid tight">
+        <tbody>
+          <tr><td>Provider</td><td>{{ item.provider }}</td></tr>
+          <tr><td>Size</td><td class="num">{{ item.size }}</td></tr>
+          <tr>
+            <td>Downloaded</td>
+            <td class="num">{{ item.downloaded_at or "—" }}</td>
+          </tr>
+          {% if item.discovered_at %}
+            <tr><td>Found</td><td class="num">{{ item.discovered_at }}</td></tr>
+          {% endif %}
+          <tr><td>Original URL</td><td class="url">{{ item.source_url }}</td></tr>
+          {% if item.filename %}
+            <tr><td>File</td><td class="url">{{ item.filename }}</td></tr>
+          {% endif %}
+          {% if item.checksum %}
+            <tr><td>SHA-256</td><td class="url small">{{ item.checksum }}</td></tr>
+          {% endif %}
+          {% if item.attempts != "0" %}
+            <tr><td>Attempts</td><td class="num">{{ item.attempts }}</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+
+      {% if item.path %}
+        <div class="pathbox">
+          <label>
+            <span>Path</span>
+            <input class="path" type="text" value="{{ item.path }}" readonly
+                   spellcheck="false" onclick="this.select()">
+          </label>
+          {#
+            Hidden until the script un-hides it: a button that cannot work is
+            worse than no button.
+          #}
+          <button type="button" class="copy" data-copy=".path" hidden>Copy</button>
+        </div>
+        <script src="/static/copy.js" defer></script>
+      {% endif %}
+    </aside>
   </div>
 </section>
+
+{#
+  The keyboard. Every key presses a control that is on the page anyway, so
+  nothing here is reachable only by keyboard and the page is complete without
+  the script (ADR-038).
+#}
+<script src="/static/viewer.js" defer></script>
 {% endblock %}

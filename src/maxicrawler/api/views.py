@@ -16,9 +16,10 @@ limit" on its own line, while a page shows a short badge. Sharing the *numbers*
 is what matters, and those come from the same report either way.
 """
 
-from collections.abc import Container, Iterable, Mapping
+from collections.abc import Callable, Container, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlencode
@@ -26,11 +27,14 @@ from urllib.parse import urlencode
 from maxicrawler.api.downloads import DownloadSnapshot, QueueSnapshot, QueueTally
 from maxicrawler.api.jobs import JobSnapshot
 from maxicrawler.app import (
+    DEFAULT_PER_PAGE,
     UNTRACKED,
     DownloadProgress,
     DownloadSummary,
+    LibraryFacet,
     LibraryItem,
     LibraryPage,
+    LibraryPlace,
     LibraryQuery,
     LibrarySort,
     LinkItem,
@@ -41,15 +45,18 @@ from maxicrawler.app import (
     PageQuery,
     PageSlice,
     PageState,
+    Preview,
+    PreviewShape,
     StoredPayload,
     TargetKind,
 )
+from maxicrawler.app.viewing import MediaKind
 from maxicrawler.config import Settings
 from maxicrawler.crawler import PluginUsage
 from maxicrawler.database import StoredCrawl
-from maxicrawler.domain import DownloadStatus
+from maxicrawler.domain import DownloadStatus, ReviewVerdict
 from maxicrawler.plugins.generic import GENERIC_PLUGIN_NAME
-from maxicrawler.utils import format_size, strip_fragment
+from maxicrawler.utils import elide_middle, format_size, strip_fragment
 from maxicrawler.web.models import LinkKind
 from maxicrawler.web.report import CrawlReport, PageOutcome, SkipReason
 from maxicrawler.web.session import CrawlOptions, CrawlState
@@ -89,6 +96,7 @@ STATUS_LABELS: dict[DownloadStatus, str] = {
     DownloadStatus.RUNNING: "downloading",
     DownloadStatus.COMPLETED: "completed",
     DownloadStatus.SKIPPED: "already stored",
+    DownloadStatus.REFUSED: "not kept",
     DownloadStatus.FAILED: "failed",
     DownloadStatus.CANCELLED: "stopped",
 }
@@ -97,6 +105,11 @@ STATUS_LABELS: dict[DownloadStatus, str] = {
 A stopped one is not a failure either. The person reading that word is the
 person who clicked the button, and calling their decision an error is how an
 interface teaches somebody to distrust it.
+
+"Not kept" for a refusal, rather than "too small": the state is the general one
+— a limit here declined this — and which limit it was belongs in the reason
+beside it, where the numbers are. A label naming today's only rule would have to
+be rewritten by the next one.
 """
 
 STATUS_TONES: dict[DownloadStatus, str] = {
@@ -104,9 +117,26 @@ STATUS_TONES: dict[DownloadStatus, str] = {
     DownloadStatus.RUNNING: "busy",
     DownloadStatus.COMPLETED: "good",
     DownloadStatus.SKIPPED: "good",
+    DownloadStatus.REFUSED: "idle",
     DownloadStatus.FAILED: "bad",
     DownloadStatus.CANCELLED: "idle",
 }
+
+KIND_WORDS: dict[MediaKind, str] = {
+    MediaKind.IMAGE: "images",
+    MediaKind.VIDEO: "video",
+    MediaKind.AUDIO: "audio",
+    MediaKind.PDF: "PDF",
+    MediaKind.DOCUMENT: "documents",
+    MediaKind.ARCHIVE: "archives",
+    MediaKind.TEXT: "text",
+    MediaKind.OTHER: "other",
+}
+"""What each file category is called where somebody picks one.
+
+Plural, because every one of them names a filter rather than a file: the control
+answers "show me the images", not "this is an image".
+"""
 
 KIND_LABELS: dict[LinkKind, str] = {
     LinkKind.ANCHOR: "anchor",
@@ -309,6 +339,12 @@ def download_view(
         "remaining": _remaining(progress, snapshot),
         "is_finished": snapshot.is_finished,
         "succeeded": snapshot.summary is not None and snapshot.summary.succeeded,
+        # Not the negation of `succeeded`, and that is the point of both flags.
+        # A payload a configured limit turned away did not arrive and never
+        # will: its reason is worth reading, and its "Try again" is a button
+        # that could only refuse it again.
+        "can_retry": snapshot.status.invites_retry,
+        "was_refused": snapshot.status is DownloadStatus.REFUSED,
         "reason": snapshot.reason,
         "error": snapshot.error,
         "path": None if snapshot.path is None else snapshot.path.as_posix(),
@@ -337,7 +373,7 @@ def queue_view(snapshot: QueueSnapshot, *, limit: int) -> dict[str, Any]:
         _waiting_row(item, position, last=position == len(snapshot.waiting))
         for position, item in enumerate(snapshot.waiting, start=1)
     )
-    unarrived = sum(1 for item in snapshot.finished if not item.status.is_success)
+    unarrived = sum(1 for item in snapshot.finished if item.status.invites_retry)
     return {
         "is_paused": snapshot.is_paused,
         "is_busy": snapshot.is_busy,
@@ -496,6 +532,12 @@ def _finished_row(snapshot: DownloadSnapshot) -> dict[str, Any]:
         "state_label": STATUS_LABELS[snapshot.status],
         "state_tone": STATUS_TONES[snapshot.status],
         "succeeded": snapshot.summary is not None and snapshot.summary.succeeded,
+        # Not the negation of `succeeded`, and that is the point of both flags.
+        # A payload a configured limit turned away did not arrive and never
+        # will: its reason is worth reading, and its "Try again" is a button
+        # that could only refuse it again.
+        "can_retry": snapshot.status.invites_retry,
+        "was_refused": snapshot.status is DownloadStatus.REFUSED,
         "reason": snapshot.reason,
         "transferred": format_size(snapshot.progress.bytes_written),
         "elapsed": format_duration(snapshot.elapsed_seconds) if snapshot.was_started else None,
@@ -548,17 +590,132 @@ def _item_url(summary: DownloadSummary | None) -> str | None:
     return f"/library/{summary.directory}/{summary.key}"
 
 
-def library_view(page: LibraryPage) -> dict[str, Any]:
+VERDICT_WORDS: Mapping[ReviewVerdict, str] = MappingProxyType(
+    {
+        ReviewVerdict.UNREVIEWED: "unreviewed",
+        ReviewVerdict.KEPT: "kept",
+        ReviewVerdict.IGNORED: "ignored",
+        ReviewVerdict.DISCARDED: "discarded",
+    }
+)
+"""What each judgement is called where somebody filters by it."""
+
+FAVOURITE_LABEL = "starred"
+"""What the star is called in a filter, where it names a set rather than a file."""
+
+FAVOURITE_MARK = "★"
+UNFAVOURITE_MARK = "☆"
+"""Filled and hollow, so the button says which way it would go by looking like it."""
+
+VERDICT_BUTTONS: tuple[tuple[ReviewVerdict, str, str], ...] = (
+    (ReviewVerdict.KEPT, "Keep", "Worth having"),
+    (ReviewVerdict.IGNORED, "Ignore", "Not interesting, but leave the file alone"),
+    (ReviewVerdict.DISCARDED, "Discard", "Delete the file and stop offering it"),
+)
+"""The judgements a button offers, and what each one promises.
+
+Each hint says what happens rather than what it is called, and the third one has
+to: "Discard" and "Ignore" are near-synonyms in English and are not near
+anything in what they do. One leaves the file alone, the other deletes it.
+
+"Unreviewed" is missing, and differently: it is not a judgement somebody passes
+but the absence of one, so it is offered as *undo* on an entry that has already
+been judged rather than as a fourth opinion. Taking a discard back is that same
+undo — it does not bring the file back, and says so where it is offered.
+"""
+
+
+VERDICT_CHOICES: tuple[Mapping[str, str], ...] = tuple(
+    MappingProxyType({"verdict": str(value), "label": label, "hint": hint})
+    for value, label, hint in VERDICT_BUTTONS
+)
+"""The buttons, as a template reads them. Built once; the same on every row."""
+
+
+class LibraryLayout(StrEnum):
+    """Which way the library is laid out. Lives in the URL and nowhere else.
+
+    Not a cookie and not a session: a bookmark of a filtered grid should be a
+    filtered grid when it is opened, and the two ways of looking at the same
+    listing should be two addresses. It is also not part of
+    :class:`~maxicrawler.app.LibraryQuery` — the service answers the same
+    question either way, and a field it never reads would be a field somebody
+    later assumes it does.
+    """
+
+    GRID = "grid"
+    LIST = "list"
+
+    @classmethod
+    def parse(cls, value: str | None) -> "LibraryLayout":
+        """Return the layout *value* names, defaulting to the grid.
+
+        Lenient like every other query parameter: a stale bookmark gets the
+        default rather than a refusal.
+        """
+        try:
+            return cls(value or "")
+        except ValueError:
+            return cls.GRID
+
+
+LAYOUT_WORDS: Mapping[LibraryLayout, str] = MappingProxyType(
+    {LibraryLayout.GRID: "Tiles", LibraryLayout.LIST: "List"}
+)
+"""What each layout is called where somebody switches between them."""
+
+TILE_NAME_LENGTH = 34
+"""How much of a file name a tile shows before eliding the middle of it."""
+
+LAYOUT_PER_PAGE: Mapping[LibraryLayout, int] = MappingProxyType(
+    {LibraryLayout.GRID: 60, LibraryLayout.LIST: DEFAULT_PER_PAGE}
+)
+"""How many entries each layout shows at once.
+
+More in the grid, because a tile is read at a glance and a row is read. Sixty is
+also what the measurement in the sprint's plan is written against: it is the
+number that decides how much a page transfers.
+"""
+
+
+def library_view(
+    page: LibraryPage,
+    previews: tuple[Preview, ...] | None = None,
+    *,
+    layout: LibraryLayout = LibraryLayout.GRID,
+) -> dict[str, Any]:
     """Return what the library page shows, links included.
 
     The sort links and the paging links are built here rather than in the
     template, because each of them is *this* query with one thing changed — and
-    a template assembling query strings is a template deciding something.
+    a template assembling query strings is a template deciding something. The
+    layout rides along the same way, so that no link on the page can drop it.
+
+    *previews* comes from the service and is parallel to ``page.items``. Absent,
+    every tile falls back to its symbol, which is what a caller with no interest
+    in tiles wants and costs it nothing to ask for.
     """
     query = page.query
+    shown = previews if previews is not None else ((None,) * len(page.items))
     return {
-        "rows": tuple(_library_row(item) for item in page.items),
-        "columns": tuple(_column(label, sort, query) for label, sort in COLUMNS),
+        "rows": tuple(
+            _library_row(item, preview, back=_library_url(query, layout))
+            for item, preview in zip(page.items, shown, strict=True)
+        ),
+        "columns": tuple(_column(label, sort, query, layout) for label, sort in COLUMNS),
+        "layout": str(layout),
+        "is_grid": layout is LibraryLayout.GRID,
+        # Both, always, and the one you are on marked rather than hidden: a
+        # control that disappears when it is active is one you cannot find your
+        # way back from.
+        "layouts": tuple(
+            {
+                "label": LAYOUT_WORDS[option],
+                "url": _library_url(query, option, page=1),
+                "active": option is layout,
+            }
+            for option in LibraryLayout
+        ),
         "total": format_number(page.total),
         "stored": format_number(page.stored),
         "shown": f"{format_number(page.first)}–{format_number(page.last)}",
@@ -571,35 +728,63 @@ def library_view(page: LibraryPage) -> dict[str, Any]:
         # the order you had chosen instead of silently resetting it.
         "sort_value": str(query.sort),
         "direction": "desc" if query.descending else "asc",
-        "providers": page.providers,
-        "statuses": tuple(
-            {"value": str(status), "label": STATUS_LABELS[status]} for status in page.statuses
-        ),
+        "kind": "" if query.kind is None else str(query.kind),
+        "state": "queued" if query.queued else "",
+        "verdict": _enum_value(query.verdict),
+        "fav": "1" if query.favourite else "",
+        # Where the batch of ticked entries is posted, and where it comes back
+        # to: the listing exactly as it is now, so a judgement lands you where
+        # you were rather than at the top of an unfiltered library.
+        "review_action": _review_action("/library/review", _library_url(query, layout)),
+        "verdict_buttons": VERDICT_CHOICES,
+        # Shown in the two boxes, and rounded to what `format_size` prints: a
+        # bound is a coarse instrument, and "1.2 MB" beside a listing that says
+        # "1.3 MB" everywhere else would be the odd one out. What travels in the
+        # URL is the byte count, so a bookmark means one thing.
+        "min_size": format_size(query.min_size) if query.min_size is not None else "",
+        "max_size": format_size(query.max_size) if query.max_size is not None else "",
+        "facets": _library_facets(page, layout),
         "page": format_number(page.page),
         "pages": format_number(page.pages),
-        "previous_url": _library_url(query, page=page.page - 1) if page.has_previous else None,
-        "next_url": _library_url(query, page=page.page + 1) if page.has_next else None,
-        "reset_url": _library_url(LibraryQuery()),
+        "previous_url": (
+            _library_url(query, layout, page=page.page - 1) if page.has_previous else None
+        ),
+        "next_url": _library_url(query, layout, page=page.page + 1) if page.has_next else None,
+        "reset_url": _library_url(LibraryQuery(), layout),
     }
 
 
-def item_view(item: LibraryItem, payload: StoredPayload | None) -> dict[str, Any]:
+def item_view(
+    item: LibraryItem,
+    payload: StoredPayload | None,
+    *,
+    back: str = "/library",
+    place: LibraryPlace | None = None,
+) -> dict[str, Any]:
     """Return what one stored file's page shows.
 
     *payload* is what the service found on disk, and is ``None`` for two very
     different situations that the page has to tell apart: a download that failed
     and never wrote a file, and a record claiming a file that has since been
     deleted or moved. The first is a reason; the second is a repair.
+
+    *place* turns the page from *a file* into *the twelfth of forty*. Given one,
+    the page grows a position, a link either way, and buttons that move on when
+    they are pressed; without one it is what it has always been. The page is the
+    same page either way, which is what keeps a bookmarked file and a file being
+    worked through from becoming two designs.
     """
     base = f"/library/{item.directory}/{item.key}"
     return {
+        "walk": _walk_view(place, back),
         "name": item.name,
         "provider": item.provider,
         "directory": item.directory,
         "key": item.key,
         "status": str(item.status),
-        "state_label": STATUS_LABELS[item.status],
-        "state_tone": STATUS_TONES[item.status],
+        "state_label": _entry_label(item),
+        "state_tone": _entry_tone(item),
+        "is_queued": item.queued,
         "size": format_size(item.size),
         "filename": item.filename,
         "downloaded_at": (
@@ -613,7 +798,7 @@ def item_view(item: LibraryItem, payload: StoredPayload | None) -> dict[str, Any
         "checksum": item.checksum,
         "attempts": format_number(item.attempts),
         "error": item.error,
-        "library_url": "/library",
+        "library_url": back,
         "file_url": f"{base}/file" if payload is not None else None,
         "is_stored": payload is not None,
         # How, and whether, the page embeds the file itself. `display` is the
@@ -630,7 +815,301 @@ def item_view(item: LibraryItem, payload: StoredPayload | None) -> dict[str, Any
         # The record says there is a file and there is not: worth its own
         # sentence, because the answer is to download it again rather than to
         # wonder what the page means.
-        "payload_missing": payload is None and item.is_stored,
+        #
+        # Not said about something discarded, where the file being gone is the
+        # point rather than a fault. Both sentences end in "download it again",
+        # and telling somebody their own decision was an accident is the kind of
+        # small wrongness that makes a page feel like it is not paying attention.
+        "payload_missing": (
+            payload is None and item.is_stored and item.verdict is not ReviewVerdict.DISCARDED
+        ),
+        # Judging from here lands back *here* when the page was opened on its
+        # own: somebody standing on one file is looking at it, and being thrown
+        # back to a table would be the interface deciding they were finished.
+        # Reached from a listing, a decision moves on to the next file in it
+        # instead — which is the same rule read from the other side, because
+        # there the next file is what they are standing in front of.
+        **_review_of(
+            item,
+            base,
+            item_url(item.directory, item.key, back),
+            walk=None if place is None else back,
+        ),
+    }
+
+
+def item_url(directory: str, key: str, back: str) -> str:
+    """Return one file's page, carrying the listing it is being walked from.
+
+    The ``back`` is what makes it a walk rather than a visit: a page that was
+    reached from a listing knows which one, and therefore knows what comes next.
+    Always written, including for the unfiltered library — the parameter used to
+    be dropped there to keep the URL short, and it stopped being decoration the
+    moment something read it.
+    """
+    return f"/library/{directory}/{key}?{urlencode({'back': back})}"
+
+
+def _walk_view(place: LibraryPlace | None, back: str) -> dict[str, Any] | None:
+    """Return the header that says where in a listing this file stands.
+
+    ``None`` when there is no listing being walked, which the template reads as
+    *show none of this*. The neighbours carry the same ``back``, so moving on
+    keeps the walk rather than ending it on the second file.
+    """
+    if place is None:
+        return None
+    previous = place.previous
+    following = place.following
+    return {
+        "position": format_number(place.position),
+        "total": format_number(place.total),
+        "previous_url": None
+        if previous is None
+        else item_url(previous.directory, previous.key, back),
+        "previous_name": None if previous is None else previous.name,
+        "next_url": None
+        if following is None
+        else item_url(following.directory, following.key, back),
+        "next_name": None if following is None else following.name,
+    }
+
+
+def discard_view(items: Iterable[LibraryItem], *, action: str, back: str) -> dict[str, Any]:
+    """Return what the page asking about a batch of deletions shows.
+
+    The one confirmation in the interface, and it exists where the damage scales:
+    a tile is one file somebody is looking at, and a selection is two hundred
+    they cannot all see. What it has to answer before anybody presses anything is
+    *how many* and *which* — a count alone is a number to agree with rather than
+    a list to check.
+
+    The freed size counts only what still has a payload. A selection that
+    happens to include something already discarded frees nothing further for it,
+    and saying otherwise would inflate the one number the page exists to state.
+    """
+    rows = tuple(items)
+    return {
+        "rows": tuple(
+            {
+                "token": f"{item.directory}/{item.key}",
+                "name": item.name,
+                "size": format_size(item.size),
+                "url": f"/library/{item.directory}/{item.key}",
+                "is_discarded": item.verdict is ReviewVerdict.DISCARDED,
+            }
+            for item in rows
+        ),
+        "count": format_number(len(rows)),
+        "is_one": len(rows) == 1,
+        "freed": format_size(
+            sum(
+                item.size or 0
+                for item in rows
+                if item.verdict is not ReviewVerdict.DISCARDED and item.is_stored
+            )
+        ),
+        "action": action,
+        # Where cancelling goes, and it is the listing the ticks were made in:
+        # a confirmation that dumps somebody at the top of an unfiltered library
+        # has cost them the selection and the filter for saying no.
+        "back": back,
+    }
+
+
+SIZE_RANGES: tuple[tuple[str, int | None, int | None], ...] = (
+    ("under 1 MB", None, 1_000_000),
+    ("1–10 MB", 1_000_000, 10_000_000),
+    ("10–100 MB", 10_000_000, 100_000_000),
+    ("over 100 MB", 100_000_000, None),
+)
+"""The size bands offered as one click, and a partition of every stated size.
+
+Contiguous and non-overlapping on purpose: a row belongs to exactly one of them,
+so the four counts add up to the number of entries whose size is known. The
+boundaries are inclusive at the top, which is why "1–10 MB" starts where "under
+1 MB" stops rather than one byte later — a file of exactly a megabyte is in the
+lower band, and being in both would break the same property.
+"""
+
+
+def _library_facets(page: LibraryPage, layout: LibraryLayout) -> tuple[dict[str, Any], ...]:
+    """Return the chip rows that narrow a listing in one click.
+
+    A chip you are standing on links back to the listing without it, so every
+    chip is a toggle rather than a one-way door — the same behaviour the report's
+    chips have, built the same way.
+
+    A group with one chip in it is dropped. "Show me the only kind of thing here"
+    is a control whose two states show the same rows.
+    """
+    query = page.query
+    rows = (
+        # First, because it is the row somebody sorting through a crawl works
+        # from: which of these have I not looked at yet.
+        _facet_row(
+            "Review",
+            page.verdicts,
+            query,
+            layout,
+            "verdict",
+            _enum_value(query.verdict),
+            lambda value: VERDICT_WORDS[ReviewVerdict(value)],
+            extra=_favourite_chips(page, layout),
+        ),
+        _facet_row("Source", page.providers, query, layout, "provider", query.provider or "", str),
+        _facet_row(
+            "Type",
+            page.kinds,
+            query,
+            layout,
+            "kind",
+            "" if query.kind is None else str(query.kind),
+            lambda value: KIND_WORDS[MediaKind(value)],
+        ),
+        _facet_row(
+            "State",
+            page.statuses,
+            query,
+            layout,
+            "status",
+            _status_value(query.status),
+            lambda value: STATUS_LABELS[DownloadStatus(value)],
+            extra=_queued_chips(page, layout),
+        ),
+        _size_facets(query, layout),
+    )
+    return tuple(row for row in rows if row is not None)
+
+
+def _facet_row(
+    heading: str,
+    facets: tuple[LibraryFacet, ...],
+    query: LibraryQuery,
+    layout: LibraryLayout,
+    name: str,
+    active: str,
+    label_of: Callable[[str], str],
+    *,
+    extra: tuple[dict[str, Any], ...] = (),
+) -> dict[str, Any] | None:
+    """Return one chip row, or ``None`` when it would not be worth showing.
+
+    *extra* is for a chip that belongs in a group without coming from its
+    facets, and the length is checked after they are added — a library where
+    everything completed and one thing is being fetched again has two states to
+    choose between, even though only one of them is a status.
+    """
+    chips = [
+        _chip(
+            query,
+            layout,
+            label_of(facet.value),
+            facet.count,
+            active=facet.value == active,
+            **{name: None if facet.value == active else facet.value},
+        )
+        for facet in facets
+    ]
+    chips.extend(extra)
+    return None if len(chips) < 2 else {"heading": heading, "chips": tuple(chips)}
+
+
+def _favourite_chips(page: LibraryPage, layout: LibraryLayout) -> tuple[dict[str, Any], ...]:
+    """Return the "starred" chip, when anything is starred or it is the filter on.
+
+    Beside the verdicts although it is not one of them, for the reason the queue
+    chip sits beside the download states: the group is what somebody looks
+    through to narrow a listing, and which of its chips come from the same
+    vocabulary is this module's problem rather than theirs.
+    """
+    query = page.query
+    if page.favourites == 0 and not query.favourite:
+        return ()
+    return (
+        _chip(
+            query,
+            layout,
+            FAVOURITE_LABEL,
+            page.favourites,
+            active=query.favourite,
+            favourite=not query.favourite,
+        ),
+    )
+
+
+def _queued_chips(page: LibraryPage, layout: LibraryLayout) -> tuple[dict[str, Any], ...]:
+    """Return the "waiting" chip, when there is a queue to ask and it holds something.
+
+    Offered beside the download states because that is where somebody looks for
+    it, and built separately because it is not one: a status is what a record
+    says happened, and this is what is happening right now in this process.
+
+    Nothing at all when no queue was handed to the service, which is what tells
+    a page that cannot answer the question apart from one whose answer is none.
+    Kept on the page while it is the active filter even at zero, so the chip you
+    are standing on is always the one that switches it off.
+    """
+    query = page.query
+    if page.queued is None or (page.queued == 0 and not query.queued):
+        return ()
+    return (
+        _chip(
+            page.query,
+            layout,
+            QUEUED_LABEL,
+            page.queued,
+            active=query.queued,
+            queued=not query.queued,
+        ),
+    )
+
+
+def _chip(
+    query: LibraryQuery,
+    layout: LibraryLayout,
+    label: str,
+    count: int | None,
+    *,
+    active: bool,
+    **changes: Any,
+) -> dict[str, Any]:
+    """Return one chip: what it says, whether it is on, and where it leads.
+
+    Always back to the first page, because a filter applied on page seven of the
+    old listing has no page seven to keep.
+    """
+    return {
+        "label": label,
+        "count": "" if count is None else format_number(count),
+        "active": active,
+        "url": _library_url(query, layout, page=1, **changes),
+    }
+
+
+def _size_facets(query: LibraryQuery, layout: LibraryLayout) -> dict[str, Any]:
+    """Return the size bands as chips, with the active one able to switch off.
+
+    No counts, and that is the one place these differ from the chips above.
+    A band's count would have to be computed over the library while the bands
+    themselves are what somebody is choosing between, and the number that
+    matters — how many the chosen band holds — is already the one at the top of
+    the page.
+    """
+    return {
+        "heading": "Size",
+        "chips": tuple(
+            _chip(
+                query,
+                layout,
+                label,
+                None,
+                active=query.min_size == low and query.max_size == high,
+                min_size=None if query.min_size == low and query.max_size == high else low,
+                max_size=None if query.min_size == low and query.max_size == high else high,
+            )
+            for label, low, high in SIZE_RANGES
+        ),
     }
 
 
@@ -647,7 +1126,9 @@ SORT_MARKS = {True: "▾", False: "▴"}
 """What marks the column a listing is ordered by, and which way."""
 
 
-def _column(label: str, sort: LibrarySort, query: LibraryQuery) -> dict[str, Any]:
+def _column(
+    label: str, sort: LibrarySort, query: LibraryQuery, layout: LibraryLayout
+) -> dict[str, Any]:
     """Return one column heading, and the link that reorders by it.
 
     Clicking the active column reverses it; clicking another one starts at the
@@ -659,7 +1140,7 @@ def _column(label: str, sort: LibrarySort, query: LibraryQuery) -> dict[str, Any
     descending = not query.descending if active else sort in _DESCENDING_FIRST
     return {
         "label": label,
-        "url": _library_url(query, sort=sort, descending=descending, page=1),
+        "url": _library_url(query, layout, sort=sort, descending=descending, page=1),
         "active": active,
         "mark": SORT_MARKS[query.descending] if active else "",
     }
@@ -669,17 +1150,25 @@ _DESCENDING_FIRST = frozenset({LibrarySort.SIZE, LibrarySort.DOWNLOADED})
 """Columns whose first click means "biggest first" rather than "smallest"."""
 
 
-def _library_url(query: LibraryQuery, **changes: Any) -> str:
+def _library_url(query: LibraryQuery, layout: LibraryLayout, **changes: Any) -> str:
     """Return the library URL for *query* with *changes* applied.
 
     Only what differs from the default is written into the query string, so an
     unfiltered listing is plain ``/library`` and a bookmarked one carries exactly
-    what it needs.
+    what it needs. The layout follows the same rule and is therefore absent from
+    every grid link: the grid is what ``/library`` means.
     """
     values = {
         "q": changes.get("search", query.search),
+        "view": "" if layout is LibraryLayout.GRID else str(layout),
         "provider": changes.get("provider", query.provider) or "",
         "status": _status_value(changes.get("status", query.status)),
+        "kind": _enum_value(changes.get("kind", query.kind)),
+        "min": _number_value(changes.get("min_size", query.min_size)),
+        "max": _number_value(changes.get("max_size", query.max_size)),
+        "verdict": _enum_value(changes.get("verdict", query.verdict)),
+        "fav": "1" if changes.get("favourite", query.favourite) else "",
+        "state": "queued" if changes.get("queued", query.queued) else "",
         "sort": str(changes.get("sort", query.sort)),
         "dir": "desc" if changes.get("descending", query.descending) else "asc",
         "page": str(changes.get("page", query.page)),
@@ -698,12 +1187,46 @@ def _status_value(status: DownloadStatus | None) -> str:
     return "" if status is None else str(status)
 
 
-def _library_row(item: LibraryItem) -> dict[str, Any]:
-    """Return one stored resource as a table row."""
+def _enum_value(value: StrEnum | None) -> str:
+    """Return an optional enumerated filter as a query string writes it."""
+    return "" if value is None else str(value)
+
+
+def _number_value(value: int | None) -> str:
+    """Return an optional numeric bound as a query string writes it.
+
+    Written as a plain byte count rather than as "10 MB", so a bookmarked URL
+    means exactly one number and does not depend on this module's rounding.
+    """
+    return "" if value is None else str(value)
+
+
+def _library_row(
+    item: LibraryItem, preview: Preview | None = None, *, back: str = "/library"
+) -> dict[str, Any]:
+    """Return one stored resource as a row, and as a tile.
+
+    One dictionary for both layouts rather than two, because they show the same
+    entry: what differs is which template reads which keys. Two builders would
+    make it possible for a tile and a row to disagree about the same file, which
+    is exactly the bug nobody would look for.
+    """
+    base = f"/library/{item.directory}/{item.key}"
+    shape = PreviewShape.SYMBOL if preview is None else preview.shape
     return {
         "provider": item.provider,
         "name": item.name,
+        # Elided here rather than by the stylesheet: CSS can only cut the end
+        # off, which is where the extension is. See `elide_middle`.
+        "short_name": elide_middle(item.name, TILE_NAME_LENGTH),
         "size": format_size(item.size),
+        # What the tile puts where the file would be. The image is the stored
+        # file itself, served by the route that already decides what a browser
+        # may be shown — there is no second delivery path and no generated file.
+        "preview_shape": str(shape),
+        "preview_url": f"{base}/view" if shape is PreviewShape.IMAGE else None,
+        "excerpt": "" if preview is None else preview.excerpt,
+        "is_queued": item.queued,
         "downloaded_at": (
             "—" if item.downloaded_at is None else format_timestamp(item.downloaded_at)
         ),
@@ -714,10 +1237,88 @@ def _library_row(item: LibraryItem) -> dict[str, Any]:
         "path": "—" if item.path is None else str(item.path),
         "source_url": item.source_url,
         "status": str(item.status),
-        "state_label": STATUS_LABELS[item.status],
-        "state_tone": STATUS_TONES[item.status],
-        "url": f"/library/{item.directory}/{item.key}",
+        "state_label": _entry_label(item),
+        "state_tone": _entry_tone(item),
+        "kind": str(item.kind),
+        "kind_word": KIND_WORDS[item.kind],
+        # Carrying the listing, which is what makes opening a tile the start of
+        # a walk through it rather than a visit to one file.
+        "url": item_url(item.directory, item.key, back),
+        **_review_of(item, base, back),
     }
+
+
+def _review_of(
+    item: LibraryItem, base: str, back: str, *, walk: str | None = None
+) -> dict[str, Any]:
+    """Return what a row says and offers about the judgement passed on it.
+
+    The same keys on a tile, on a table row and on the file's own page, because
+    the four buttons are the same four buttons everywhere — which is most of
+    what makes judging a hundred files feel like one action repeated rather than
+    three interfaces.
+    """
+    discarded = item.verdict is ReviewVerdict.DISCARDED
+    return {
+        "verdict": str(item.verdict),
+        "verdict_word": VERDICT_WORDS[item.verdict],
+        "is_reviewed": item.verdict is not ReviewVerdict.UNREVIEWED,
+        "is_discarded": discarded,
+        # The one undo that cannot undo everything, and it says so where it is
+        # pressed rather than afterwards: the verdict goes, the file does not
+        # come back, and fetching the link again is what would restore it.
+        "undo_hint": (
+            "Put this back in the unreviewed pile — the deleted file does not come back"
+            if discarded
+            else "Put this back in the unreviewed pile"
+        ),
+        "is_favourite": item.favourite,
+        # Filled or hollow, and the value it would send is the opposite of what
+        # it shows: the button says what is true now and does the other thing.
+        "favourite_mark": FAVOURITE_MARK if item.favourite else UNFAVOURITE_MARK,
+        "favourite_value": "0" if item.favourite else "1",
+        "entry_token": f"{item.directory}/{item.key}",
+        "review_action": _review_action(f"{base}/review", back, walk=walk),
+        # Carried on the row rather than beside it, so the partial that renders
+        # the buttons reads the same name whether it is inside a tile, a table
+        # row or one file's own page.
+        "verdict_buttons": VERDICT_CHOICES,
+    }
+
+
+def _review_action(path: str, back: str, *, walk: str | None = None) -> str:
+    """Return where a judgement is posted, carrying where to land afterwards.
+
+    On the action rather than in a hidden field, which is the arrangement
+    ADR-039 settled on: the same button sits on a listing, on a tile and on a
+    file's own page, and each of those is a different place to come back to.
+    :func:`~maxicrawler.api.routes._our_path` is what makes the parameter safe
+    to obey.
+
+    *walk* names the listing being worked through, and its presence is what
+    makes a decision move on to the next file of it. Its own parameter rather
+    than a flag on ``back``, because the two say different things: ``back`` is
+    where a press that does *not* move on should land — the file itself, as it
+    has been since these buttons existed — and this is the set the next file
+    comes out of. A file opened on its own has the first and not the second.
+    """
+    asked = {"back": back} if walk is None else {"back": back, "walk": walk}
+    return f"{path}?{urlencode(asked)}"
+
+
+def _entry_label(item: LibraryItem) -> str:
+    """Return what a listing says about this entry's state.
+
+    The queue wins over the record, because it is the newer of the two facts. A
+    row reading "failed" while the file is being fetched again would send
+    somebody to press a button that is already pressed.
+    """
+    return QUEUED_LABEL if item.queued else STATUS_LABELS[item.status]
+
+
+def _entry_tone(item: LibraryItem) -> str:
+    """Return the badge colour that goes with :func:`_entry_label`."""
+    return "idle" if item.queued else STATUS_TONES[item.status]
 
 
 def _transferred(written: int, total: int | None) -> str:
@@ -967,6 +1568,7 @@ LINK_STATE_LABELS: dict[str, str] = {
     UNTRACKED: "new",
     LinkState.IN_LIBRARY: "in library",
     LinkState.IN_QUEUE: "in queue",
+    LinkState.DISMISSED: "dismissed",
 }
 """What each state is called, keyed the way a query string spells it.
 
@@ -979,6 +1581,10 @@ LINK_STATE_TONES: dict[str, str] = {
     UNTRACKED: "idle",
     LinkState.IN_LIBRARY: "good",
     LinkState.IN_QUEUE: "busy",
+    # Quiet like "new". It marks a row nobody has to act on, and a colour that
+    # asked for attention would be asking for it on behalf of a decision that
+    # has already been made.
+    LinkState.DISMISSED: "idle",
 }
 """Which badge colour each state wears. "New" is the quiet one deliberately: on
 a first crawl it is every row, and a table shouting at all three thousand of
@@ -1502,6 +2108,26 @@ def settings_view(settings: Settings) -> tuple[dict[str, Any], ...]:
                     "max_view_bytes",
                     format_bytes(settings.max_view_bytes),
                     "Largest stored file the browser is offered inline.",
+                ),
+                _setting(
+                    "max_stream_bytes",
+                    "no limit"
+                    if settings.max_stream_bytes <= 0
+                    else format_size(settings.max_stream_bytes),
+                    "Largest recording the browser is offered to play. Its own "
+                    "limit because audio and video arrive in pieces.",
+                ),
+                _setting(
+                    "preview_inline_bytes",
+                    format_size(settings.preview_inline_bytes),
+                    "Largest image a tile shows as itself. Above it a tile "
+                    "shows a symbol, never a scaled-down original.",
+                ),
+                _setting(
+                    "min_download_size",
+                    format_size(settings.min_download_size),
+                    "Smallest payload kept. Anything under it is recorded as "
+                    "not kept, with both sizes, and never fetched again.",
                 ),
                 _setting("log_level", settings.log_level, ""),
                 _setting("max_entries", format_number(settings.max_entries), ""),

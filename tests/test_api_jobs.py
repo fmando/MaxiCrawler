@@ -11,6 +11,7 @@ from web_server import Site, serve
 from maxicrawler.api.jobs import CrawlJob, CrawlJobs, JobSnapshot
 from maxicrawler.app import CrawlService
 from maxicrawler.config import Settings
+from maxicrawler.events import CrawlFinished
 from maxicrawler.web.session import CrawlOptions, CrawlSession, CrawlState
 
 TREE = {
@@ -296,3 +297,59 @@ def test_two_crawls_do_not_share_a_pipeline() -> None:
     assert first.control is not second.control
     assert first.snapshot().pages_visited == 3
     assert second.snapshot().pages_visited == 2
+
+
+# --- finished means the report is there ---------------------------------------
+
+
+def a_job() -> CrawlJob:
+    """Return one job over a session nobody is going to run."""
+    return CrawlJob(make_service().build_session("https://example.test/"))
+
+
+def crawl_finished(job: CrawlJob) -> None:
+    """Publish what the engine publishes when it stops crawling."""
+    job.bus.publish(
+        CrawlFinished(
+            session_id=job.id, state=str(CrawlState.COMPLETED), pages_visited=1, pages_failed=0
+        )
+    )
+
+
+def test_a_job_never_says_finished_before_its_report_is_there() -> None:
+    """The event says the crawling stopped, not that the job is done.
+
+    The engine writes the report to the repository *after* publishing this, so
+    a job that went terminal here would be telling every reader to come and get
+    a report that does not exist for as long as that write takes. What that
+    looks like from the outside is a finished crawl whose page has no link
+    table, and it is what made a dozen report tests fail on a loaded machine.
+    """
+    job = a_job()
+
+    crawl_finished(job)
+
+    assert job.report is None
+    assert job.snapshot().is_finished is False
+
+
+def test_the_clock_stops_when_the_crawling_does() -> None:
+    """The one thing the event does settle: elapsed is about the crawling."""
+    job = a_job()
+
+    crawl_finished(job)
+    settled = job.snapshot().elapsed_seconds
+    sleep(0.05)
+
+    assert job.snapshot().elapsed_seconds == pytest.approx(settled)
+
+
+def test_a_crawl_that_will_never_report_is_finished_all_the_same() -> None:
+    """Otherwise a seed that cannot be read leaves a job pending forever."""
+    job = a_job()
+
+    crawl_finished(job)
+    job.fail("the seed could not be read")
+
+    assert job.report is None
+    assert job.snapshot().is_finished is True

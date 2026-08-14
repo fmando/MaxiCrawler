@@ -67,7 +67,7 @@ class DownloadOutcome:
     bytes_written: int = 0
     checksums: tuple[Checksum, ...] = ()
     reason: str | None = None
-    """Why a job was skipped or failed; ``None`` for a plain success."""
+    """Why a job was skipped, refused or failed; ``None`` for a plain success."""
 
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -145,6 +145,20 @@ class DownloadReport:
     def skipped(self) -> tuple[DownloadOutcome, ...]:
         """Return the jobs the library already held."""
         return self._with(DownloadStatus.SKIPPED)
+
+    @property
+    def refused(self) -> tuple[DownloadOutcome, ...]:
+        """Return the jobs a configured rule turned away.
+
+        Kept out of :attr:`succeeded` deliberately — that is, a refusal does not
+        make a run unsuccessful. A cancellation does, because somebody wanted
+        those bytes and stopped getting them; a refusal is the opposite, a limit
+        this installation set doing precisely what it was set to do. A run over
+        two hundred links that leaves forty thumbnails behind did what it was
+        told, and an exit code saying otherwise would teach whoever reads it to
+        stop reading it.
+        """
+        return self._with(DownloadStatus.REFUSED)
 
     @property
     def failed(self) -> tuple[DownloadOutcome, ...]:

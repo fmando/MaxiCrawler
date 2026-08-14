@@ -10,10 +10,11 @@ them later. Downloads joined them in Sprint 15, when there was finally a queue
 to put on such a page.
 """
 
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
@@ -34,7 +35,6 @@ from maxicrawler.api.jobs import DEFAULT_RETAINED_JOBS, CrawlJob, CrawlJobs
 from maxicrawler.app import (
     DEFAULT_LINKS_PER_PAGE,
     DEFAULT_PAGES_PER_PAGE,
-    DEFAULT_PER_PAGE,
     DiscoveryService,
     LibraryQuery,
     LibraryService,
@@ -48,9 +48,11 @@ from maxicrawler.app import (
     TargetKind,
     browse_pages,
     crawl_document,
+    parse_verdict,
 )
-from maxicrawler.app.viewing import DOWNLOAD_CONTENT_TYPE
-from maxicrawler.domain import DownloadStatus
+from maxicrawler.app.viewing import DOWNLOAD_CONTENT_TYPE, MediaKind
+from maxicrawler.domain import DownloadStatus, ReviewVerdict
+from maxicrawler.utils import parse_size
 from maxicrawler.web.report import CrawlReport
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -718,16 +720,253 @@ async def library(request: Request) -> Response:
     a better answer to a stale link than a refusal.
     """
     service = library_of(request)
+    layout = views.LibraryLayout.parse(request.query_params.get("view"))
+    listing = service.browse(_query(request.query_params, layout))
     return page(
         request,
         "library.html",
         {
-            "library": views.library_view(service.browse(_query(request))),
+            "library": views.library_view(listing, service.previews(listing.items), layout=layout),
             "library_path": service.library_root.as_posix(),
             "running": _running(request),
         },
         section="library",
     )
+
+
+async def review_item(request: Request) -> Response:
+    """Record what somebody thinks of one stored file, and go back to it.
+
+    One route for both statements a person can make. A form submits either a
+    ``verdict`` or a ``favourite``, because the buttons that send them are
+    different buttons — and a submit button contributes only its own name and
+    value, which is what lets three of them share one form and one route.
+
+    Lands wherever the form's action said, checked by :func:`_our_path`. Without
+    a ``back`` it lands on the file's own page, which is where somebody judging
+    a single file is standing.
+
+    **Unless the form named a listing**, in which case a decision moves on to the
+    next file of it. That is the whole of what makes sorting through three
+    hundred files one action repeated instead of three hundred round trips, and
+    it needs no script: the server knows the listing, knows the position, and
+    answers with the successor.
+
+    The successor is worked out **before** anything is written, which is not a
+    detail. The listing being walked is usually *the unreviewed*, so the write
+    removes the very row the position was counted from; asking afterwards would
+    hand back the file after the next one, and every judgement would skip one.
+
+    Taking a judgement back does not move on, and neither does the star. A
+    correction belongs on the file it corrects, and a note is not a decision.
+
+    One of the buttons deletes the file, and it does so without asking. That is a
+    decision rather than an omission: the confirmation this interface has is on
+    the *batch*, where somebody is acting on rows they cannot all see. Here they
+    are standing on one file, looking at it, and a dialog on every single
+    discard is a dialog that gets dismissed without being read — which is worth
+    less than no dialog at all.
+
+    Raises:
+        HTTPException: nothing here is addressed by those two names, or the file
+            is there and would not be deleted. The second is 409 rather than
+            404: the entry exists, nothing was written, and the reason is
+            usually another program holding the file open.
+    """
+    form = await read_form(request)
+    provider = request.path_params["provider"]
+    key = request.path_params["key"]
+    shelf = library_of(request)
+    verdict = parse_verdict(form.get("verdict"))
+    onward = _onward(request, shelf, provider, key, verdict)
+    if verdict is ReviewVerdict.DISCARDED:
+        item = shelf.discard(provider, key)
+        # Two questions, because the service answers "no such entry" and "would
+        # not delete" with the same `None` — deliberately, since nothing was
+        # written in either case. Which of the two it was is only worth a second
+        # look here, where it decides what somebody is told.
+        if item is None and shelf.item(provider, key) is not None:
+            raise HTTPException(status_code=409, detail="the stored file could not be removed")
+    else:
+        item = shelf.review(provider, key, verdict=verdict, favourite=_flag(form.get("favourite")))
+    if item is None:
+        raise HTTPException(status_code=404, detail="no such stored file")
+    return RedirectResponse(url=onward, status_code=303)
+
+
+ADVANCING = frozenset({ReviewVerdict.KEPT, ReviewVerdict.IGNORED, ReviewVerdict.DISCARDED})
+"""The three words that finish with a file and move on to the next one.
+
+*Unreviewed* is missing because it is a correction, and a correction that threw
+you forward would be one you could not check. The star is missing because it is
+not a verdict at all: starring something and then deciding about it is two
+statements about one file, and the first must not carry you off the file.
+"""
+
+
+def _onward(
+    request: Request,
+    shelf: LibraryService,
+    provider: str,
+    key: str,
+    verdict: ReviewVerdict | None,
+) -> str:
+    """Return where to land after judging this file, worked out beforehand.
+
+    Called before the write, and that is its whole reason for being a function
+    of its own — see :func:`review_item`.
+
+    The listing rides in a parameter of its own rather than in ``back``, because
+    the two answer different questions: ``back`` is where a press that does not
+    move on should land — the file itself, as it has been since these buttons
+    existed — and ``walk`` is the set the next file comes out of.
+
+    The end of a walk lands where ``back`` points rather than nowhere, which is
+    also what says the walk is over.
+    """
+    here = f"/library/{provider}/{key}"
+    asked = _our_path(request.query_params.get("walk", ""), "")
+    walking = _listing(asked)
+    if walking is None or verdict not in ADVANCING:
+        return _back_to(request, here)
+    place = shelf.locate(provider, key, _query(walking[0], walking[1]))
+    if place is None or place.following is None:
+        return _back_to(request, here)
+    return views.item_url(place.following.directory, place.following.key, asked)
+
+
+def _listing(asked: str) -> tuple[Mapping[str, str], views.LibraryLayout] | None:
+    """Return the library listing *asked* names, when it names one of ours.
+
+    A file's page is two things depending on how it was reached: one file, or
+    the twelfth of forty somebody is working through. What tells them apart is
+    whether a listing of ours was named on the way in, and the name arrives as
+    an ordinary path parameter — checked by :func:`_our_path` like every other
+    one, and required to be ``/library`` itself rather than merely ours.
+
+    ``None`` for a page opened on its own: a bookmark, a link in a chat, the
+    address bar. There is no walk to show and no next file to be thrown to, and
+    inventing one out of the whole library would be answering a question nobody
+    asked.
+    """
+    named = _our_path(asked, "")
+    if not named:
+        return None
+    parts = urlsplit(named)
+    if parts.path != "/library":
+        return None
+    values = {name: found[-1] for name, found in parse_qs(parts.query).items()}
+    return values, views.LibraryLayout.parse(values.get("view"))
+
+
+async def review_selection(request: Request) -> Response:
+    """Record the same judgement about every file that was ticked.
+
+    Partial by design, the way queueing a selection is: an entry that has since
+    been removed is skipped rather than turned into a refusal of the other
+    ninety-nine. Nothing is reported back about how many were skipped, because
+    the listing somebody lands on says what each of them is now — which is the
+    same information, about the rows rather than about the request.
+
+    The ticks are gone afterwards and are deliberately not restored. What comes
+    back instead is rows carrying their new verdict, which is what was being
+    asked for.
+
+    Discarding is the exception and does not happen here. It deletes files, and
+    a selection is the one place somebody is acting on rows they cannot all see
+    at once, so it goes to a page that says how many and which ones first.
+    """
+    form = await read_forms(request)
+    verdict = parse_verdict(_one(form, "verdict") or None)
+    favourite = _flag(_one(form, "favourite") or None)
+    shelf = library_of(request)
+    back = _back_to(request, "/library")
+    if verdict is ReviewVerdict.DISCARDED:
+        return _confirm_discard(request, form, back=back)
+    if verdict is not None or favourite is not None:
+        for directory, key in _entries(form):
+            shelf.review(directory, key, verdict=verdict, favourite=favourite)
+    return RedirectResponse(url=back, status_code=303)
+
+
+def _confirm_discard(request: Request, form: dict[str, list[str]], *, back: str) -> Response:
+    """Ask about deleting the ticked files, naming every one of them.
+
+    The selection is rebuilt from the entries rather than trusted as a count, so
+    the page states what is really there: a token addressing something that has
+    since gone is dropped here rather than silently making the number too large.
+
+    Nothing left to ask about is not a question. An empty selection lands back
+    in the listing, which is where a batch with nothing in it belongs.
+    """
+    shelf = library_of(request)
+    items = tuple(
+        item
+        for directory, key in _entries(form)
+        if (item := shelf.item(directory, key)) is not None
+    )
+    if not items:
+        return RedirectResponse(url=back, status_code=303)
+    return page(
+        request,
+        "library_discard.html",
+        {
+            "discard": views.discard_view(
+                items,
+                # Where to land afterwards travels on the action, as it does on
+                # every other form here (ADR-039), so the confirmation itself
+                # carries nothing a browser could point elsewhere.
+                action=f"/library/discard?{urlencode({'back': back})}",
+                back=back,
+            )
+        },
+        section="library",
+    )
+
+
+async def discard_selection(request: Request) -> Response:
+    """Delete the files the confirmation page was shown for, and go back.
+
+    The only route that acts on the answer to a question, and it re-reads the
+    entries rather than trusting a count from the page: what is deleted is what
+    the form named, which is what was listed.
+
+    Partial by design, like every other batch here. A file another program is
+    holding open is left where it is, unmarked, and the listing somebody lands
+    on still shows it — which is the report, about the rows rather than about
+    the request.
+    """
+    form = await read_forms(request)
+    shelf = library_of(request)
+    for directory, key in _entries(form):
+        shelf.discard(directory, key)
+    return RedirectResponse(url=_back_to(request, "/library"), status_code=303)
+
+
+def _entries(form: dict[str, list[str]]) -> Iterator[tuple[str, str]]:
+    """Yield the library entries a batch of ticks named.
+
+    One field per ticked row, each holding ``directory/key`` — the pair that
+    addresses an entry in a URL. Anything that is not that pair is skipped
+    rather than refused, for the reason a selection of links is: two malformed
+    tokens are not a refusal of the other ninety-eight.
+    """
+    for token in form.get("entry", ()):
+        directory, _, key = token.partition("/")
+        if directory and key:
+            yield directory, key
+
+
+def _flag(value: str | None) -> bool | None:
+    """Return the switch *value* sets, or ``None`` when it says nothing.
+
+    ``None`` rather than ``False`` for an absent field, because absent means
+    *this form was not about the star* — and reading it as "not a favourite"
+    would make every verdict button quietly unstar what it judged.
+    """
+    if value is None:
+        return None
+    return value not in {"", "0", "false"}
 
 
 async def library_item(request: Request) -> Response:
@@ -745,10 +984,22 @@ async def library_item(request: Request) -> Response:
     if item is None:
         raise HTTPException(status_code=404, detail="no such file")
     payload = service.payload(item.directory, item.key)
+    # Where this file stands in the listing it was opened from, and nothing at
+    # all when it was not opened from one. The page reads the same either way;
+    # what a walk adds is a position, two neighbours and buttons that move on.
+    walking = _listing(request.query_params.get("back", ""))
+    place = (
+        None
+        if walking is None
+        else service.locate(item.directory, item.key, _query(walking[0], walking[1]))
+    )
     return page(
         request,
         "library_item.html",
-        {"item": views.item_view(item, payload)},
+        # Where "back to the library" goes, and where a judgement passed here
+        # lands: the listing somebody came from, filters and all, when the link
+        # that led here said so.
+        {"item": views.item_view(item, payload, back=_back_to(request, "/library"), place=place)},
         section="library",
     )
 
@@ -843,17 +1094,39 @@ def _payload(request: Request) -> StoredPayload:
     return payload
 
 
-def _query(request: Request) -> LibraryQuery:
-    """Return the library query this request asks for."""
-    values = request.query_params
+def _query(values: Mapping[str, str], layout: views.LibraryLayout) -> LibraryQuery:
+    """Return the library query *values* asks for.
+
+    The layout decides only how many entries one page holds. Everything else
+    about the query is the same either way, which is what makes switching
+    between the two a link rather than a different listing.
+
+    Reads a plain mapping rather than the request, because the same parameters
+    arrive two ways: in the query string of a listing, and inside the parameter
+    naming the listing a file is being walked from. One parser for both is what
+    keeps *the listing you are looking at* and *the listing you are walking* the
+    same set.
+    """
     return LibraryQuery(
         search=values.get("q", "").strip(),
         provider=values.get("provider") or None,
         status=_status(values.get("status")),
+        kind=MediaKind.parse(values.get("kind")),
+        verdict=parse_verdict(values.get("verdict")),
+        favourite=values.get("fav") == "1",
+        # Read with the same parser the boxes are labelled by, so "10 MB" typed
+        # into a field and 10000000 carried by a chip are one filter.
+        min_size=parse_size(values.get("min")),
+        max_size=parse_size(values.get("max")),
+        # Its own parameter rather than another value of `status`, because it is
+        # a different question: a status is what a record says happened, and this
+        # is what is happening. Written as `state=queued` so the one that comes
+        # after it is a value here rather than a fourth parameter.
+        queued=values.get("state") == "queued",
         sort=LibrarySort.parse(values.get("sort"), default=LibraryQuery().sort),
         descending=values.get("dir", "desc") != "asc",
         page=_positive(values.get("page"), default=1),
-        per_page=_positive(values.get("per_page"), default=DEFAULT_PER_PAGE),
+        per_page=_positive(values.get("per_page"), default=views.LAYOUT_PER_PAGE[layout]),
     )
 
 

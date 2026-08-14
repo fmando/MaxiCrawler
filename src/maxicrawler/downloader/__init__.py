@@ -13,7 +13,12 @@ plugs in without a line changing here.
 """
 
 from maxicrawler.downloader.control import DownloadControl
-from maxicrawler.downloader.errors import DownloadCancelledError, DownloadError, SourceError
+from maxicrawler.downloader.errors import (
+    DownloadCancelledError,
+    DownloadError,
+    DownloadRefusedError,
+    SourceError,
+)
 from maxicrawler.downloader.manager import DownloadManager, DownloadWorker
 from maxicrawler.downloader.models import (
     DownloadJob,
@@ -44,6 +49,7 @@ __all__ = [
     "DownloadPlan",
     "DownloadPlanner",
     "DownloadQueue",
+    "DownloadRefusedError",
     "DownloadReport",
     "DownloadWorker",
     "LibrarySink",

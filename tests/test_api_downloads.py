@@ -69,7 +69,13 @@ def make_service(tmp_path: Path, provider: StubProvider | None = None) -> Downlo
             )
         ]
     )
-    return DownloadService(Settings(library_path=library.root), providers=registry, library=library)
+    # No floor: a stub payload is twelve bytes, and what this suite is about is
+    # the queue rather than which payloads are worth keeping.
+    return DownloadService(
+        Settings(library_path=library.root, min_download_size=0),
+        providers=registry,
+        library=library,
+    )
 
 
 @contextmanager

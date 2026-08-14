@@ -22,6 +22,10 @@ from test_api_pages import MEGA_LINK, findable_site, recording_client, start, wa
 from web_server import Site, serve
 
 from maxicrawler.api.downloads import TransferQueue
+from maxicrawler.app import LibraryService
+from maxicrawler.domain import DownloadStatus, ResourceKind, ResourceRef, ReviewVerdict
+from maxicrawler.library import Library, new_record
+from maxicrawler.utils import strip_fragment
 
 KEY = MEGA_LINK.split("#", 1)[1]
 SECOND_LINK = f"https://mega.nz/file/EeFfGgHh#{KEY}"
@@ -179,7 +183,9 @@ def test_the_selection_script_is_served(tmp_path: Path) -> None:
         response = test_client.get("/static/select.js")
 
         assert response.status_code == 200
-        assert "link-selection" in response.text
+        # It finds its boxes by the marker, not by this page's form id: the
+        # library has a selection of its own now and shares the script.
+        assert "data-tick" in response.text
 
 
 def test_the_checkboxes_belong_to_a_form_they_are_not_inside(tmp_path: Path) -> None:
@@ -328,6 +334,69 @@ def test_a_crawl_nobody_recorded_matches_nothing(tmp_path: Path) -> None:
         response = test_client.post("/crawls/no-such-crawl/downloads")
 
         assert response.status_code == 409
+
+
+# --- and leaving out what somebody has already waved away ----------------------
+
+
+def dismiss(test_client: TestClient, url: str) -> None:
+    """Record *url* in the library and ignore it, the way the library page does.
+
+    Written straight into the store rather than downloaded: what is under test
+    is that the report asks, not how the entry got there.
+    """
+    shelf: LibraryService = test_client.app.state.library  # type: ignore[attr-defined]
+    library = Library(shelf.library_root)
+    ref = ResourceRef(
+        provider="mega",
+        resource_id="AaBbCcDd",
+        kind=ResourceKind.FILE,
+        url=strip_fragment(url),
+    )
+    entry = library.entry(ref)
+    entry.write(new_record(ref, entry.key, status=DownloadStatus.FAILED))
+    assert shelf.review("mega", entry.key, verdict=ReviewVerdict.IGNORED) is not None
+
+
+def test_queueing_every_match_leaves_out_what_was_dismissed(tmp_path: Path) -> None:
+    """The one control that could undo a hundred decisions with one click."""
+    with report(tmp_path) as (test_client, job_id, _):
+        dismiss(test_client, MEGA_LINK)
+
+        test_client.post(f"/crawls/{job_id}/downloads", follow_redirects=False)
+
+        assert "https://mega.nz/file/AaBbCcDd" not in waiting_urls(test_client)
+        assert len(waiting_urls(test_client)) == 2
+
+
+def test_a_dismissed_link_says_so_on_the_report(tmp_path: Path) -> None:
+    """Same resolver behind the badge and behind the exclusion, so they agree."""
+    with report(tmp_path) as (test_client, job_id, _):
+        dismiss(test_client, MEGA_LINK)
+
+        body = test_client.get(f"/crawls/{job_id}").text
+
+        assert "dismissed" in body
+
+
+def test_a_link_that_was_only_looked_at_is_still_queued(tmp_path: Path) -> None:
+    """Keeping something is not a reason never to fetch it again."""
+    with report(tmp_path) as (test_client, job_id, _):
+        dismiss(test_client, MEGA_LINK)
+        shelf: LibraryService = test_client.app.state.library  # type: ignore[attr-defined]
+        entry = Library(shelf.library_root).entry(
+            ResourceRef(
+                provider="mega",
+                resource_id="AaBbCcDd",
+                kind=ResourceKind.FILE,
+                url=strip_fragment(MEGA_LINK),
+            )
+        )
+        shelf.review("mega", entry.key, verdict=ReviewVerdict.KEPT)
+
+        test_client.post(f"/crawls/{job_id}/downloads", follow_redirects=False)
+
+        assert "https://mega.nz/file/AaBbCcDd" in waiting_urls(test_client)
 
 
 # --- queueing only what is not known yet ---------------------------------------

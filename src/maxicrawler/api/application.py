@@ -33,6 +33,7 @@ from maxicrawler.config import DEFAULT_CONFIG_PATH, Settings
 
 try:
     from starlette.applications import Starlette
+    from starlette.middleware import Middleware
     from starlette.requests import Request
     from starlette.responses import JSONResponse
     from starlette.routing import Mount, Route
@@ -43,6 +44,7 @@ except ImportError as error:  # pragma: no cover - depends on the environment
 from maxicrawler.api import routes  # noqa: E402 - only importable behind the guard
 from maxicrawler.api.downloads import TransferQueue  # noqa: E402
 from maxicrawler.api.jobs import CrawlJobs  # noqa: E402
+from maxicrawler.api.origin import SameOriginMiddleware  # noqa: E402
 
 
 def create_app(
@@ -79,7 +81,15 @@ def create_app(
         if downloads is not None
         else TransferQueue(DownloadService(crawl_service.settings))
     )
-    shelf = library if library is not None else LibraryService(crawl_service.settings)
+    # The queue is handed to the library the same way the library is handed to
+    # the report below: as one bound method answering one question in bulk.
+    # Neither service learns what the other is, and the command line — which has
+    # no queue to speak of — builds the same service without it.
+    shelf = (
+        library
+        if library is not None
+        else LibraryService(crawl_service.settings, queued=transfers.pending)
+    )
     # The download service answers "could this be fetched?" from a provider
     # registry it builds once and caches. Handing that same instance over rather
     # than a second one is why the resolver is injected: two registries would be
@@ -98,6 +108,10 @@ def create_app(
             states={
                 LinkState.IN_LIBRARY: shelf.stored,
                 LinkState.IN_QUEUE: transfers.pending,
+                # A third member and a third bound method, which is the whole of
+                # adding a state — nothing about how a report asks, counts,
+                # filters or renders changed to admit it.
+                LinkState.DISMISSED: shelf.dismissed,
             },
         )
     )
@@ -120,6 +134,10 @@ def create_app(
 
     application = Starlette(
         lifespan=lifespan,
+        # The only middleware, and it guards every unsafe method at once rather
+        # than every route remembering to. See `maxicrawler.api.origin` for what
+        # it decides and, more importantly, what it is not.
+        middleware=[Middleware(SameOriginMiddleware)],
         routes=[
             Route("/", routes.dashboard, methods=["GET"], name="dashboard"),
             Route("/crawls", routes.crawls, methods=["GET"], name="crawls"),
@@ -206,6 +224,30 @@ def create_app(
                 name="download_events",
             ),
             Route("/library", routes.library, methods=["GET"], name="library"),
+            # Above `{provider}/{key}`, for the reason `/downloads/pause` sits
+            # above `{download_id}`: a path parameter matches any one segment,
+            # and "review" is one.
+            Route(
+                "/library/review",
+                routes.review_selection,
+                methods=["POST"],
+                name="review_selection",
+            ),
+            # Separate from the route above, and that is the whole point of it:
+            # the batch of judgements never deletes anything, and the one that
+            # does is only reachable from the page that said how many and which.
+            Route(
+                "/library/discard",
+                routes.discard_selection,
+                methods=["POST"],
+                name="discard_selection",
+            ),
+            Route(
+                "/library/{provider}/{key}/review",
+                routes.review_item,
+                methods=["POST"],
+                name="review_item",
+            ),
             Route(
                 "/library/{provider}/{key}/view",
                 routes.library_view,

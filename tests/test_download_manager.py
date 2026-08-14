@@ -7,6 +7,7 @@ the layer exists for.
 """
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from maxicrawler.domain import (
     ResourceKind,
     ResourceMetadata,
     ResourceRef,
+    ReviewVerdict,
 )
 from maxicrawler.downloader import (
     DownloadControl,
@@ -31,7 +33,11 @@ from maxicrawler.downloader import (
     SourceItem,
     SourceResolver,
 )
-from maxicrawler.library import METADATA_FILENAME, Library
+from maxicrawler.library import (
+    METADATA_FILENAME,
+    Library,
+    ReviewRecord,
+)
 from maxicrawler.providers import ProviderRegistry, ProviderTransportError
 
 FILE_URL = "https://mega.nz/file/AaBbCcDd#0123456789abcdefghijkl"
@@ -56,8 +62,14 @@ def make_manager(
     provider: StubProvider | None = None,
     *,
     reporter: RecordingProgressReporter | None = None,
+    minimum_size: int = 0,
 ) -> tuple[DownloadManager, Library]:
-    """Return a manager storing into a library below *tmp_path*."""
+    """Return a manager storing into a library below *tmp_path*.
+
+    No floor unless a test asks for one, so every assertion here stays about
+    orchestration. What the configured default is, and that it reaches this far,
+    is `tests/test_app_downloading.py`'s question rather than this file's.
+    """
     registry = ProviderRegistry([provider if provider is not None else make_provider()])
     library = Library(tmp_path / "library")
     manager = DownloadManager(
@@ -65,6 +77,7 @@ def make_manager(
         library,
         reporter=reporter,
         clock=lambda: datetime(2026, 8, 2, 12, 0, tzinfo=UTC),
+        minimum_size=minimum_size,
     )
     return manager, library
 
@@ -237,6 +250,225 @@ def test_a_download_whose_payload_was_deleted_is_fetched_again(tmp_path: Path) -
     assert len(provider.downloaded) == 2
     entry = library.entry(report.completed[0].job.ref)
     assert stored_record(library, entry.path)["attempts"] == 2
+
+
+def test_a_judgement_survives_the_payload_being_fetched_again(tmp_path: Path) -> None:
+    provider = make_provider()
+    manager, library = make_manager(tmp_path, provider)
+    first = manager.download(FILE_URL)
+    entry = library.entry(first.completed[0].job.ref)
+    stored = entry.read()
+    assert stored is not None
+    entry.write(replace(stored, review=ReviewRecord(verdict=ReviewVerdict.KEPT, favourite=True)))
+    assert first.completed[0].path is not None
+    first.completed[0].path.unlink()
+
+    manager.download(FILE_URL)
+
+    again = entry.read()
+    assert again is not None
+    assert again.verdict is ReviewVerdict.KEPT
+    assert again.review is not None
+    assert again.review.favourite is True
+    assert again.attempts == 2
+
+
+def test_a_member_this_release_does_not_know_survives_a_second_download(tmp_path: Path) -> None:
+    provider = make_provider()
+    manager, library = make_manager(tmp_path, provider)
+    first = manager.download(FILE_URL)
+    entry = library.entry(first.completed[0].job.ref)
+    stored = entry.read()
+    assert stored is not None
+    entry.write(replace(stored, extra={"seeded_at": "2027-01-01T00:00:00+00:00"}))
+    assert first.completed[0].path is not None
+    first.completed[0].path.unlink()
+
+    manager.download(FILE_URL)
+
+    assert stored_record(library, entry.path)["seeded_at"] == "2027-01-01T00:00:00+00:00"
+
+
+def test_a_judgement_survives_a_download_that_fails(tmp_path: Path) -> None:
+    manager, library = make_manager(tmp_path, make_provider())
+    first = manager.download(FILE_URL)
+    entry = library.entry(first.completed[0].job.ref)
+    stored = entry.read()
+    assert stored is not None
+    entry.write(replace(stored, review=ReviewRecord(verdict=ReviewVerdict.KEPT)))
+    assert first.completed[0].path is not None
+    first.completed[0].path.unlink()
+
+    failing, _ = make_manager(tmp_path, make_provider(failure=ProviderTransportError("reset")))
+    failing.download(FILE_URL)
+
+    again = entry.read()
+    assert again is not None
+    assert again.status is DownloadStatus.FAILED
+    assert again.verdict is ReviewVerdict.KEPT
+
+
+def test_a_discarded_resource_is_refused_rather_than_fetched_again(tmp_path: Path) -> None:
+    """The promise the headstone exists for, kept where every route arrives."""
+    provider = make_provider()
+    manager, library = make_manager(tmp_path, provider)
+    first = manager.download(FILE_URL)
+    entry = library.entry(first.completed[0].job.ref)
+    stored = entry.read()
+    assert stored is not None
+    entry.remove_content()
+    entry.write(replace(stored, review=ReviewRecord(verdict=ReviewVerdict.DISCARDED)))
+
+    report = manager.download(FILE_URL)
+
+    assert len(report.refused) == 1
+    assert report.refused[0].reason == (
+        "discarded here, and not fetched again until that is taken back"
+    )
+    assert len(provider.downloaded) == 1
+    assert not entry.content_directory.exists()
+
+
+def test_an_ignored_resource_with_no_payload_is_refused_too(tmp_path: Path) -> None:
+    """Ignoring leaves the file alone; it does not promise to fetch it back."""
+    provider = make_provider()
+    manager, library = make_manager(tmp_path, provider)
+    first = manager.download(FILE_URL)
+    entry = library.entry(first.completed[0].job.ref)
+    stored = entry.read()
+    assert stored is not None
+    assert first.completed[0].path is not None
+    first.completed[0].path.unlink()
+    entry.write(replace(stored, review=ReviewRecord(verdict=ReviewVerdict.IGNORED)))
+
+    report = manager.download(FILE_URL)
+
+    assert len(report.refused) == 1
+    assert "ignored here" in str(report.refused[0].reason)
+    assert len(provider.downloaded) == 1
+
+
+def test_an_ignored_resource_that_is_still_there_is_reported_as_already_stored(
+    tmp_path: Path,
+) -> None:
+    """Both answers are true, and this is the more useful one — it has the path."""
+    manager, library = make_manager(tmp_path)
+    first = manager.download(FILE_URL)
+    entry = library.entry(first.completed[0].job.ref)
+    stored = entry.read()
+    assert stored is not None
+    entry.write(replace(stored, review=ReviewRecord(verdict=ReviewVerdict.IGNORED)))
+
+    report = manager.download(FILE_URL)
+
+    assert len(report.skipped) == 1
+    assert report.skipped[0].reason == "the library already holds it"
+    assert report.skipped[0].path is not None
+
+
+def test_a_refusal_over_a_verdict_leaves_the_record_exactly_as_it_was(tmp_path: Path) -> None:
+    """Nothing happened, so nothing is written — least of all a rebuilt record.
+
+    Rebuilding would reset the status and drop the account of what was once
+    downloaded, which is the whole of what a discarded entry still has to say.
+    """
+    manager, library = make_manager(tmp_path)
+    first = manager.download(FILE_URL)
+    entry = library.entry(first.completed[0].job.ref)
+    stored = entry.read()
+    assert stored is not None
+    entry.remove_content()
+    entry.write(replace(stored, review=ReviewRecord(verdict=ReviewVerdict.DISCARDED)))
+    before = stored_record(library, entry.path)
+
+    manager.download(FILE_URL)
+
+    assert stored_record(library, entry.path) == before
+
+
+def test_a_kept_resource_is_fetched_again_like_any_other(tmp_path: Path) -> None:
+    """Only the two words that mean "do not offer this" stop a download."""
+    provider = make_provider()
+    manager, library = make_manager(tmp_path, provider)
+    first = manager.download(FILE_URL)
+    entry = library.entry(first.completed[0].job.ref)
+    stored = entry.read()
+    assert stored is not None
+    assert first.completed[0].path is not None
+    first.completed[0].path.unlink()
+    entry.write(replace(stored, review=ReviewRecord(verdict=ReviewVerdict.KEPT)))
+
+    report = manager.download(FILE_URL)
+
+    assert len(report.completed) == 1
+    assert len(provider.downloaded) == 2
+
+
+def test_a_first_download_records_no_judgement_of_its_own(tmp_path: Path) -> None:
+    manager, library = make_manager(tmp_path)
+
+    report = manager.download(FILE_URL)
+
+    entry = library.entry(report.completed[0].job.ref)
+    assert stored_record(library, entry.path)["review"] is None
+
+
+def test_a_payload_under_the_floor_is_not_kept(tmp_path: Path) -> None:
+    manager, library = make_manager(tmp_path, minimum_size=1000)
+
+    report = manager.download(FILE_URL)
+
+    assert len(report.refused) == 1
+    assert report.refused[0].reason is not None
+    assert "under the minimum download size" in report.refused[0].reason
+    assert report.completed == ()
+    entry = library.entry(report.refused[0].job.ref)
+    assert not entry.content_directory.exists()
+
+
+def test_a_refusal_is_recorded_so_the_next_batch_does_not_fetch_it_again(
+    tmp_path: Path,
+) -> None:
+    """The whole reason a refusal writes a document at all.
+
+    Without one, "the library holds it" is false, the next bulk queue asks for
+    the same file, and the decision is made again on every run instead of once.
+    """
+    manager, library = make_manager(tmp_path, minimum_size=1000)
+
+    report = manager.download(FILE_URL)
+
+    entry = library.entry(report.refused[0].job.ref)
+    document = stored_record(library, entry.path)
+    assert document["status"] == DownloadStatus.REFUSED.value
+    assert document["content"] is None
+    assert "under the minimum download size" in str(document["error"])
+
+
+def test_a_refusal_is_not_a_failed_run(tmp_path: Path) -> None:
+    """A limit doing what it was configured to do is not something going wrong."""
+    manager, _ = make_manager(tmp_path, minimum_size=1000)
+
+    report = manager.download(FILE_URL)
+
+    assert report.failed == ()
+    assert report.succeeded is True
+
+
+def test_an_announced_size_is_refused_before_a_byte_moves(tmp_path: Path) -> None:
+    """The stub announces its length, so the floor is reached at `begin`."""
+    manager, _ = make_manager(tmp_path, minimum_size=1000)
+
+    report = manager.download(FILE_URL)
+
+    assert len(report.refused) == 1
+    assert report.bytes_written == 0
+
+
+def test_a_floor_of_zero_keeps_what_it_always_kept(tmp_path: Path) -> None:
+    manager, _ = make_manager(tmp_path, minimum_size=0)
+
+    assert len(manager.download(FILE_URL).completed) == 1
 
 
 def test_a_failing_provider_produces_a_failed_outcome(tmp_path: Path) -> None:

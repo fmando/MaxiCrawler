@@ -36,6 +36,22 @@ class DownloadStatus(StrEnum):
     SKIPPED = "skipped"
     """Nothing was transferred because the library already holds it."""
 
+    REFUSED = "refused"
+    """Nothing was kept, because a rule here declined it.
+
+    Distinct from :attr:`SKIPPED`, and the distinction is not pedantry: skipped
+    means *the payload is present already*, so it counts as a success and is
+    shown as "already stored". A refusal leaves no payload at all, and calling
+    it either of those would be a counter and a label that both lie.
+
+    Distinct from :attr:`FAILED` too. Nothing went wrong: a limit somebody
+    configured did exactly what it was configured to do, and a page reporting a
+    fault would send them looking for one.
+
+    The reason always names the rule and the numbers, because a file that
+    vanished without one is the failure this whole state exists to prevent.
+    """
+
     FAILED = "failed"
     """The transfer was attempted and did not finish."""
 
@@ -57,6 +73,7 @@ class DownloadStatus(StrEnum):
         return self in {
             DownloadStatus.COMPLETED,
             DownloadStatus.SKIPPED,
+            DownloadStatus.REFUSED,
             DownloadStatus.FAILED,
             DownloadStatus.CANCELLED,
         }
@@ -69,6 +86,22 @@ class DownloadStatus(StrEnum):
         did not have to be fetched again.
         """
         return self in {DownloadStatus.COMPLETED, DownloadStatus.SKIPPED}
+
+    @property
+    def invites_retry(self) -> bool:
+        """Return whether asking for this again could end differently.
+
+        Not the same question as "did this succeed?", although the two agreed
+        until :attr:`REFUSED` existed. A dead share might come back, a broken
+        transfer might complete, and a stop somebody has thought better of is
+        one click from being undone — so all three are worth offering again.
+
+        A refusal is not: the rule that turned it away is configuration, and it
+        will turn it away identically on every attempt. Offering the button
+        anyway would be a control that cannot work, which is the one thing
+        ADR-038 says an interface must not render.
+        """
+        return self in {DownloadStatus.FAILED, DownloadStatus.CANCELLED}
 
 
 @dataclass(frozen=True, slots=True)

@@ -27,6 +27,9 @@ def make_service(tmp_path: Path, **overrides: object) -> DownloadService:
     default's own behaviour builds a service without this.
     """
     overrides.setdefault("allow_private_networks", True)
+    # And no floor, for the same shape of reason: the fixtures here serve a
+    # handful of bytes, and this suite is about reaching an ordinary URL.
+    overrides.setdefault("min_download_size", 0)
     settings = Settings(
         user_agent="MaxiCrawler/test",
         library_path=tmp_path / "library",

@@ -1,0 +1,43 @@
+{#
+  The things somebody can say about one file.
+
+  One form with several submit buttons, because a submit button contributes
+  only its own name and value: "Keep", "Ignore" and the star post different
+  fields to the same route without a line of script and without three forms.
+
+  The star shows what is true and does the other thing -- filled when it is a
+  favourite, and pressing it clears the mark. The value it sends is therefore
+  the opposite of what it displays, which is written into the view rather than
+  worked out here.
+
+  `formnovalidate` is absent and nothing here is disabled: every button is
+  always pressable, because judging something twice is not an error and a
+  control that greys out is one somebody has to reason about. Discard included:
+  pressing it on something already discarded removes a file that is already
+  gone, which is nothing happening rather than something going wrong.
+
+  Each button carries its own verdict as a class, so the one that deletes can
+  look like it without this template knowing which one that is.
+#}
+<form class="verdicts" method="post" action="{{ item.review_action }}">
+  {% for button in item.verdict_buttons %}
+    <button type="submit" name="verdict" value="{{ button.verdict }}" title="{{ button.hint }}"
+            class="verdict verdict-{{ button.verdict }}{% if item.verdict == button.verdict %} active{% endif %}">
+      {{ button.label }}
+    </button>
+  {% endfor %}
+  {% if item.is_reviewed %}
+    {#
+      Not another opinion but the absence of one, so it is offered as undo. On
+      something discarded it undoes the verdict and not the deletion, and the
+      title says so -- the button is where somebody is when they need to know.
+    #}
+    <button type="submit" name="verdict" value="unreviewed" class="verdict undo"
+            title="{{ item.undo_hint }}">Undo</button>
+  {% endif %}
+  <button type="submit" name="favourite" value="{{ item.favourite_value }}"
+          class="verdict star{% if item.is_favourite %} active{% endif %}"
+          title="{% if item.is_favourite %}Remove the star{% else %}Mark this worth finding again{% endif %}">
+    {{ item.favourite_mark }}
+  </button>
+</form>

@@ -19,8 +19,16 @@ So a listing now consults
 :class:`~maxicrawler.database.library.SQLiteLibraryIndex` and reads only the
 documents that changed. Every entry is still *stat*-ed on every listing, which is
 what makes the cache safe to believe: a row is trusted only while the document it
-came from has the same modification time and size. The saving is the parse, not
-the walk.
+came from has the same modification time and size.
+
+**What is saved is the read, not the walk and not the parse.** The row holds the
+document verbatim, so a listing still parses one JSON string per entry — off a
+single database read instead of off two thousand files, which is where the
+seconds were. Turning the members a listing filters and sorts by into columns
+would drop the parse as well; the columns a judgement needs are already there and
+answer the set questions in :meth:`LibraryService.stored` and
+:meth:`LibraryService.dismissed` without parsing anything, and the rest is
+measured work that has not been done.
 
 Three rules keep the cache from quietly becoming the authority, and each of them
 is a property this module can be read for:
@@ -50,18 +58,26 @@ being repaired.
 import json
 import sqlite3
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from math import ceil
 from pathlib import Path
 from typing import Any
 
-from maxicrawler.app.viewing import MediaVerdict, verdict_for
+from maxicrawler.app.discovery import StateResolver
+from maxicrawler.app.viewing import Display, MediaKind, MediaVerdict, kind_for, verdict_for
 from maxicrawler.config import Settings
 from maxicrawler.database import IndexedEntry, SQLiteDatabase, SQLiteLibraryIndex
-from maxicrawler.domain import DownloadStatus
-from maxicrawler.library import Library, LibraryEntry, LibraryError, ResourceRecord
+from maxicrawler.domain import DownloadStatus, ReviewVerdict
+from maxicrawler.library import (
+    ContentRecord,
+    Library,
+    LibraryEntry,
+    LibraryError,
+    ResourceRecord,
+    ReviewRecord,
+)
 from maxicrawler.utils import strip_fragment
 
 DEFAULT_PER_PAGE = 50
@@ -128,6 +144,29 @@ class LibraryItem:
     downloaded_at: datetime | None = None
     attempts: int = 0
     error: str | None = None
+    kind: MediaKind = MediaKind.OTHER
+    """What sort of file this is, from its name.
+
+    Read from the stored file name where there is one and from the recorded
+    name where there is not, so an entry that never received a payload — a
+    failure, or something a limit turned away — still sorts under the category
+    a person would look for it in.
+    """
+
+    verdict: ReviewVerdict = ReviewVerdict.UNREVIEWED
+    """What somebody decided about this, from the entry's own document."""
+
+    favourite: bool = False
+    """Marked worth finding again, independently of :attr:`verdict`."""
+
+    queued: bool = False
+    """Whether something is waiting or running right now to fetch this again.
+
+    Not a fourth download status and not stored anywhere: the queue lives in one
+    process's memory, the record lives on disk, and this is the moment the two
+    are put beside each other. A retry in progress is why a row would otherwise
+    still read "failed", which is yesterday's truth told confidently.
+    """
 
     @property
     def is_stored(self) -> bool:
@@ -150,6 +189,72 @@ class StoredPayload:
     media: MediaVerdict
 
 
+def parse_verdict(value: str | None) -> ReviewVerdict | None:
+    """Return the judgement *value* names, or ``None`` when it names none.
+
+    Lives here rather than on the enum because it is a question about a *query*:
+    the value arrives in a query string or a form field, where a stale bookmark
+    and a typed URL are ordinary, and the answer to one nobody recognises is an
+    unfiltered listing rather than a refusal — the same leniency
+    :meth:`~maxicrawler.app.viewing.MediaKind.parse` is read with.
+
+    ``None`` is therefore two things at once, and they agree: *no such verdict*
+    and *no verdict filter*.
+    """
+    try:
+        return ReviewVerdict(value or "")
+    except ValueError:
+        return None
+
+
+class PreviewShape(StrEnum):
+    """What a tile puts where the file would be."""
+
+    IMAGE = "image"
+    """The stored file itself, small enough to be shown as it is."""
+
+    EXCERPT = "excerpt"
+    """The first few lines of it, read here rather than fetched by the browser."""
+
+    SYMBOL = "symbol"
+    """A mark standing for the category. Everything else, including every image
+    too large to send sixty of."""
+
+
+PREVIEW_EXCERPT_BYTES = 2048
+"""How much of a text file a tile reads to show the start of it.
+
+Two kilobytes is more than a tile can display and little enough that sixty of
+them are sixty short reads — the same order as the directory walk a listing
+already does, and bounded whatever the file turns out to be.
+"""
+
+PREVIEW_EXCERPT_LINES = 12
+"""How many lines of that are kept. The rest is what the viewer is for."""
+
+
+@dataclass(frozen=True, slots=True)
+class Preview:
+    """What one tile shows in place of the file.
+
+    A decision, not a rendering: nothing here produces an image, writes a cache
+    or names a URL. The client turns :attr:`shape` into an element, which is the
+    same division :class:`~maxicrawler.app.viewing.MediaVerdict` already keeps —
+    the service says what may be shown, the page says how.
+
+    Should thumbnails ever be generated, they arrive as a fourth shape decided
+    here, and under two rules worth writing down before anybody is tempted: a
+    thumbnail is **only ever a cache**, deletable in full at any moment, and it
+    lives **outside** ``library/``, never beside the file it depicts. A library
+    directory holds what was downloaded and what the download said about itself.
+    """
+
+    shape: PreviewShape
+    kind: MediaKind
+    excerpt: str = ""
+    """The text, for :attr:`PreviewShape.EXCERPT`; empty otherwise."""
+
+
 @dataclass(frozen=True, slots=True)
 class LibraryQuery:
     """What a caller wants to see of the library."""
@@ -161,6 +266,41 @@ class LibraryQuery:
     """A provider *directory*, because that is what a URL can carry safely."""
 
     status: DownloadStatus | None = None
+    kind: MediaKind | None = None
+    verdict: ReviewVerdict | None = None
+    """Which judgement to show, or ``None`` for every one but the discarded.
+
+    Discarded entries are hidden unless they are what was asked for, and that
+    asymmetry is the point of the state: *not wanted, and do not offer it to me
+    again*. Showing them beside everything else would make the one verdict that
+    means "out of my way" the one that stays in it — while leaving them
+    unreachable would turn a decision into a deletion.
+    """
+
+    favourite: bool = False
+    """Show only what is starred. A switch beside the verdict, not one of them."""
+
+    min_size: int | None = None
+    """Smallest payload to show, in bytes; ``None`` for no lower bound."""
+
+    max_size: int | None = None
+    """Largest payload to show, in bytes; ``None`` for no upper bound.
+
+    An entry whose size nobody recorded is kept by an *unbounded* query and
+    dropped by a bounded one. "Between 1 and 10 MB" is a claim about a number,
+    and a row with no number cannot satisfy it — while showing it anyway would
+    put the same unmeasured file in "under 1 MB" and in "over 100 MB" both.
+    """
+
+    queued: bool = False
+    """Show only what is waiting or running in the transfer queue right now.
+
+    Answers with nothing when no queue was handed to the service — the command
+    line, and any test that builds one bare. A client that cannot ask a queue
+    knows of nothing in one, and saying "everything, then" would be a filter
+    that quietly does not filter.
+    """
+
     sort: LibrarySort = LibrarySort.DOWNLOADED
     descending: bool = True
     page: int = 1
@@ -169,7 +309,31 @@ class LibraryQuery:
     @property
     def is_filtered(self) -> bool:
         """Return whether this query shows less than the whole library."""
-        return bool(self.search) or self.provider is not None or self.status is not None
+        return (
+            bool(self.search)
+            or self.provider is not None
+            or self.status is not None
+            or self.kind is not None
+            or self.min_size is not None
+            or self.max_size is not None
+            or self.queued
+            or self.verdict is not None
+            or self.favourite
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LibraryFacet:
+    """One value a listing can be narrowed to, and how much of it there is.
+
+    The same shape :class:`~maxicrawler.app.discovery.LinkFacet` has, because a
+    report's chips and a library's chips are the same control asked about two
+    different stores, and one of them having a count the other lacks would show
+    up as two designs on two pages.
+    """
+
+    value: str
+    count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,18 +350,54 @@ class LibraryPage:
 
     page: int
     pages: int
-    providers: tuple[str, ...]
-    """The provider directories present, whatever the query asked for.
+    providers: tuple[LibraryFacet, ...]
+    """The provider directories present, and how many entries each holds.
 
-    The whole library rather than the matches, so choosing a filter never
-    removes the entry you would use to choose a different one.
+    Counted over the **whole library** rather than over the matches, which is
+    two decisions in one and both deliberate.
+
+    The *values* are the whole library so that choosing a filter never removes
+    the entry you would use to choose a different one — a chip row that shrank
+    as you used it would be a door that locks behind you.
+
+    The *counts* are the whole library because that is what a report's chips
+    already say (:func:`~maxicrawler.app.discovery._plugin_facets` counts over
+    everything recorded), and one rule across the product beats a better rule on
+    one page of it. What it costs is real and worth writing down: a chip saying
+    twelve can answer with an empty table once a search is on, because it counts
+    twelve in the library rather than twelve in what you are looking at.
     """
 
-    statuses: tuple[DownloadStatus, ...] = ()
+    statuses: tuple[LibraryFacet, ...] = ()
     """The verdicts present, on the same terms and for the same reason.
 
     Derived rather than listed from the enum: offering "running" as a filter for
     a store that never holds one is a menu entry that can only disappoint.
+    """
+
+    kinds: tuple[LibraryFacet, ...] = ()
+    """The categories present, derived for the reason :attr:`statuses` is.
+
+    A library of nothing but images should not offer to show only the videos.
+    """
+
+    verdicts: tuple[LibraryFacet, ...] = ()
+    """The judgements present, counted over the whole library.
+
+    Includes the discarded, although the default listing does not show them:
+    the count is how somebody finds their way to the one view that does.
+    """
+
+    favourites: int = 0
+    """How many entries are starred. Always answerable, unlike :attr:`queued`."""
+
+    queued: int | None = None
+    """How many entries something is queued for, or ``None`` if nobody can say.
+
+    Absent rather than zero when no queue was handed in, the distinction
+    :attr:`~maxicrawler.app.discovery.LinkPage.known` draws for the same reason:
+    "none are queued" and "there is no queue here to ask" are different answers,
+    and only one of them should put a chip on the page.
     """
 
     @property
@@ -221,6 +421,27 @@ class LibraryPage:
         return self.page < self.pages
 
 
+@dataclass(frozen=True, slots=True)
+class LibraryPlace:
+    """Where one entry stands in a listing, and what is on either side of it.
+
+    The whole of what turns a file's page into somewhere to work: a position to
+    read, two neighbours to move between, and all three taken from **the listing
+    somebody is actually working through** rather than from the library. Walking
+    a filter of forty is the job; walking nine thousand entries is not.
+    """
+
+    item: LibraryItem
+    position: int
+    """One-based, so it reads beside :attr:`total` the way a page number does."""
+
+    total: int
+    previous: LibraryItem | None = None
+    following: LibraryItem | None = None
+    """``None`` at either end. Not wrapped around: a walk that starts again at
+    the top is one nobody can tell they have finished."""
+
+
 class LibraryService:
     """Everything a client needs to browse the library, and nothing about showing it."""
 
@@ -230,9 +451,11 @@ class LibraryService:
         *,
         library: Library | None = None,
         index: SQLiteLibraryIndex | None = None,
+        queued: StateResolver | None = None,
     ) -> None:
         self._settings = settings
         self._library = library if library is not None else Library(settings.library_path)
+        self._queued = queued
         self._injected_index = index
         self._cached_index: SQLiteLibraryIndex | None = None
         self._index_unavailable = False
@@ -256,9 +479,7 @@ class LibraryService:
         after paging would order a page instead of the library.
         """
         asked = query if query is not None else LibraryQuery()
-        items = tuple(self._items())
-        matching = tuple(item for item in items if _matches(item, asked))
-        ordered = _ordered(matching, asked)
+        items, ordered = self._ranked(asked)
         per_page = min(max(asked.per_page, 1), MAX_PER_PAGE)
         pages = max(1, ceil(len(ordered) / per_page))
         page = min(max(asked.page, 1), pages)
@@ -270,9 +491,62 @@ class LibraryService:
             stored=len(items),
             page=page,
             pages=pages,
-            providers=tuple(sorted({item.directory for item in items})),
-            statuses=tuple(sorted({item.status for item in items})),
+            providers=_facets(items, lambda item: item.directory, sorted),
+            statuses=_facets(items, lambda item: item.status.value, sorted),
+            kinds=_facets(items, lambda item: item.kind.value, _kind_order),
+            verdicts=_facets(items, lambda item: item.verdict.value, _verdict_order),
+            favourites=sum(item.favourite for item in items),
+            # Counted over the whole library like every facet beside it, and
+            # left absent rather than zero when nothing can answer.
+            queued=None if self._queued is None else sum(item.queued for item in items),
         )
+
+    def locate(
+        self, provider: str, key: str, query: LibraryQuery | None = None
+    ) -> "LibraryPlace | None":
+        """Return where *provider*/*key* stands in the listing *query* describes.
+
+        The same read, filter and order :meth:`browse` does, minus the paging:
+        somebody moving from one file to the next is walking the whole result,
+        and a neighbour that stopped at a page boundary would be a walk that
+        ends sixty files in without saying so.
+
+        ``None`` when the entry is not in that listing at all, which is an
+        ordinary answer rather than a fault: opening something discarded from a
+        listing that hides the discarded is exactly that case. What it means for
+        a client is that there is no walk to show — not that there is no file.
+
+        Costs one listing. The alternative is remembering an ordering between two
+        requests, which is a second copy of the truth that goes stale the moment
+        anything is judged — and the thing being walked is a filter of what has
+        *not* been judged.
+        """
+        asked = query if query is not None else LibraryQuery()
+        _, ordered = self._ranked(asked)
+        for index, item in enumerate(ordered):
+            if item.directory == provider and item.key == key:
+                return LibraryPlace(
+                    item=item,
+                    position=index + 1,
+                    total=len(ordered),
+                    previous=ordered[index - 1] if index > 0 else None,
+                    following=ordered[index + 1] if index + 1 < len(ordered) else None,
+                )
+        return None
+
+    def _ranked(
+        self, asked: LibraryQuery
+    ) -> tuple[tuple[LibraryItem, ...], tuple[LibraryItem, ...]]:
+        """Return every entry, and the ones *asked* matches in order.
+
+        Both halves, because the two callers need different ones and reading the
+        library twice to answer one request would be the obvious way to make a
+        listing cost double. The facets count over everything; the rows and the
+        walk come from the ordered matches.
+        """
+        items = self._marked(tuple(self._items()))
+        matching = tuple(item for item in items if _matches(item, asked))
+        return items, _ordered(matching, asked)
 
     def item(self, provider: str, key: str) -> LibraryItem | None:
         """Return the stored resource *provider*/*key* names, if there is one.
@@ -282,7 +556,10 @@ class LibraryService:
         read. A caller answering a request has one thing to say about all three.
         """
         entry = self._library.entry_at(provider, key)
-        return None if entry is None else _item(entry)
+        if entry is None:
+            return None
+        item = _item(entry)
+        return None if item is None else self._marked((item,))[0]
 
     def payload(self, provider: str, key: str) -> StoredPayload | None:
         """Return the file *provider*/*key* holds, if it is really there.
@@ -306,8 +583,185 @@ class LibraryService:
             path=item.path,
             filename=item.filename,
             size=size,
-            media=verdict_for(item.filename, size, max_bytes=self._settings.max_view_bytes),
+            media=verdict_for(
+                item.filename,
+                size,
+                max_bytes=self._settings.max_view_bytes,
+                max_stream_bytes=self._settings.max_stream_bytes,
+            ),
         )
+
+    def review(
+        self,
+        provider: str,
+        key: str,
+        *,
+        verdict: ReviewVerdict | None = None,
+        favourite: bool | None = None,
+    ) -> LibraryItem | None:
+        """Record what somebody thinks of one stored resource.
+
+        The only writing this service does, and it writes exactly one member of
+        the document. A download rebuilds every transfer field and carries the
+        review across untouched; this rebuilds the review and carries everything
+        else across untouched. Two writers, disjoint fields — which is what
+        ADR-028 turns into a rule rather than a habit, and what lets a file be
+        fetched again without losing the judgement passed on it.
+
+        Both arguments are optional and ``None`` means *leave this alone*, so
+        starring something says nothing about whether it has been looked at, and
+        judging it does not clear the star.
+
+        ``reviewed_at`` follows the verdict and not the star. It answers "when
+        was this decided", and a decision is what the verdict is; marking
+        something worth finding again is a note about it, not a ruling on it.
+
+        ``None`` when there is no such entry, for the reason :meth:`item`
+        answers ``None``: a name that cannot be a path component, a directory
+        that is not there and a document that will not read are one answer to
+        whoever is handling the request.
+
+        A concurrent download of the same entry can still overwrite this, and is
+        not prevented here: the read and the write are one after the other, and
+        nothing locks the directory. What bounds the damage is that the two
+        writers touch different members, so the worst case is one judgement lost
+        rather than a document that describes two different files.
+
+        Taking a judgement back is this same call with
+        :attr:`~maxicrawler.domain.ReviewVerdict.UNREVIEWED`, including on
+        something discarded — there is no second method for undoing, because
+        undoing a discard is not a different operation from undoing anything
+        else. What it cannot do is bring the file back; what it does is lift the
+        headstone, so downloading the link again restores it (ADR-012).
+
+        Raises:
+            ValueError: the verdict is *discarded*. That word is not an opinion
+                somebody types, it is what a record says after its payload has
+                been removed — and writing it here would produce a headstone
+                standing over a file that is still there. Everything downstream
+                reads it as "the file is gone, do not fetch it again", so a
+                record that lied about it would quietly make the file
+                unreachable while it sat on disk. :meth:`discard` is the one
+                writer of that verdict, and it removes the file first.
+        """
+        if verdict is ReviewVerdict.DISCARDED:
+            msg = "discarding removes the payload and is not written through review()"
+            raise ValueError(msg)
+        entry = self._library.entry_at(provider, key)
+        if entry is None:
+            return None
+        try:
+            record = entry.read()
+        except LibraryError:
+            return None
+        if record is None:
+            return None
+        entry.write(record.with_review(_reviewed(record.review, verdict, favourite)))
+        return self.item(provider, key)
+
+    def discard(self, provider: str, key: str) -> LibraryItem | None:
+        """Remove one stored file and record that it was removed.
+
+        One call, because the two halves are one decision. Deleting the payload
+        without the headstone leaves an entry the next run happily downloads
+        again; writing the headstone without deleting the payload leaves a
+        record saying "gone" over a file that is sitting there — which is what
+        :meth:`review` refuses outright, and why this is the only writer of that
+        verdict.
+
+        The order is the file first and the document second. The failure that
+        can happen is a file that will not be deleted — something else has it
+        open, which on Windows is ordinary — and in that order the entry is
+        simply unchanged. The other order would leave the lie.
+
+        What stays is everything the record said about the payload: its name,
+        its size, its checksum. A discarded entry is still a row somebody can
+        read and search, which is what makes "show me what I threw away" a view
+        rather than an archaeology. What goes is the bytes.
+
+        ``None`` when there is no such entry, when its document cannot be read,
+        **and when the file could not be removed** — the three answers a caller
+        has one thing to say about, and in every one of them nothing was
+        written. A caller that needs to tell "no such entry" from "would not
+        delete" can ask :meth:`item` afterwards, which is what the route does.
+
+        Discarding something already discarded is not an error and keeps the
+        original removal time: the file went when it went.
+        """
+        entry = self._library.entry_at(provider, key)
+        if entry is None:
+            return None
+        try:
+            record = entry.read()
+        except LibraryError:
+            return None
+        if record is None:
+            return None
+        try:
+            entry.remove_content()
+        except LibraryError:
+            return None
+        review = _reviewed(
+            record.review, ReviewVerdict.DISCARDED, None, removed_at=datetime.now(UTC)
+        )
+        entry.write(record.with_review(review))
+        return self.item(provider, key)
+
+    def previews(self, items: Iterable[LibraryItem]) -> tuple[Preview, ...]:
+        """Return what each of *items* shows in a tile, in the order given.
+
+        Asked for a page rather than for a library: these are the sixty rows
+        somebody is looking at, and the work is bounded by that. Nothing is
+        cached, because nothing expensive happens — a stat and, for text, one
+        short read.
+
+        One function with three cases rather than a registry of renderers, and
+        deliberately so. A registry would be the shape this needs once something
+        actually *produces* a preview; three branches over what is already on
+        disk is not that, and the abstraction would have to be read before the
+        rule could be.
+        """
+        return tuple(self.preview(item) for item in items)
+
+    def preview(self, item: LibraryItem) -> Preview:
+        """Return what one tile shows in place of *item*'s file.
+
+        The order of the questions is the whole rule. Is there a file at all;
+        may a browser be shown this type; is it small enough that sixty of them
+        are a page rather than a download. Only then is it the image itself.
+        """
+        if item.path is None or item.filename is None or not item.is_stored:
+            return Preview(shape=PreviewShape.SYMBOL, kind=item.kind)
+        try:
+            if not item.path.is_file():
+                return Preview(shape=PreviewShape.SYMBOL, kind=item.kind)
+        except OSError:
+            return Preview(shape=PreviewShape.SYMBOL, kind=item.kind)
+        if self._shows_inline(item):
+            return Preview(shape=PreviewShape.IMAGE, kind=item.kind)
+        if item.kind is MediaKind.TEXT:
+            excerpt = _excerpt(item.path)
+            if excerpt:
+                return Preview(shape=PreviewShape.EXCERPT, kind=item.kind, excerpt=excerpt)
+        return Preview(shape=PreviewShape.SYMBOL, kind=item.kind)
+
+    def _shows_inline(self, item: LibraryItem) -> bool:
+        """Return whether a tile may load *item*'s own bytes as a picture.
+
+        Two gates, and neither is redundant. The first is the viewer's own
+        allow-list, so a category and a content type never drift apart: a
+        ``.tif`` is an image to a filter and remains something no browser here
+        is handed. The second is the size, and it is checked against the
+        recorded number rather than the file, because that is the number the
+        tile also prints.
+        """
+        limit = self._settings.preview_inline_bytes
+        if limit <= 0 or item.size is None or item.size > limit:
+            return False
+        if item.filename is None:
+            return False
+        verdict = verdict_for(item.filename, item.size, max_bytes=self._settings.max_view_bytes)
+        return verdict.display is Display.IMAGE
 
     def stored(self, urls: Iterable[str]) -> frozenset[str]:
         """Return which of *urls* the library holds something fetched from.
@@ -339,11 +793,60 @@ class LibraryService:
         known = self._source_urls()
         return frozenset(url for url in asked if strip_fragment(url) in known)
 
-    def _source_urls(self) -> frozenset[str]:
-        """Return every URL the library has stored something from.
+    def dismissed(self, urls: Iterable[str]) -> frozenset[str]:
+        """Return which of *urls* hold nothing but what somebody has waved away.
 
-        Off the index's own column where there is one, which reads no document
-        and parses no JSON, and off the entries themselves where there is not.
+        The second question of :data:`~maxicrawler.app.discovery.StateResolver`
+        shape this service answers, and the counterpart to :meth:`stored`: that
+        one says *there is something here*, this one says *and none of it is
+        wanted*. What reads it is a report — as a badge, and as the set that
+        *"queue every match"* leaves out.
+
+        **Every entry recorded under the URL has to be dismissed**, which is the
+        one place this differs from :meth:`stored` and the reason it is not a
+        one-line filter over it. A share naming a folder is recorded by each file
+        inside it under the container's own URL; *something* here being ignored
+        would put a folder of two hundred out of reach because of one thumbnail,
+        and a promise that turns into that is worse than no promise. A download
+        of the container is still the right thing to queue while a single file in
+        it is wanted, and the worker turns away the individual entries — which it
+        decides per entry, where the question has no ambiguity at all.
+
+        A URL nothing was recorded under is not dismissed. Nobody has said
+        anything about it, which is the state every URL starts in.
+
+        Fragments are stripped before comparing and kept in the answer, for the
+        reason :meth:`stored` gives.
+        """
+        asked = tuple(urls)
+        if not asked:
+            return frozenset()
+        known = self._dismissed_urls()
+        return frozenset(url for url in asked if strip_fragment(url) in known)
+
+    def _dismissed_urls(self) -> frozenset[str]:
+        """Return every URL whose entries are, without exception, dismissed."""
+        tallies: dict[str, tuple[int, int]] = {}
+        for url, verdict in self._verdicts():
+            recorded, waved = tallies.get(url, (0, 0))
+            tallies[url] = (recorded + 1, waved + int(verdict.is_dismissed))
+        return frozenset(url for url, (recorded, waved) in tallies.items() if recorded == waved)
+
+    def _source_urls(self) -> frozenset[str]:
+        """Return every URL the library has stored something from."""
+        return frozenset(url for url, _ in self._verdicts())
+
+    def _verdicts(self) -> Iterator[tuple[str, ReviewVerdict]]:
+        """Yield where each entry came from and what was decided about it.
+
+        Off the index's own columns where there is one, which reads no document
+        and parses no JSON — both are columns on it, filled since the release
+        that introduced judgements — and off the entries themselves where there
+        is not. The one place that knows a set question can be answered two ways,
+        so the two callers above do not each have to.
+
+        Entries whose document would not parse are left out. They have no source
+        URL to be about, and a row that says nothing is not evidence of anything.
         """
         index = self._index()
         if index is not None:
@@ -352,8 +855,35 @@ class LibraryService:
             except sqlite3.Error:
                 pass
             else:
-                return frozenset(row.source_url for row in rows if row.source_url)
-        return frozenset(item.source_url for item in self._read_entries())
+                for row in rows:
+                    if row.source_url:
+                        yield row.source_url, parse_verdict(row.verdict) or ReviewVerdict.UNREVIEWED
+                return
+        for item in self._read_entries():
+            if item.source_url:
+                yield item.source_url, item.verdict
+
+    def _marked(self, items: tuple[LibraryItem, ...]) -> tuple[LibraryItem, ...]:
+        """Return *items* with those the queue is working on flagged.
+
+        Asked in bulk for the reason :meth:`stored` is asked in bulk: the answer
+        costs one pass over a set, and one question per row would turn a listing
+        into a thousand.
+
+        The service never learns that there *is* a queue. It is handed a function
+        over URLs — the shape :data:`~maxicrawler.app.discovery.StateResolver`
+        names — exactly as the report is handed one to answer "already in the
+        library", and this is the same arrangement pointed the other way. Without
+        one, nothing is flagged and nothing here allocates.
+        """
+        if self._queued is None or not items:
+            return items
+        waiting = frozenset(self._queued({item.source_url for item in items}))
+        if not waiting:
+            return items
+        return tuple(
+            replace(item, queued=True) if item.source_url in waiting else item for item in items
+        )
 
     def _items(self) -> Iterator[LibraryItem]:
         """Yield every entry that describes itself readably.
@@ -498,11 +1028,16 @@ def _item_from_record(
     library it is in has been mounted.
     """
     content = record.content
+    name = _name(record, key)
+    review = record.review
     return LibraryItem(
         provider=record.provider,
         directory=directory,
         key=key,
-        name=_name(record, key),
+        name=name,
+        kind=_kind_of(content, name),
+        verdict=record.verdict,
+        favourite=review is not None and review.favourite,
         status=record.status,
         source_url=record.source_url,
         filename=None if content is None else content.filename,
@@ -514,6 +1049,128 @@ def _item_from_record(
         attempts=record.attempts,
         error=record.error,
     )
+
+
+def _facets(
+    items: tuple[LibraryItem, ...],
+    value_of: Callable[[LibraryItem], str],
+    order: Callable[[Iterable[str]], list[str]],
+) -> tuple[LibraryFacet, ...]:
+    """Return how many of *items* each value of *value_of* accounts for.
+
+    One pass, and the ordering handed in rather than assumed: a provider list
+    reads best alphabetically and a category list does not (see
+    :func:`_kind_order`).
+    """
+    counts: dict[str, int] = {}
+    for item in items:
+        value = value_of(item)
+        counts[value] = counts.get(value, 0) + 1
+    return tuple(LibraryFacet(value=value, count=counts[value]) for value in order(counts))
+
+
+def _verdict_order(values: Iterable[str]) -> list[str]:
+    """Return the judgements in the order they are offered in.
+
+    Declaration order, for the reason :func:`_kind_order` gives — and here it
+    matters more: "unreviewed" is declared first because it is the pile somebody
+    sits down to work through, and sorting these as strings would bury it under
+    "discarded" and "ignored".
+    """
+    present = set(values)
+    return [verdict.value for verdict in ReviewVerdict if verdict.value in present]
+
+
+def _kind_order(values: Iterable[str]) -> list[str]:
+    """Return the categories in the order they are offered in.
+
+    Declaration order rather than alphabetical, which is the one place this
+    differs from the providers and the statuses beside it. The members are
+    declared in the order somebody sorting through a crawl reaches for them —
+    pictures and video first, "other" last — and sorting the values as strings
+    would put "archive" at the top and scatter the rest by spelling.
+    """
+    present = set(values)
+    return [kind.value for kind in MediaKind if kind.value in present]
+
+
+def _kind_of(content: ContentRecord | None, name: str) -> MediaKind:
+    """Return the category of an entry holding *content* and called *name*.
+
+    The stored file name decides it, because that is what the payload actually
+    is. An entry with no payload falls back to the recorded name — a download
+    that failed, or one a limit turned away, is still a picture or an archive as
+    far as somebody looking for it is concerned, and it would otherwise sit in
+    "other" where nobody would think to look.
+
+    The fallback also covers a payload whose own suffix says nothing, which is
+    how a provider that stored ``download`` beside a record named ``holiday.jpg``
+    stays findable.
+    """
+    if content is not None:
+        stored = kind_for(content.filename)
+        if stored is not MediaKind.OTHER:
+            return stored
+    return kind_for(name)
+
+
+def _reviewed(
+    previous: ReviewRecord | None,
+    verdict: ReviewVerdict | None,
+    favourite: bool | None,
+    *,
+    removed_at: datetime | None = None,
+) -> ReviewRecord:
+    """Return the judgement that results from saying *verdict* and *favourite*.
+
+    Built from the previous one rather than from nothing, so that the two
+    statements a person can make about an entry stay independent: neither
+    argument being given leaves the record as it was, and giving one leaves the
+    other alone.
+
+    ``payload_removed_at`` is the exception, and follows the verdict rather than
+    surviving it: it is part of what *discarded* means, not a fact recorded
+    beside it. Taking the discard back therefore clears it in the same write,
+    which is what makes undo a whole undo — a record left carrying a removal
+    time would say the file had been deleted while the entry it belongs to no
+    longer claims anything of the sort, and a later download would inherit it.
+    An entry that stays discarded keeps the time it already had: the file went
+    when it went, and pressing the button twice does not move it.
+    """
+    current = previous if previous is not None else ReviewRecord()
+    settled = current.verdict if verdict is None else verdict
+    if verdict is None or verdict is current.verdict:
+        decided = current.reviewed_at
+    else:
+        decided = datetime.now(UTC)
+    return ReviewRecord(
+        verdict=settled,
+        favourite=current.favourite if favourite is None else favourite,
+        reviewed_at=decided,
+        payload_removed_at=(
+            current.payload_removed_at or removed_at if settled is ReviewVerdict.DISCARDED else None
+        ),
+    )
+
+
+def _excerpt(path: Path) -> str:
+    """Return the first lines of a text file, or nothing when it will not read.
+
+    Bounded twice — by bytes before decoding and by lines after — because either
+    limit alone can be defeated: a file with no newlines is one very long line,
+    and a file of a million short ones would be a million lines.
+
+    Undecodable bytes become the replacement character rather than being
+    dropped. A tile showing a row of them is telling the truth about a file that
+    is named ``.txt`` and is not text, which is worth knowing before opening it.
+    """
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(PREVIEW_EXCERPT_BYTES)
+    except OSError:
+        return ""
+    lines = raw.decode("utf-8", errors="replace").splitlines()[:PREVIEW_EXCERPT_LINES]
+    return "\n".join(lines).strip()
 
 
 def _name(record: ResourceRecord, key: str) -> str:
@@ -573,6 +1230,7 @@ def _indexed(entry: LibraryEntry, stamp: tuple[int, int]) -> IndexedEntry | None
         return None
     record = _record_of(document)
     content = None if record is None else record.content
+    review = None if record is None else record.review
     return IndexedEntry(
         directory=entry.provider,
         key=entry.key,
@@ -581,6 +1239,8 @@ def _indexed(entry: LibraryEntry, stamp: tuple[int, int]) -> IndexedEntry | None
         document=document,
         source_url="" if record is None else record.source_url,
         status="" if record is None else record.status.value,
+        verdict="" if record is None else record.verdict.value,
+        favourite=review is not None and review.favourite,
         checksum=None if content is None else content.checksum("sha256"),
     )
 
@@ -619,11 +1279,51 @@ def _matches(item: LibraryItem, query: LibraryQuery) -> bool:
         return False
     if query.status is not None and item.status is not query.status:
         return False
+    if query.kind is not None and item.kind is not query.kind:
+        return False
+    if not _wanted_verdict(item.verdict, query.verdict):
+        return False
+    if query.favourite and not item.favourite:
+        return False
+    if query.queued and not item.queued:
+        return False
+    if not _within_size(item.size, query):
+        return False
     if not query.search:
         return True
     needle = query.search.casefold()
     haystack = (item.name, item.filename or "", item.source_url)
     return any(needle in value.casefold() for value in haystack)
+
+
+def _wanted_verdict(verdict: ReviewVerdict, asked: ReviewVerdict | None) -> bool:
+    """Return whether an entry judged *verdict* belongs in a listing asking *asked*.
+
+    The one filter that is not simply "equal or unset". Asking for nothing in
+    particular means everything except what was discarded, because a discarded
+    entry is one somebody has already said they do not want to see — and the
+    listing that would keep showing it is the listing they said it about.
+    """
+    if asked is None:
+        return verdict is not ReviewVerdict.DISCARDED
+    return verdict is asked
+
+
+def _within_size(size: int | None, query: LibraryQuery) -> bool:
+    """Return whether *size* falls inside the bounds *query* asks for.
+
+    An unmeasured size fails any bound and satisfies none, which is the only
+    reading that keeps the ranges a partition: counted as small it would appear
+    under "under 1 MB", counted as large under "over 100 MB", and counted as
+    both it would be in two buckets at once.
+    """
+    if query.min_size is None and query.max_size is None:
+        return True
+    if size is None:
+        return False
+    if query.min_size is not None and size < query.min_size:
+        return False
+    return query.max_size is None or size <= query.max_size
 
 
 def _ordered(items: tuple[LibraryItem, ...], query: LibraryQuery) -> tuple[LibraryItem, ...]:

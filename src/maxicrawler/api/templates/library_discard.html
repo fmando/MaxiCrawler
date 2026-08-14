@@ -1,0 +1,63 @@
+{#
+  Before deleting a batch of files.
+
+  The one confirmation in this interface. Every other button either writes a
+  word that can be written again or queues something that can be stopped; this
+  one removes bytes, and the only way back is downloading the link again --
+  which works right up until the link stops working.
+
+  It names every file rather than counting them, because a count is a number to
+  agree with and a list is something to check. The names are links, so a doubt
+  about one of them is one click rather than a cancelled batch.
+
+  No script: the confirmation is a page with a form on it, and the form carries
+  the same `entry` fields the ticks produced.
+#}
+{% extends "base.html" %}
+{% block title %}Discard {{ discard.count }} files · MaxiCrawler{% endblock %}
+
+{% block crumbs %}
+<nav class="crumbs">
+  <a href="{{ discard.back }}">Library</a> <span class="muted">/</span> <span>Discard</span>
+</nav>
+{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <h2>
+    Discard {{ discard.count }} {% if discard.is_one %}file{% else %}files{% endif %}
+    <span class="count">{{ discard.freed }} freed</span>
+  </h2>
+
+  <div class="body">
+    <p class="caution">
+      The stored {% if discard.is_one %}file{% else %}files{% endif %} will be
+      deleted. What stays is the entry and everything it records — the name, the
+      size, the link it came from — so the library still shows what was thrown
+      away, and downloading that link again is what would bring the bytes back.
+    </p>
+
+    <ul class="discard-list">
+      {% for row in discard.rows %}
+        <li>
+          <a href="{{ row.url }}">{{ row.name }}</a>
+          <span class="num muted">{{ row.size }}</span>
+          {% if row.is_discarded %}
+            <span class="verdict-mark">already discarded</span>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+
+    <form class="batch" method="post" action="{{ discard.action }}">
+      {% for row in discard.rows %}
+        <input type="hidden" name="entry" value="{{ row.token }}">
+      {% endfor %}
+      <button type="submit" class="danger">
+        Discard {{ discard.count }} {% if discard.is_one %}file{% else %}files{% endif %}
+      </button>
+      <a class="aside" href="{{ discard.back }}">Cancel</a>
+    </form>
+  </div>
+</section>
+{% endblock %}
