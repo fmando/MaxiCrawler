@@ -609,16 +609,18 @@ UNFAVOURITE_MARK = "☆"
 VERDICT_BUTTONS: tuple[tuple[ReviewVerdict, str, str], ...] = (
     (ReviewVerdict.KEPT, "Keep", "Worth having"),
     (ReviewVerdict.IGNORED, "Ignore", "Not interesting, but leave the file alone"),
+    (ReviewVerdict.DISCARDED, "Discard", "Delete the file and stop offering it"),
 )
 """The judgements a button offers, and what each one promises.
 
-Discarding is missing on purpose and arrives with the step that removes the
-payload. A button called "Discard" that only wrote a word would be a button
-whose name is a plan rather than a description.
+Each hint says what happens rather than what it is called, and the third one has
+to: "Discard" and "Ignore" are near-synonyms in English and are not near
+anything in what they do. One leaves the file alone, the other deletes it.
 
-"Unreviewed" is missing too, and differently: it is not a judgement somebody
-passes but the absence of one, so it is offered as *undo* on an entry that has
-already been judged rather than as a third opinion.
+"Unreviewed" is missing, and differently: it is not a judgement somebody passes
+but the absence of one, so it is offered as *undo* on an entry that has already
+been judged rather than as a fourth opinion. Taking a discard back is that same
+undo — it does not bring the file back, and says so where it is offered.
 """
 
 
@@ -801,12 +803,61 @@ def item_view(
         # The record says there is a file and there is not: worth its own
         # sentence, because the answer is to download it again rather than to
         # wonder what the page means.
-        "payload_missing": payload is None and item.is_stored,
+        #
+        # Not said about something discarded, where the file being gone is the
+        # point rather than a fault. Both sentences end in "download it again",
+        # and telling somebody their own decision was an accident is the kind of
+        # small wrongness that makes a page feel like it is not paying attention.
+        "payload_missing": (
+            payload is None and item.is_stored and item.verdict is not ReviewVerdict.DISCARDED
+        ),
         # Judging from here lands back *here*, not in the listing: somebody
         # standing on one file is looking at it, and being thrown back to a
         # table would be the interface deciding they were finished. The listing
         # they came from rides along so the breadcrumb still knows the way.
         **_review_of(item, base, _here(base, back)),
+    }
+
+
+def discard_view(items: Iterable[LibraryItem], *, action: str, back: str) -> dict[str, Any]:
+    """Return what the page asking about a batch of deletions shows.
+
+    The one confirmation in the interface, and it exists where the damage scales:
+    a tile is one file somebody is looking at, and a selection is two hundred
+    they cannot all see. What it has to answer before anybody presses anything is
+    *how many* and *which* — a count alone is a number to agree with rather than
+    a list to check.
+
+    The freed size counts only what still has a payload. A selection that
+    happens to include something already discarded frees nothing further for it,
+    and saying otherwise would inflate the one number the page exists to state.
+    """
+    rows = tuple(items)
+    return {
+        "rows": tuple(
+            {
+                "token": f"{item.directory}/{item.key}",
+                "name": item.name,
+                "size": format_size(item.size),
+                "url": f"/library/{item.directory}/{item.key}",
+                "is_discarded": item.verdict is ReviewVerdict.DISCARDED,
+            }
+            for item in rows
+        ),
+        "count": format_number(len(rows)),
+        "is_one": len(rows) == 1,
+        "freed": format_size(
+            sum(
+                item.size or 0
+                for item in rows
+                if item.verdict is not ReviewVerdict.DISCARDED and item.is_stored
+            )
+        ),
+        "action": action,
+        # Where cancelling goes, and it is the listing the ticks were made in:
+        # a confirmation that dumps somebody at the top of an unfiltered library
+        # has cost them the selection and the filter for saying no.
+        "back": back,
     }
 
 
@@ -1147,10 +1198,20 @@ def _review_of(item: LibraryItem, base: str, back: str) -> dict[str, Any]:
     what makes judging a hundred files feel like one action repeated rather than
     three interfaces.
     """
+    discarded = item.verdict is ReviewVerdict.DISCARDED
     return {
         "verdict": str(item.verdict),
         "verdict_word": VERDICT_WORDS[item.verdict],
         "is_reviewed": item.verdict is not ReviewVerdict.UNREVIEWED,
+        "is_discarded": discarded,
+        # The one undo that cannot undo everything, and it says so where it is
+        # pressed rather than afterwards: the verdict goes, the file does not
+        # come back, and fetching the link again is what would restore it.
+        "undo_hint": (
+            "Put this back in the unreviewed pile — the deleted file does not come back"
+            if discarded
+            else "Put this back in the unreviewed pile"
+        ),
         "is_favourite": item.favourite,
         # Filled or hollow, and the value it would send is the opposite of what
         # it shows: the button says what is true now and does the other thing.

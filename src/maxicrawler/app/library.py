@@ -548,14 +548,22 @@ class LibraryService:
         writers touch different members, so the worst case is one judgement lost
         rather than a document that describes two different files.
 
+        Taking a judgement back is this same call with
+        :attr:`~maxicrawler.domain.ReviewVerdict.UNREVIEWED`, including on
+        something discarded — there is no second method for undoing, because
+        undoing a discard is not a different operation from undoing anything
+        else. What it cannot do is bring the file back; what it does is lift the
+        headstone, so downloading the link again restores it (ADR-012).
+
         Raises:
             ValueError: the verdict is *discarded*. That word is not an opinion
                 somebody types, it is what a record says after its payload has
-                been removed — and writing it here would produce a tombstone
+                been removed — and writing it here would produce a headstone
                 standing over a file that is still there. Everything downstream
                 reads it as "the file is gone, do not fetch it again", so a
                 record that lied about it would quietly make the file
-                unreachable while it sat on disk.
+                unreachable while it sat on disk. :meth:`discard` is the one
+                writer of that verdict, and it removes the file first.
         """
         if verdict is ReviewVerdict.DISCARDED:
             msg = "discarding removes the payload and is not written through review()"
@@ -570,6 +578,54 @@ class LibraryService:
         if record is None:
             return None
         entry.write(record.with_review(_reviewed(record.review, verdict, favourite)))
+        return self.item(provider, key)
+
+    def discard(self, provider: str, key: str) -> LibraryItem | None:
+        """Remove one stored file and record that it was removed.
+
+        One call, because the two halves are one decision. Deleting the payload
+        without the headstone leaves an entry the next run happily downloads
+        again; writing the headstone without deleting the payload leaves a
+        record saying "gone" over a file that is sitting there — which is what
+        :meth:`review` refuses outright, and why this is the only writer of that
+        verdict.
+
+        The order is the file first and the document second. The failure that
+        can happen is a file that will not be deleted — something else has it
+        open, which on Windows is ordinary — and in that order the entry is
+        simply unchanged. The other order would leave the lie.
+
+        What stays is everything the record said about the payload: its name,
+        its size, its checksum. A discarded entry is still a row somebody can
+        read and search, which is what makes "show me what I threw away" a view
+        rather than an archaeology. What goes is the bytes.
+
+        ``None`` when there is no such entry, when its document cannot be read,
+        **and when the file could not be removed** — the three answers a caller
+        has one thing to say about, and in every one of them nothing was
+        written. A caller that needs to tell "no such entry" from "would not
+        delete" can ask :meth:`item` afterwards, which is what the route does.
+
+        Discarding something already discarded is not an error and keeps the
+        original removal time: the file went when it went.
+        """
+        entry = self._library.entry_at(provider, key)
+        if entry is None:
+            return None
+        try:
+            record = entry.read()
+        except LibraryError:
+            return None
+        if record is None:
+            return None
+        try:
+            entry.remove_content()
+        except LibraryError:
+            return None
+        review = _reviewed(
+            record.review, ReviewVerdict.DISCARDED, None, removed_at=datetime.now(UTC)
+        )
+        entry.write(record.with_review(review))
         return self.item(provider, key)
 
     def previews(self, items: Iterable[LibraryItem]) -> tuple[Preview, ...]:
@@ -929,6 +985,8 @@ def _reviewed(
     previous: ReviewRecord | None,
     verdict: ReviewVerdict | None,
     favourite: bool | None,
+    *,
+    removed_at: datetime | None = None,
 ) -> ReviewRecord:
     """Return the judgement that results from saying *verdict* and *favourite*.
 
@@ -936,17 +994,29 @@ def _reviewed(
     statements a person can make about an entry stay independent: neither
     argument being given leaves the record as it was, and giving one leaves the
     other alone.
+
+    ``payload_removed_at`` is the exception, and follows the verdict rather than
+    surviving it: it is part of what *discarded* means, not a fact recorded
+    beside it. Taking the discard back therefore clears it in the same write,
+    which is what makes undo a whole undo — a record left carrying a removal
+    time would say the file had been deleted while the entry it belongs to no
+    longer claims anything of the sort, and a later download would inherit it.
+    An entry that stays discarded keeps the time it already had: the file went
+    when it went, and pressing the button twice does not move it.
     """
     current = previous if previous is not None else ReviewRecord()
+    settled = current.verdict if verdict is None else verdict
     if verdict is None or verdict is current.verdict:
         decided = current.reviewed_at
     else:
         decided = datetime.now(UTC)
     return ReviewRecord(
-        verdict=current.verdict if verdict is None else verdict,
+        verdict=settled,
         favourite=current.favourite if favourite is None else favourite,
         reviewed_at=decided,
-        payload_removed_at=current.payload_removed_at,
+        payload_removed_at=(
+            current.payload_removed_at or removed_at if settled is ReviewVerdict.DISCARDED else None
+        ),
     )
 
 

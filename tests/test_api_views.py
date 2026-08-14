@@ -33,6 +33,7 @@ from maxicrawler.api.views import (
     crawl_rows,
     describe_options,
     describe_scope,
+    discard_view,
     download_view,
     format_bytes,
     format_duration,
@@ -77,7 +78,8 @@ from maxicrawler.app import (
 )
 from maxicrawler.app.viewing import MediaKind
 from maxicrawler.crawler import DiscoverySummary, PluginUsage
-from maxicrawler.domain import DownloadStatus, ScanSession, Statistics
+from maxicrawler.domain import DownloadStatus, ReviewVerdict, ScanSession, Statistics
+from maxicrawler.utils import format_size
 from maxicrawler.web.models import LinkKind
 from maxicrawler.web.report import CrawlReport, CrawlStatistics, PageOutcome, SkipReason
 from maxicrawler.web.session import CrawlOptions, CrawlSession, CrawlState
@@ -2237,6 +2239,49 @@ def test_a_layout_nobody_recognises_is_the_grid() -> None:
     assert LibraryLayout.parse("mosaic") is LibraryLayout.GRID
     assert LibraryLayout.parse(None) is LibraryLayout.GRID
     assert LibraryLayout.parse("list") is LibraryLayout.LIST
+
+
+# --- before deleting a batch of files ------------------------------------------
+
+
+def test_the_question_names_every_file_rather_than_counting_them() -> None:
+    view = discard_view(
+        (make_item("one.pdf"), make_item("two.pdf", key="def")),
+        action="/library/discard?back=%2Flibrary",
+        back="/library",
+    )
+
+    assert view["count"] == "2"
+    assert view["is_one"] is False
+    assert [row["name"] for row in view["rows"]] == ["one.pdf", "two.pdf"]
+    assert [row["token"] for row in view["rows"]] == ["mega/abc", "mega/def"]
+    assert view["rows"][1]["url"] == "/library/mega/def"
+
+
+def test_one_file_is_a_file_and_not_files() -> None:
+    assert discard_view((make_item(),), action="/library/discard", back="/library")["is_one"]
+
+
+def test_what_is_already_discarded_frees_nothing_further() -> None:
+    """The one number the page exists to state must not be inflated."""
+    view = discard_view(
+        (make_item(), make_item("two.pdf", key="def", verdict=ReviewVerdict.DISCARDED)),
+        action="/library/discard",
+        back="/library",
+    )
+
+    assert view["freed"] == format_size(1_300_000)
+    assert view["rows"][1]["is_discarded"] is True
+
+
+def test_an_entry_that_never_held_a_file_frees_nothing() -> None:
+    view = discard_view(
+        (make_item(status=DownloadStatus.FAILED, path=None),),
+        action="/library/discard",
+        back="/library",
+    )
+
+    assert view["freed"] == format_size(0)
 
 
 # --- what a tile puts where the file would be ---------------------------------

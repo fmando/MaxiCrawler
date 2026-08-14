@@ -38,7 +38,18 @@
   </div>
 
   <div class="body">
-    {% if item.payload_missing %}
+    {#
+      Two ways of having no file, and they must not read alike. One is a fault
+      to repair; the other is a decision somebody made on purpose, and telling
+      them their own decision was an accident is how a page loses their trust.
+    #}
+    {% if item.is_discarded %}
+      <p class="caution">
+        This was discarded and the file deleted. Everything below is what the
+        entry still records about it; downloading the link again would bring the
+        file back.
+      </p>
+    {% elif item.payload_missing %}
       <p class="error">
         The record says a file is stored here and there is none. It was moved or
         deleted outside MaxiCrawler; downloading the link again would restore it.

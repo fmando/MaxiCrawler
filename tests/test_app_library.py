@@ -122,25 +122,6 @@ def write(
     return entry.key
 
 
-def mark_discarded(library: Library, provider: str, key: str) -> None:
-    """Write a discarded verdict straight into the document.
-
-    By hand, because the service refuses to write this one: the word means the
-    payload has been removed, and removing it is a step of its own. Until that
-    step exists, a test that needs a tombstone builds one.
-    """
-    entry = library.entry_at(provider, key)
-    assert entry is not None
-    document = json.loads(entry.metadata_path.read_text(encoding="utf-8"))
-    document["review"] = {
-        "verdict": "discarded",
-        "favourite": False,
-        "reviewed_at": None,
-        "payload_removed_at": None,
-    }
-    entry.metadata_path.write_text(json.dumps(document), encoding="utf-8")
-
-
 # --- what a listing holds -----------------------------------------------------
 
 
@@ -1078,7 +1059,7 @@ def test_a_discarded_entry_is_out_of_the_way_until_it_is_asked_for(tmp_path: Pat
     service, library = make_service(tmp_path)
     key = write(library, "AaBbCcDd", name="gone.pdf")
     write(library, "EeFfGgHh", name="kept.pdf")
-    mark_discarded(library, "mega", key)
+    service.discard("mega", key)
 
     assert [item.name for item in service.browse().items] == ["kept.pdf"]
     assert [
@@ -1098,7 +1079,7 @@ def test_an_ignored_entry_stays_in_the_listing(tmp_path: Path) -> None:
 def test_the_discarded_are_still_counted_so_they_can_be_found(tmp_path: Path) -> None:
     service, library = make_service(tmp_path)
     key = write(library, "AaBbCcDd")
-    mark_discarded(library, "mega", key)
+    service.discard("mega", key)
 
     page = service.browse()
 
@@ -1141,7 +1122,7 @@ def test_a_verdict_nobody_recognises_filters_nothing() -> None:
 
 
 def test_the_service_refuses_to_write_a_discard(tmp_path: Path) -> None:
-    """Removing the payload is what makes the word true; that step is its own."""
+    """Removing the payload is what makes the word true; `discard` is its writer."""
     service, library = make_service(tmp_path)
     key = write(library, "AaBbCcDd")
 
@@ -1151,3 +1132,148 @@ def test_the_service_refuses_to_write_a_discard(tmp_path: Path) -> None:
     item = service.item("mega", key)
     assert item is not None
     assert item.verdict is ReviewVerdict.UNREVIEWED
+
+
+# --- throwing something away --------------------------------------------------
+
+
+def stored_review(library: Library, provider: str, key: str) -> dict[str, object]:
+    """Return the review member of one entry's document, straight off disk.
+
+    Read here rather than through the service because two of its fields are not
+    on a listed item: when the payload went, and whether that is still recorded
+    once the verdict is taken back.
+    """
+    entry = library.entry_at(provider, key)
+    assert entry is not None
+    document = json.loads(entry.metadata_path.read_text(encoding="utf-8"))
+    review = document["review"]
+    assert isinstance(review, dict)
+    return review
+
+
+def test_discarding_removes_the_file_and_says_so_in_one_call(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+    item = service.item("mega", key)
+    assert item is not None and item.path is not None
+
+    discarded = service.discard("mega", key)
+
+    assert discarded is not None
+    assert discarded.verdict is ReviewVerdict.DISCARDED
+    assert not item.path.exists()
+
+
+def test_a_discarded_entry_still_says_what_it_used_to_hold(tmp_path: Path) -> None:
+    """What goes is the bytes. A row nobody can read is not a row to sort by."""
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd", name="holiday.jpg", filename="holiday.jpg", size=4096)
+
+    item = service.discard("mega", key)
+
+    assert item is not None
+    assert item.name == "holiday.jpg"
+    assert item.filename == "holiday.jpg"
+    assert item.size == 4096
+    assert item.checksum == "abc123"
+
+
+def test_discarding_records_when_the_payload_went(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+
+    service.discard("mega", key)
+
+    assert stored_review(library, "mega", key)["payload_removed_at"] is not None
+
+
+def test_discarding_twice_keeps_the_moment_the_file_actually_went(tmp_path: Path) -> None:
+    """It went when it went; pressing the button again does not move it."""
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+    service.discard("mega", key)
+    first = stored_review(library, "mega", key)["payload_removed_at"]
+
+    service.discard("mega", key)
+
+    assert stored_review(library, "mega", key)["payload_removed_at"] == first
+
+
+def test_discarding_something_whose_file_is_already_gone_still_marks_it(tmp_path: Path) -> None:
+    """A payload somebody moved away by hand is the state this produces."""
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd", payload=None)
+
+    item = service.discard("mega", key)
+
+    assert item is not None
+    assert item.verdict is ReviewVerdict.DISCARDED
+
+
+def test_discarding_leaves_the_star_alone(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+    service.review("mega", key, favourite=True)
+
+    item = service.discard("mega", key)
+
+    assert item is not None
+    assert item.favourite is True
+
+
+def test_discarding_what_is_not_there_writes_nothing(tmp_path: Path) -> None:
+    service, _ = make_service(tmp_path)
+
+    assert service.discard("mega", "nothing") is None
+    assert service.discard("..", "x") is None
+
+
+def test_taking_a_discard_back_lifts_the_whole_headstone(tmp_path: Path) -> None:
+    """Undo is one call, and what it undoes is the verdict, not the deletion.
+
+    The removal time has to go with it: a record still carrying one would say the
+    file had been deleted while the entry no longer claims anything of the sort —
+    and a later download carries the review across untouched, so the lie would
+    outlive the entry that told it.
+    """
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+    service.discard("mega", key)
+
+    item = service.review("mega", key, verdict=ReviewVerdict.UNREVIEWED)
+
+    assert item is not None
+    assert item.verdict is ReviewVerdict.UNREVIEWED
+    assert stored_review(library, "mega", key)["payload_removed_at"] is None
+
+
+def test_starring_something_discarded_does_not_resurrect_it(tmp_path: Path) -> None:
+    """Only the verdict owns the headstone, and the star is not a verdict."""
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+    service.discard("mega", key)
+
+    item = service.review("mega", key, favourite=True)
+
+    assert item is not None
+    assert item.verdict is ReviewVerdict.DISCARDED
+    assert stored_review(library, "mega", key)["payload_removed_at"] is not None
+
+
+def test_nothing_is_served_from_an_entry_whose_file_was_discarded(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+    service.discard("mega", key)
+
+    assert service.payload("mega", key) is None
+
+
+def test_a_discarded_entry_shows_a_symbol_rather_than_a_missing_picture(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path, preview_inline_bytes=1_000_000)
+    key = write(library, "AaBbCcDd", name="shot.png", filename="shot.png", size=len(PAYLOAD))
+    service.discard("mega", key)
+    item = service.item("mega", key)
+    assert item is not None
+
+    assert service.preview(item).shape is PreviewShape.SYMBOL

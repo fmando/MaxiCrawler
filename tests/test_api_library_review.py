@@ -18,6 +18,7 @@ from maxicrawler.app import CrawlService, LibraryService
 from maxicrawler.config import Settings
 from maxicrawler.domain import ResourceKind, ResourceRef, ReviewVerdict
 from maxicrawler.library import Library
+from maxicrawler.utils import format_size
 
 PAYLOAD = b"stub payload"
 
@@ -78,25 +79,6 @@ def client(tmp_path: Path) -> Iterator[tuple[TestClient, LibraryService, Library
     application = create_app(service=CrawlService(settings), library=service)
     with TestClient(application) as test_client:
         yield test_client, service, library
-
-
-def mark_discarded(library: Library, provider: str, key: str) -> None:
-    """Write a discarded verdict straight into the document.
-
-    By hand, because the service refuses to write this one: the word means the
-    payload has been removed, and removing it is a step of its own. Until that
-    step exists, a test that needs a tombstone builds one.
-    """
-    entry = library.entry_at(provider, key)
-    assert entry is not None
-    document = json.loads(entry.metadata_path.read_text(encoding="utf-8"))
-    document["review"] = {
-        "verdict": "discarded",
-        "favourite": False,
-        "reviewed_at": None,
-        "payload_removed_at": None,
-    }
-    entry.metadata_path.write_text(json.dumps(document), encoding="utf-8")
 
 
 # --- one file at a time -------------------------------------------------------
@@ -254,7 +236,7 @@ def test_a_batch_saying_nothing_changes_nothing(tmp_path: Path) -> None:
 # --- what the pages carry -----------------------------------------------------
 
 
-def test_every_tile_offers_the_same_four_controls(tmp_path: Path) -> None:
+def test_every_tile_offers_the_same_controls(tmp_path: Path) -> None:
     with client(tmp_path) as (test_client, _, library):
         key = store(library, "AaBbCcDd", name="Jump.pdf")
 
@@ -263,9 +245,8 @@ def test_every_tile_offers_the_same_four_controls(tmp_path: Path) -> None:
         assert f'action="/library/mega/{key}/review?back=' in body
         assert 'name="verdict" value="kept"' in body
         assert 'name="verdict" value="ignored"' in body
+        assert 'name="verdict" value="discarded"' in body
         assert 'name="favourite"' in body
-        # Discarding removes the payload and is not offered until it does.
-        assert 'value="discarded"' not in body
 
 
 def test_a_tile_carries_a_tick_that_belongs_to_the_batch(tmp_path: Path) -> None:
@@ -307,32 +288,183 @@ def test_the_review_chips_lead_to_the_pile_worth_working_through(tmp_path: Path)
 def test_a_discarded_file_is_absent_until_its_chip_is_followed(tmp_path: Path) -> None:
     with client(tmp_path) as (test_client, service, library):
         key = store(library, "AaBbCcDd", name="gone.pdf")
-        mark_discarded(library, "mega", key)
+        service.discard("mega", key)
 
         assert "gone.pdf" not in test_client.get("/library").text
         assert "gone.pdf" in test_client.get("/library?verdict=discarded").text
 
 
-def test_discarding_is_not_a_word_this_route_writes(tmp_path: Path) -> None:
-    """A tombstone over a file that is still there would make it unreachable."""
+def test_a_discarded_file_is_not_reported_as_a_fault(tmp_path: Path) -> None:
+    """Its own decision read back as an accident is a page not paying attention."""
+    with client(tmp_path) as (test_client, service, library):
+        key = store(library, "AaBbCcDd", name="gone.pdf")
+        service.discard("mega", key)
+
+        body = test_client.get(f"/library/mega/{key}").text
+
+        assert "was discarded and the file deleted" in body
+        assert "there is none" not in body
+
+
+# --- discarding one file ------------------------------------------------------
+
+
+def test_discarding_one_file_removes_it_and_records_the_verdict(tmp_path: Path) -> None:
     with client(tmp_path) as (test_client, service, library):
         key = store(library, "AaBbCcDd", name="Jump.pdf")
-
-        response = test_client.post(f"/library/mega/{key}/review", data={"verdict": "discarded"})
-
-        assert response.status_code == 400
         item = service.item("mega", key)
-        assert item is not None
-        assert item.verdict is ReviewVerdict.UNREVIEWED
+        assert item is not None and item.path is not None
+
+        response = test_client.post(
+            f"/library/mega/{key}/review", data={"verdict": "discarded"}, follow_redirects=False
+        )
+
+        assert response.status_code == 303
+        assert not item.path.exists()
+        assert service.item("mega", key).verdict is ReviewVerdict.DISCARDED  # type: ignore[union-attr]
 
 
-def test_a_batch_cannot_discard_either(tmp_path: Path) -> None:
+def test_discarding_one_file_asks_nothing_first(tmp_path: Path) -> None:
+    """The confirmation is on the batch. Here somebody is looking at the file."""
+    with client(tmp_path) as (test_client, _, library):
+        key = store(library, "AaBbCcDd", name="Jump.pdf")
+
+        response = test_client.post(
+            f"/library/mega/{key}/review",
+            data={"verdict": "discarded"},
+            follow_redirects=False,
+        )
+
+        assert response.headers["location"] == f"/library/mega/{key}"
+
+
+def test_discarding_a_file_that_is_not_there_is_a_404(tmp_path: Path) -> None:
+    with client(tmp_path) as (test_client, _, _):
+        response = test_client.post("/library/mega/nothing/review", data={"verdict": "discarded"})
+
+        assert response.status_code == 404
+
+
+def test_undoing_a_discard_lifts_the_verdict_through_the_ordinary_route(tmp_path: Path) -> None:
     with client(tmp_path) as (test_client, service, library):
         key = store(library, "AaBbCcDd", name="Jump.pdf")
+        test_client.post(f"/library/mega/{key}/review", data={"verdict": "discarded"})
+
+        test_client.post(f"/library/mega/{key}/review", data={"verdict": "unreviewed"})
+
+        assert service.item("mega", key).verdict is ReviewVerdict.UNREVIEWED  # type: ignore[union-attr]
+
+
+def test_the_undo_button_says_the_file_does_not_come_back(tmp_path: Path) -> None:
+    with client(tmp_path) as (test_client, service, library):
+        key = store(library, "AaBbCcDd", name="Jump.pdf")
+        service.discard("mega", key)
+
+        body = test_client.get("/library?verdict=discarded").text
+
+        assert "the deleted file does not come back" in body
+
+
+# --- discarding a selection ---------------------------------------------------
+
+
+def test_a_batch_discard_asks_before_it_deletes(tmp_path: Path) -> None:
+    with client(tmp_path) as (test_client, service, library):
+        first = store(library, "AaBbCcDd", name="one.pdf")
+        second = store(library, "EeFfGgHh", name="two.pdf")
+
+        response = test_client.post(
+            "/library/review",
+            data={"verdict": "discarded", "entry": [f"mega/{first}", f"mega/{second}"]},
+        )
+
+        assert response.status_code == 200
+        assert "one.pdf" in response.text
+        assert "two.pdf" in response.text
+        assert 'action="/library/discard?back=' in response.text
+        # Nothing has happened yet, which is the whole point of the page.
+        assert service.item("mega", first).verdict is ReviewVerdict.UNREVIEWED  # type: ignore[union-attr]
+        assert service.payload("mega", first) is not None
+
+
+def test_the_question_says_how_much_would_be_freed(tmp_path: Path) -> None:
+    with client(tmp_path) as (test_client, _, library):
+        key = store(library, "AaBbCcDd", name="one.pdf")
 
         response = test_client.post(
             "/library/review", data={"verdict": "discarded", "entry": [f"mega/{key}"]}
         )
 
-        assert response.status_code == 400
-        assert service.item("mega", key).verdict is ReviewVerdict.UNREVIEWED  # type: ignore[union-attr]
+        assert "freed" in response.text
+        assert format_size(len(PAYLOAD)) in response.text
+
+
+def test_the_question_carries_the_listing_it_was_asked_from(tmp_path: Path) -> None:
+    """Cancelling costs the selection; it must not also cost the filter."""
+    with client(tmp_path) as (test_client, _, library):
+        key = store(library, "AaBbCcDd", name="one.pdf")
+
+        response = test_client.post(
+            "/library/review?back=/library%3Fkind%3Dpdf",
+            data={"verdict": "discarded", "entry": [f"mega/{key}"]},
+        )
+
+        assert 'href="/library?kind=pdf"' in response.text
+
+
+def test_a_selection_with_nothing_left_in_it_is_not_a_question(tmp_path: Path) -> None:
+    with client(tmp_path) as (test_client, _, _):
+        response = test_client.post(
+            "/library/review",
+            data={"verdict": "discarded", "entry": ["mega/gone", "nonsense"]},
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 303
+        assert response.headers["location"] == "/library"
+
+
+def test_the_answer_removes_every_file_it_named(tmp_path: Path) -> None:
+    with client(tmp_path) as (test_client, service, library):
+        first = store(library, "AaBbCcDd", name="one.pdf")
+        second = store(library, "EeFfGgHh", name="two.pdf")
+        third = store(library, "IiJjKkLl", name="three.pdf")
+
+        response = test_client.post(
+            "/library/discard",
+            data={"entry": [f"mega/{first}", f"mega/{second}"]},
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 303
+        assert service.payload("mega", first) is None
+        assert service.payload("mega", second) is None
+        assert service.payload("mega", third) is not None
+        assert service.item("mega", third).verdict is ReviewVerdict.UNREVIEWED  # type: ignore[union-attr]
+
+
+def test_the_answer_lands_back_in_the_listing_it_came_from(tmp_path: Path) -> None:
+    with client(tmp_path) as (test_client, _, library):
+        key = store(library, "AaBbCcDd", name="one.pdf")
+
+        response = test_client.post(
+            "/library/discard?back=/library%3Fverdict%3Dunreviewed",
+            data={"entry": [f"mega/{key}"]},
+            follow_redirects=False,
+        )
+
+        assert response.headers["location"] == "/library?verdict=unreviewed"
+
+
+def test_an_entry_that_has_gone_does_not_refuse_the_rest_of_a_discard(tmp_path: Path) -> None:
+    with client(tmp_path) as (test_client, service, library):
+        key = store(library, "AaBbCcDd", name="one.pdf")
+
+        response = test_client.post(
+            "/library/discard",
+            data={"entry": ["mega/gone", f"mega/{key}"]},
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 303
+        assert service.item("mega", key).verdict is ReviewVerdict.DISCARDED  # type: ignore[union-attr]

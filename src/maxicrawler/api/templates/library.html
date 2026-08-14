@@ -108,8 +108,15 @@
         <input type="checkbox" class="tick-all" hidden>
         <span>Select every file on this page</span>
       </label>
+      {#
+        "Discard selected" is in this row like the others and does not act like
+        them: it asks first, on a page that names every file. Which one that is
+        is decided by the route, not here -- this row only knows it is posting a
+        verdict, and that is what keeps the batch a single form.
+      #}
       {% for button in library.verdict_buttons %}
-        <button type="submit" name="verdict" value="{{ button.verdict }}">{{ button.label }} selected</button>
+        <button type="submit" name="verdict" value="{{ button.verdict }}"
+                class="verdict-{{ button.verdict }}">{{ button.label }} selected</button>
       {% endfor %}
       <button type="submit" name="favourite" value="1">Star selected</button>
       <span class="chosen muted small" hidden><span class="num">0</span> selected</span>

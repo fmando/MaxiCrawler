@@ -229,6 +229,15 @@ def create_app(
                 methods=["POST"],
                 name="review_selection",
             ),
+            # Separate from the route above, and that is the whole point of it:
+            # the batch of judgements never deletes anything, and the one that
+            # does is only reachable from the page that said how many and which.
+            Route(
+                "/library/discard",
+                routes.discard_selection,
+                methods=["POST"],
+                name="discard_selection",
+            ),
             Route(
                 "/library/{provider}/{key}/review",
                 routes.review_item,

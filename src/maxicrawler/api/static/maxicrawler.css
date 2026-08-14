@@ -1030,6 +1030,55 @@ footer {
 .verdict.star { font-size: 13px; line-height: 1; padding: 1px 7px; }
 .verdict.star.active { color: var(--warn); }
 
+/*
+ * The one button that deletes something, wherever it sits. Outlined rather than
+ * filled: it is on every tile, and sixty red blocks would be a page shouting at
+ * somebody who is only sorting through pictures. It shows what it is on hover
+ * and on focus, which is when it is about to be pressed.
+ */
+.verdict.verdict-discarded:hover,
+.verdict.verdict-discarded:focus-visible { color: var(--bad); border-color: var(--bad); }
+.verdict.verdict-discarded.active { color: var(--bad); border-color: var(--bad); }
+
+/* In the batch row it is coloured at rest, because there it acts on rows
+ * somebody cannot all see at once. */
+.batch button.verdict-discarded { color: var(--bad); border-color: var(--bad); }
+
+/* --- before deleting a batch of files ------------------------------------ */
+
+/*
+ * A warning rather than a failure, and coloured as one: `.error` is what a page
+ * says when something went wrong, and nothing has gone wrong here yet.
+ */
+.caution {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  color: var(--warn);
+  border: 1px solid var(--warn);
+  background: rgba(201, 146, 47, 0.08);
+}
+
+.discard-list {
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+.discard-list li {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.discard-list .num { margin-left: auto; }
+
+button.danger {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+button.danger:hover { background: rgba(192, 83, 83, 0.12); }
+
 /* What a row already decided reads as, beside the transfer's own badge. */
 .verdict-mark {
   font-size: 11px;

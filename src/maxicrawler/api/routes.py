@@ -10,6 +10,7 @@ them later. Downloads joined them in Sprint 15, when there was finally a queue
 to put on such a page.
 """
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -50,7 +51,7 @@ from maxicrawler.app import (
     parse_verdict,
 )
 from maxicrawler.app.viewing import DOWNLOAD_CONTENT_TYPE, MediaKind
-from maxicrawler.domain import DownloadStatus
+from maxicrawler.domain import DownloadStatus, ReviewVerdict
 from maxicrawler.utils import parse_size
 from maxicrawler.web.report import CrawlReport
 
@@ -745,23 +746,34 @@ async def review_item(request: Request) -> Response:
     a ``back`` it lands on the file's own page, which is where somebody judging
     a single file is standing.
 
+    One of the four deletes the file, and it does so without asking. That is a
+    decision rather than an omission: the confirmation this interface has is on
+    the *batch*, where somebody is acting on rows they cannot all see. Here they
+    are standing on one file, looking at it, and a dialog on every single
+    discard is a dialog that gets dismissed without being read — which is worth
+    less than no dialog at all.
+
     Raises:
-        HTTPException: nothing here is addressed by those two names, or the
-            form asked for a judgement this route does not write — see
-            :meth:`~maxicrawler.app.LibraryService.review`.
+        HTTPException: nothing here is addressed by those two names, or the file
+            is there and would not be deleted. The second is 409 rather than
+            404: the entry exists, nothing was written, and the reason is
+            usually another program holding the file open.
     """
     form = await read_form(request)
     provider = request.path_params["provider"]
     key = request.path_params["key"]
-    try:
-        item = library_of(request).review(
-            provider,
-            key,
-            verdict=parse_verdict(form.get("verdict")),
-            favourite=_flag(form.get("favourite")),
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
+    shelf = library_of(request)
+    verdict = parse_verdict(form.get("verdict"))
+    if verdict is ReviewVerdict.DISCARDED:
+        item = shelf.discard(provider, key)
+        # Two questions, because the service answers "no such entry" and "would
+        # not delete" with the same `None` — deliberately, since nothing was
+        # written in either case. Which of the two it was is only worth a second
+        # look here, where it decides what somebody is told.
+        if item is None and shelf.item(provider, key) is not None:
+            raise HTTPException(status_code=409, detail="the stored file could not be removed")
+    else:
+        item = shelf.review(provider, key, verdict=verdict, favourite=_flag(form.get("favourite")))
     if item is None:
         raise HTTPException(status_code=404, detail="no such stored file")
     return RedirectResponse(url=_back_to(request, f"/library/{provider}/{key}"), status_code=303)
@@ -779,20 +791,90 @@ async def review_selection(request: Request) -> Response:
     The ticks are gone afterwards and are deliberately not restored. What comes
     back instead is rows carrying their new verdict, which is what was being
     asked for.
+
+    Discarding is the exception and does not happen here. It deletes files, and
+    a selection is the one place somebody is acting on rows they cannot all see
+    at once, so it goes to a page that says how many and which ones first.
     """
     form = await read_forms(request)
     verdict = parse_verdict(_one(form, "verdict") or None)
     favourite = _flag(_one(form, "favourite") or None)
     shelf = library_of(request)
+    back = _back_to(request, "/library")
+    if verdict is ReviewVerdict.DISCARDED:
+        return _confirm_discard(request, form, back=back)
     if verdict is not None or favourite is not None:
-        for token in form.get("entry", ()):
-            directory, _, key = token.partition("/")
-            if directory and key:
-                try:
-                    shelf.review(directory, key, verdict=verdict, favourite=favourite)
-                except ValueError as error:
-                    raise HTTPException(status_code=400, detail=str(error)) from error
+        for directory, key in _entries(form):
+            shelf.review(directory, key, verdict=verdict, favourite=favourite)
+    return RedirectResponse(url=back, status_code=303)
+
+
+def _confirm_discard(request: Request, form: dict[str, list[str]], *, back: str) -> Response:
+    """Ask about deleting the ticked files, naming every one of them.
+
+    The selection is rebuilt from the entries rather than trusted as a count, so
+    the page states what is really there: a token addressing something that has
+    since gone is dropped here rather than silently making the number too large.
+
+    Nothing left to ask about is not a question. An empty selection lands back
+    in the listing, which is where a batch with nothing in it belongs.
+    """
+    shelf = library_of(request)
+    items = tuple(
+        item
+        for directory, key in _entries(form)
+        if (item := shelf.item(directory, key)) is not None
+    )
+    if not items:
+        return RedirectResponse(url=back, status_code=303)
+    return page(
+        request,
+        "library_discard.html",
+        {
+            "discard": views.discard_view(
+                items,
+                # Where to land afterwards travels on the action, as it does on
+                # every other form here (ADR-039), so the confirmation itself
+                # carries nothing a browser could point elsewhere.
+                action=f"/library/discard?{urlencode({'back': back})}",
+                back=back,
+            )
+        },
+        section="library",
+    )
+
+
+async def discard_selection(request: Request) -> Response:
+    """Delete the files the confirmation page was shown for, and go back.
+
+    The only route that acts on the answer to a question, and it re-reads the
+    entries rather than trusting a count from the page: what is deleted is what
+    the form named, which is what was listed.
+
+    Partial by design, like every other batch here. A file another program is
+    holding open is left where it is, unmarked, and the listing somebody lands
+    on still shows it — which is the report, about the rows rather than about
+    the request.
+    """
+    form = await read_forms(request)
+    shelf = library_of(request)
+    for directory, key in _entries(form):
+        shelf.discard(directory, key)
     return RedirectResponse(url=_back_to(request, "/library"), status_code=303)
+
+
+def _entries(form: dict[str, list[str]]) -> Iterator[tuple[str, str]]:
+    """Yield the library entries a batch of ticks named.
+
+    One field per ticked row, each holding ``directory/key`` — the pair that
+    addresses an entry in a URL. Anything that is not that pair is skipped
+    rather than refused, for the reason a selection of links is: two malformed
+    tokens are not a refusal of the other ninety-eight.
+    """
+    for token in form.get("entry", ()):
+        directory, _, key = token.partition("/")
+        if directory and key:
+            yield directory, key
 
 
 def _flag(value: str | None) -> bool | None:
