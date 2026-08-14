@@ -254,11 +254,24 @@ class CrawlJob:
         self._announce()
 
     def _on_finished(self, event: Event) -> None:
-        """Note how the crawl ended."""
+        """Stop the clock. Whether this job is *finished* is not decided here.
+
+        The engine publishes this event and then builds the report and writes
+        it to the repository; :meth:`complete` is called after that. So the
+        event marks the end of the crawling and not the end of the job, and a
+        job that called itself finished here would be offering a report that
+        does not exist yet — for as long as a SQLite write of every page and
+        link the crawl found. Everything that asks *is it done* does so in order
+        to ask for the report next: the page, the JSON endpoint, the script that
+        reloads when the event stream says the crawl ended. Answering them a
+        write early is how a finished crawl renders without a link table.
+
+        What is safe to record is the time, because elapsed is about the
+        crawling and that is what has ended.
+        """
         if not isinstance(event, CrawlFinished):
             return
         with self._lock:
-            self._state = CrawlState(event.state)
             self._finished = monotonic()
         self._announce()
 
