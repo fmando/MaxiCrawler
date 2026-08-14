@@ -33,6 +33,7 @@ from maxicrawler.config import DEFAULT_CONFIG_PATH, Settings
 
 try:
     from starlette.applications import Starlette
+    from starlette.middleware import Middleware
     from starlette.requests import Request
     from starlette.responses import JSONResponse
     from starlette.routing import Mount, Route
@@ -43,6 +44,7 @@ except ImportError as error:  # pragma: no cover - depends on the environment
 from maxicrawler.api import routes  # noqa: E402 - only importable behind the guard
 from maxicrawler.api.downloads import TransferQueue  # noqa: E402
 from maxicrawler.api.jobs import CrawlJobs  # noqa: E402
+from maxicrawler.api.origin import SameOriginMiddleware  # noqa: E402
 
 
 def create_app(
@@ -120,6 +122,10 @@ def create_app(
 
     application = Starlette(
         lifespan=lifespan,
+        # The only middleware, and it guards every unsafe method at once rather
+        # than every route remembering to. See `maxicrawler.api.origin` for what
+        # it decides and, more importantly, what it is not.
+        middleware=[Middleware(SameOriginMiddleware)],
         routes=[
             Route("/", routes.dashboard, methods=["GET"], name="dashboard"),
             Route("/crawls", routes.crawls, methods=["GET"], name="crawls"),
