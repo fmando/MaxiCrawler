@@ -62,8 +62,14 @@ def make_manager(
     provider: StubProvider | None = None,
     *,
     reporter: RecordingProgressReporter | None = None,
+    minimum_size: int = 0,
 ) -> tuple[DownloadManager, Library]:
-    """Return a manager storing into a library below *tmp_path*."""
+    """Return a manager storing into a library below *tmp_path*.
+
+    No floor unless a test asks for one, so every assertion here stays about
+    orchestration. What the configured default is, and that it reaches this far,
+    is `tests/test_app_downloading.py`'s question rather than this file's.
+    """
     registry = ProviderRegistry([provider if provider is not None else make_provider()])
     library = Library(tmp_path / "library")
     manager = DownloadManager(
@@ -71,6 +77,7 @@ def make_manager(
         library,
         reporter=reporter,
         clock=lambda: datetime(2026, 8, 2, 12, 0, tzinfo=UTC),
+        minimum_size=minimum_size,
     )
     return manager, library
 
@@ -308,6 +315,64 @@ def test_a_first_download_records_no_judgement_of_its_own(tmp_path: Path) -> Non
 
     entry = library.entry(report.completed[0].job.ref)
     assert stored_record(library, entry.path)["review"] is None
+
+
+def test_a_payload_under_the_floor_is_not_kept(tmp_path: Path) -> None:
+    manager, library = make_manager(tmp_path, minimum_size=1000)
+
+    report = manager.download(FILE_URL)
+
+    assert len(report.refused) == 1
+    assert report.refused[0].reason is not None
+    assert "under the minimum download size" in report.refused[0].reason
+    assert report.completed == ()
+    entry = library.entry(report.refused[0].job.ref)
+    assert not entry.content_directory.exists()
+
+
+def test_a_refusal_is_recorded_so_the_next_batch_does_not_fetch_it_again(
+    tmp_path: Path,
+) -> None:
+    """The whole reason a refusal writes a document at all.
+
+    Without one, "the library holds it" is false, the next bulk queue asks for
+    the same file, and the decision is made again on every run instead of once.
+    """
+    manager, library = make_manager(tmp_path, minimum_size=1000)
+
+    report = manager.download(FILE_URL)
+
+    entry = library.entry(report.refused[0].job.ref)
+    document = stored_record(library, entry.path)
+    assert document["status"] == DownloadStatus.REFUSED.value
+    assert document["content"] is None
+    assert "under the minimum download size" in str(document["error"])
+
+
+def test_a_refusal_is_not_a_failed_run(tmp_path: Path) -> None:
+    """A limit doing what it was configured to do is not something going wrong."""
+    manager, _ = make_manager(tmp_path, minimum_size=1000)
+
+    report = manager.download(FILE_URL)
+
+    assert report.failed == ()
+    assert report.succeeded is True
+
+
+def test_an_announced_size_is_refused_before_a_byte_moves(tmp_path: Path) -> None:
+    """The stub announces its length, so the floor is reached at `begin`."""
+    manager, _ = make_manager(tmp_path, minimum_size=1000)
+
+    report = manager.download(FILE_URL)
+
+    assert len(report.refused) == 1
+    assert report.bytes_written == 0
+
+
+def test_a_floor_of_zero_keeps_what_it_always_kept(tmp_path: Path) -> None:
+    manager, _ = make_manager(tmp_path, minimum_size=0)
+
+    assert len(manager.download(FILE_URL).completed) == 1
 
 
 def test_a_failing_provider_produces_a_failed_outcome(tmp_path: Path) -> None:

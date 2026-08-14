@@ -38,11 +38,12 @@
           {% endif %}
           {#
             A new request rather than a reset of this row, so what happened
-            stays readable. Offered for everything that ended without the file
-            arriving -- a dead share, a broken transfer, a stop somebody has
-            since thought better of.
+            stays readable. Offered where asking again could end differently --
+            a dead share, a broken transfer, a stop somebody has since thought
+            better of -- and not where a configured limit would only refuse it
+            a second time.
           #}
-          {% if not item.succeeded %}
+          {% if item.can_retry %}
             <form class="inline" method="post" action="/downloads/{{ item.download_id }}/retry?back=/downloads">
               <button type="submit">Try again</button>
             </form>

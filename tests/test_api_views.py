@@ -23,6 +23,8 @@ from maxicrawler.api.views import (
     PANELS,
     STATE_LABELS,
     STATE_TONES,
+    STATUS_LABELS,
+    STATUS_TONES,
     TRANSIENT_PARAMS,
     QueuedBatch,
     crawl_rows,
@@ -1772,6 +1774,53 @@ def test_a_download_the_library_already_held_is_a_success() -> None:
     assert shown["state_tone"] == "good"
     assert shown["succeeded"] is True
     assert shown["reason"] == "the library already holds it"
+
+
+def test_a_refused_download_is_neither_a_success_nor_a_failure() -> None:
+    summary = make_summary(
+        status=DownloadStatus.REFUSED,
+        bytes_written=0,
+        reason="under the minimum download size: 12 B of 100.0 KB",
+    )
+
+    shown = download_view(make_download_snapshot(status=DownloadStatus.REFUSED, summary=summary))
+
+    assert shown["state_label"] == "not kept"
+    assert shown["state_tone"] == "idle"
+    assert shown["succeeded"] is False
+    assert shown["was_refused"] is True
+    assert shown["reason"] == "under the minimum download size: 12 B of 100.0 KB"
+
+
+def test_a_refused_download_is_not_offered_a_second_attempt() -> None:
+    """The rule would turn it away identically, so the button cannot work."""
+    shown = download_view(
+        make_download_snapshot(
+            status=DownloadStatus.REFUSED, summary=make_summary(status=DownloadStatus.REFUSED)
+        )
+    )
+
+    assert shown["can_retry"] is False
+
+
+@pytest.mark.parametrize("status", [DownloadStatus.FAILED, DownloadStatus.CANCELLED])
+def test_what_could_end_differently_is_offered_again(status: DownloadStatus) -> None:
+    shown = download_view(
+        make_download_snapshot(status=status, summary=make_summary(status=status))
+    )
+
+    assert shown["can_retry"] is True
+    assert shown["was_refused"] is False
+
+
+def test_every_download_state_has_a_word_and_a_tone() -> None:
+    """A state added to the domain and forgotten here is a KeyError on a page.
+
+    Which is a 500 rather than a missing badge, so it is worth catching from
+    the enum instead of from whichever template happens to render it first.
+    """
+    assert set(STATUS_LABELS) == set(DownloadStatus)
+    assert set(STATUS_TONES) == set(DownloadStatus)
 
 
 def test_a_failed_download_carries_its_reason() -> None:

@@ -43,6 +43,24 @@ class Settings:
     nothing about what may be stored.
     """
 
+    min_download_size: int = 100_000
+    """Smallest payload worth putting in the library, in bytes.
+
+    100 kB, decimal, the same unit sizes are shown in. A crawl of an image
+    directory returns a thumbnail, a sprite and an icon for every picture worth
+    having, and clearing those out by hand does not work: the next bulk queue
+    fetches them again, because "the library holds it" is answered by a record
+    and a file, and both are gone.
+
+    It is applied in the download sink, so it applies to every transfer — one
+    clicked by hand as much as one out of a batch. Two rules would be two
+    explanations, and the sink does not know who asked.
+
+    Zero switches it off. Nothing is ever silently dropped either way: a refused
+    payload is recorded with both sizes and appears in the library under its own
+    state, which is the whole difference between a limit and a disappearance.
+    """
+
     crawl_depth: int = 0
     """Default link distance a crawl follows; zero fetches the seed alone."""
 
@@ -191,6 +209,9 @@ class Settings:
         if self.max_view_bytes < 1:
             msg = "max_view_bytes must be at least 1"
             raise ValueError(msg)
+        if self.min_download_size < 0:
+            msg = "min_download_size must not be negative"
+            raise ValueError(msg)
         if self.crawl_depth < 0:
             msg = "crawl_depth must not be negative"
             raise ValueError(msg)
@@ -235,6 +256,9 @@ class Settings:
             max_redirects=_int_value(app_config, "max_redirects", defaults.max_redirects),
             max_links=_int_value(app_config, "max_links", defaults.max_links),
             max_view_bytes=_int_value(app_config, "max_view_bytes", defaults.max_view_bytes),
+            min_download_size=_int_value(
+                app_config, "min_download_size", defaults.min_download_size
+            ),
             crawl_depth=_int_value(app_config, "crawl_depth", defaults.crawl_depth),
             crawl_max_pages=_int_value(app_config, "crawl_max_pages", defaults.crawl_max_pages),
             crawl_same_domain=_bool_value(
@@ -278,6 +302,7 @@ class Settings:
             f"max_redirects = {self.max_redirects}\n"
             f"max_links = {self.max_links}\n"
             f"max_view_bytes = {self.max_view_bytes}\n"
+            f"min_download_size = {self.min_download_size}\n"
             f"crawl_depth = {self.crawl_depth}\n"
             f"crawl_max_pages = {self.crawl_max_pages}\n"
             f"crawl_same_domain = {str(self.crawl_same_domain).lower()}\n"

@@ -89,6 +89,7 @@ STATUS_LABELS: dict[DownloadStatus, str] = {
     DownloadStatus.RUNNING: "downloading",
     DownloadStatus.COMPLETED: "completed",
     DownloadStatus.SKIPPED: "already stored",
+    DownloadStatus.REFUSED: "not kept",
     DownloadStatus.FAILED: "failed",
     DownloadStatus.CANCELLED: "stopped",
 }
@@ -97,6 +98,11 @@ STATUS_LABELS: dict[DownloadStatus, str] = {
 A stopped one is not a failure either. The person reading that word is the
 person who clicked the button, and calling their decision an error is how an
 interface teaches somebody to distrust it.
+
+"Not kept" for a refusal, rather than "too small": the state is the general one
+— a limit here declined this — and which limit it was belongs in the reason
+beside it, where the numbers are. A label naming today's only rule would have to
+be rewritten by the next one.
 """
 
 STATUS_TONES: dict[DownloadStatus, str] = {
@@ -104,6 +110,7 @@ STATUS_TONES: dict[DownloadStatus, str] = {
     DownloadStatus.RUNNING: "busy",
     DownloadStatus.COMPLETED: "good",
     DownloadStatus.SKIPPED: "good",
+    DownloadStatus.REFUSED: "idle",
     DownloadStatus.FAILED: "bad",
     DownloadStatus.CANCELLED: "idle",
 }
@@ -309,6 +316,12 @@ def download_view(
         "remaining": _remaining(progress, snapshot),
         "is_finished": snapshot.is_finished,
         "succeeded": snapshot.summary is not None and snapshot.summary.succeeded,
+        # Not the negation of `succeeded`, and that is the point of both flags.
+        # A payload a configured limit turned away did not arrive and never
+        # will: its reason is worth reading, and its "Try again" is a button
+        # that could only refuse it again.
+        "can_retry": snapshot.status.invites_retry,
+        "was_refused": snapshot.status is DownloadStatus.REFUSED,
         "reason": snapshot.reason,
         "error": snapshot.error,
         "path": None if snapshot.path is None else snapshot.path.as_posix(),
@@ -337,7 +350,7 @@ def queue_view(snapshot: QueueSnapshot, *, limit: int) -> dict[str, Any]:
         _waiting_row(item, position, last=position == len(snapshot.waiting))
         for position, item in enumerate(snapshot.waiting, start=1)
     )
-    unarrived = sum(1 for item in snapshot.finished if not item.status.is_success)
+    unarrived = sum(1 for item in snapshot.finished if item.status.invites_retry)
     return {
         "is_paused": snapshot.is_paused,
         "is_busy": snapshot.is_busy,
@@ -496,6 +509,12 @@ def _finished_row(snapshot: DownloadSnapshot) -> dict[str, Any]:
         "state_label": STATUS_LABELS[snapshot.status],
         "state_tone": STATUS_TONES[snapshot.status],
         "succeeded": snapshot.summary is not None and snapshot.summary.succeeded,
+        # Not the negation of `succeeded`, and that is the point of both flags.
+        # A payload a configured limit turned away did not arrive and never
+        # will: its reason is worth reading, and its "Try again" is a button
+        # that could only refuse it again.
+        "can_retry": snapshot.status.invites_retry,
+        "was_refused": snapshot.status is DownloadStatus.REFUSED,
         "reason": snapshot.reason,
         "transferred": format_size(snapshot.progress.bytes_written),
         "elapsed": format_duration(snapshot.elapsed_seconds) if snapshot.was_started else None,
@@ -1502,6 +1521,12 @@ def settings_view(settings: Settings) -> tuple[dict[str, Any], ...]:
                     "max_view_bytes",
                     format_bytes(settings.max_view_bytes),
                     "Largest stored file the browser is offered inline.",
+                ),
+                _setting(
+                    "min_download_size",
+                    format_size(settings.min_download_size),
+                    "Smallest payload kept. Anything under it is recorded as "
+                    "not kept, with both sizes, and never fetched again.",
                 ),
                 _setting("log_level", settings.log_level, ""),
                 _setting("max_entries", format_number(settings.max_entries), ""),

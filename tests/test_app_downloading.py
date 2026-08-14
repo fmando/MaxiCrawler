@@ -49,10 +49,16 @@ def make_provider(**overrides: object) -> StubProvider:
 def make_service(
     tmp_path: Path, provider: StubProvider | None = None
 ) -> tuple[DownloadService, Library]:
-    """Return a service storing into a library below *tmp_path*."""
+    """Return a service storing into a library below *tmp_path*.
+
+    Without the minimum download size, because a stub payload is twelve bytes
+    and the shipped floor is a hundred thousand. Every test here is about what
+    a service does with a transfer rather than about which transfers are worth
+    keeping; the one that asks about the floor turns it back on.
+    """
     library = Library(tmp_path / "library")
     registry = ProviderRegistry([provider if provider is not None else make_provider()])
-    settings = Settings(library_path=library.root)
+    settings = Settings(library_path=library.root, min_download_size=0)
     return DownloadService(settings, providers=registry, library=library), library
 
 
@@ -143,6 +149,72 @@ def test_a_second_download_of_the_same_link_is_skipped(tmp_path: Path) -> None:
     assert summary.succeeded is True
     assert summary.reason == "the library already holds it"
     assert len(provider.downloaded) == 1
+
+
+def test_the_configured_floor_reaches_the_transfer(tmp_path: Path) -> None:
+    """The one test here that leaves `min_download_size` at what ships.
+
+    Every other fixture in this file turns it off, so this is what proves the
+    setting travels all the way from the configuration to the sink rather than
+    being a value nothing reads.
+    """
+    library = Library(tmp_path / "library")
+    registry = ProviderRegistry([make_provider()])
+    service = DownloadService(
+        Settings(library_path=library.root), providers=registry, library=library
+    )
+
+    summary = service.download(FILE_URL)
+
+    assert summary.status is DownloadStatus.REFUSED
+    assert summary.succeeded is False
+    assert summary.reason is not None
+    assert "under the minimum download size" in summary.reason
+    assert not (library.root / "mega").exists() or summary.path is None
+
+
+def test_a_refused_link_is_refused_again_rather_than_stored(tmp_path: Path) -> None:
+    """A refusal is not a tombstone, and deliberately is not one.
+
+    The provider is asked a second time and turned away a second time, before
+    a byte moves. Blocking it outright would mean that lowering the floor left
+    the file unreachable — the setting is configuration, and a record must not
+    outrank the configuration in force when it is read. What never happens
+    twice is the transfer, and what never happens at all is the file appearing.
+    """
+    library = Library(tmp_path / "library")
+    provider = make_provider()
+    service = DownloadService(
+        Settings(library_path=library.root), providers=ProviderRegistry([provider]), library=library
+    )
+    service.download(FILE_URL)
+
+    summary = service.download(FILE_URL)
+
+    assert summary.status is DownloadStatus.REFUSED
+    assert summary.bytes_written == 0
+    assert len(provider.downloaded) == 2
+
+
+def test_lowering_the_floor_makes_a_refused_link_fetchable(tmp_path: Path) -> None:
+    """The property the paragraph above buys, stated as a test."""
+    library = Library(tmp_path / "library")
+    registry = ProviderRegistry([make_provider()])
+    refusing = DownloadService(
+        Settings(library_path=library.root), providers=registry, library=library
+    )
+    refusing.download(FILE_URL)
+
+    allowing = DownloadService(
+        Settings(library_path=library.root, min_download_size=0),
+        providers=registry,
+        library=library,
+    )
+    summary = allowing.download(FILE_URL)
+
+    assert summary.status is DownloadStatus.COMPLETED
+    assert summary.path is not None
+    assert summary.path.read_bytes() == PAYLOAD
 
 
 def test_a_folder_link_is_one_request_holding_several_files(tmp_path: Path) -> None:

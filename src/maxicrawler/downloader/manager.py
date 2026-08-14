@@ -20,7 +20,11 @@ from pathlib import Path
 
 from maxicrawler.domain import Checksum, DownloadStatus
 from maxicrawler.downloader.control import DownloadControl
-from maxicrawler.downloader.errors import DownloadCancelledError, DownloadError
+from maxicrawler.downloader.errors import (
+    DownloadCancelledError,
+    DownloadError,
+    DownloadRefusedError,
+)
 from maxicrawler.downloader.models import (
     DownloadJob,
     DownloadOutcome,
@@ -72,6 +76,7 @@ class DownloadWorker:
         clock: Clock | None = None,
         algorithm: str = DEFAULT_HASH_ALGORITHM,
         control: DownloadControl | None = None,
+        minimum_size: int = 0,
     ) -> None:
         self._providers = providers
         self._library = library
@@ -79,6 +84,7 @@ class DownloadWorker:
         self._clock = clock if clock is not None else _utc_now
         self._algorithm = algorithm
         self._control = control
+        self._minimum_size = minimum_size
 
     def execute(self, job: DownloadJob) -> DownloadOutcome:
         """Transfer *job* into the library and report what happened."""
@@ -120,9 +126,21 @@ class DownloadWorker:
                 algorithm=self._algorithm,
                 on_progress=lambda written: self._reporter.advanced(job, written),
                 control=self._control,
+                minimum_size=self._minimum_size,
             ) as sink:
                 descriptor = provider.download(job.ref, sink)
                 content = sink.commit()
+        except DownloadRefusedError as error:
+            # A rule here turned it away. Recorded, and that is the point of it:
+            # without a record the same file is fetched again by the next bulk
+            # queue, refused again, and the decision is never actually made.
+            # Before the generic clause below, which would call it a failure.
+            reason = str(error)
+            self._store(
+                entry,
+                self._record(job, entry, DownloadStatus.REFUSED, attempts, previous, error=reason),
+            )
+            return self._finish(job, DownloadStatus.REFUSED, started, reason=reason)
         except DownloadCancelledError:
             # Nothing is recorded. A cancelled transfer leaves the library
             # exactly as it was, and a stored record saying "failed" would turn
@@ -258,6 +276,7 @@ class DownloadManager:
         reporter: ProgressReporter | None = None,
         clock: Clock | None = None,
         control: DownloadControl | None = None,
+        minimum_size: int = 0,
     ) -> None:
         self._providers = providers
         self._library = library
@@ -273,7 +292,12 @@ class DownloadManager:
             worker
             if worker is not None
             else DownloadWorker(
-                providers, library, reporter=self._reporter, clock=clock, control=control
+                providers,
+                library,
+                reporter=self._reporter,
+                clock=clock,
+                control=control,
+                minimum_size=minimum_size,
             )
         )
 

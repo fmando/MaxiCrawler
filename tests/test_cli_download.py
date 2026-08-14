@@ -38,7 +38,14 @@ from maxicrawler.providers import ProviderRegistry, ProviderTransportError
 
 runner = CliRunner()
 FILE_URL = "https://mega.nz/file/AaBbCcDd#0123456789abcdefghijkl"
-PAYLOAD = b"stub payload"
+PAYLOAD = b"stub payload " * 10_000
+"""Large enough to clear the shipped `min_download_size`.
+
+These tests run the real command against the real configuration, so a twelve
+byte payload would now be turned away by the floor and every assertion here
+would be about that instead of about the command. Making the stub serve
+something a person would actually keep is truer than switching the setting off.
+"""
 DOWNLOADS = frozenset({ProviderCapability.INSPECT, ProviderCapability.DOWNLOAD})
 
 
@@ -296,6 +303,42 @@ def test_a_report_lists_failures_and_unresolved_sources() -> None:
 
     assert "Failures:\n  ubuntu.iso: connection reset" in rendered
     assert "Not downloaded:\n  https://example.test/a: no provider" in rendered
+
+
+def test_a_report_says_what_was_not_kept_and_why() -> None:
+    """A payload the floor turned away has to leave a sentence behind.
+
+    A file that disappeared silently is indistinguishable from one that was
+    never found, which is the whole objection to having a floor at all.
+    """
+    job = make_job("thumb.jpg", 12)
+    report = DownloadReport(
+        plan=DownloadPlan(jobs=(job,)),
+        outcomes=(
+            DownloadOutcome(
+                job=job,
+                status=DownloadStatus.REFUSED,
+                reason="under the minimum download size: 12 B of 100.0 KB",
+            ),
+        ),
+        library_root=Path("library"),
+    )
+
+    rendered = render_report(report)
+
+    assert "Not kept: 1" in rendered
+    assert "Not kept:\n  thumb.jpg: under the minimum download size: 12 B of 100.0 KB" in rendered
+
+
+def test_a_report_of_a_run_under_no_floor_says_nothing_about_one() -> None:
+    """A line about a rule nobody hit is noise in every ordinary run."""
+    job = make_job("ubuntu.iso", 1000)
+    report = DownloadReport(
+        plan=DownloadPlan(jobs=(job,)),
+        outcomes=(DownloadOutcome(job=job, status=DownloadStatus.COMPLETED, bytes_written=1000),),
+    )
+
+    assert "Not kept" not in render_report(report)
 
 
 def test_a_plan_lists_what_would_be_downloaded() -> None:

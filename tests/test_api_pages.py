@@ -51,6 +51,9 @@ def client(
         # refuses; see tests/test_api_pages.py::test_a_private_address_is_refused
         # for the default's own behaviour.
         allow_private_networks=True,
+        # And no minimum download size: the fixtures serve a few bytes each,
+        # and what is being tested is the page rather than the floor.
+        min_download_size=0,
         **({} if max_view_bytes is None else {"max_view_bytes": max_view_bytes}),
     )
     service = CrawlService(settings)

@@ -11,6 +11,7 @@ from maxicrawler.downloader import (
     DownloadCancelledError,
     DownloadControl,
     DownloadError,
+    DownloadRefusedError,
     LibrarySink,
 )
 from maxicrawler.library import CONTENT_DIRECTORY, Library, LibraryEntry
@@ -115,6 +116,79 @@ def test_a_short_payload_is_refused_rather_than_stored(tmp_path: Path) -> None:
             sink.commit()
 
     assert not entry.content_directory.exists()
+
+
+def test_an_announced_payload_under_the_floor_is_never_transferred(tmp_path: Path) -> None:
+    entry = make_entry(tmp_path)
+
+    with (
+        pytest.raises(DownloadRefusedError, match="under the minimum download size"),
+        LibrarySink(entry, minimum_size=1000) as sink,
+    ):
+        sink.begin(ContentDescriptor(name="thumb.jpg", size=120))
+
+    assert not entry.staging_directory.exists()
+    assert not entry.content_directory.exists()
+
+
+def test_a_refusal_names_both_sizes(tmp_path: Path) -> None:
+    """A file that vanished for a reason nobody can check is the failure here."""
+    entry = make_entry(tmp_path)
+
+    with (
+        pytest.raises(DownloadRefusedError, match=r"120 B of 1.0 KB"),
+        LibrarySink(entry, minimum_size=1000) as sink,
+    ):
+        sink.begin(ContentDescriptor(name="thumb.jpg", size=120))
+
+
+def test_a_payload_that_turns_out_small_is_caught_at_the_end(tmp_path: Path) -> None:
+    """The case an announced size cannot cover: a host that stated no length."""
+    entry = make_entry(tmp_path)
+
+    with (
+        pytest.raises(DownloadRefusedError, match="under the minimum download size"),
+        LibrarySink(entry, minimum_size=1000) as sink,
+    ):
+        sink.begin(ContentDescriptor(name="thumb.jpg"))
+        sink.write(b"tiny")
+        sink.commit()
+
+    assert not entry.staging_directory.exists()
+    assert not entry.content_directory.exists()
+
+
+def test_a_payload_at_the_floor_is_kept(tmp_path: Path) -> None:
+    """The limit is a minimum, so the size it names is large enough."""
+    entry = make_entry(tmp_path)
+
+    with LibrarySink(entry, minimum_size=len(PAYLOAD)) as sink:
+        sink.begin(ContentDescriptor(name="ubuntu.iso", size=len(PAYLOAD)))
+        sink.write(PAYLOAD)
+        content = sink.commit()
+
+    assert content.size == len(PAYLOAD)
+
+
+def test_an_unknown_size_is_not_a_small_one(tmp_path: Path) -> None:
+    """`None` means the host stated no length, which is not a reason to refuse."""
+    entry = make_entry(tmp_path)
+
+    with LibrarySink(entry, minimum_size=len(PAYLOAD)) as sink:
+        sink.begin(ContentDescriptor(name="ubuntu.iso"))
+        sink.write(PAYLOAD)
+
+        assert sink.commit().size == len(PAYLOAD)
+
+
+def test_a_floor_of_zero_keeps_everything(tmp_path: Path) -> None:
+    entry = make_entry(tmp_path)
+
+    with LibrarySink(entry, minimum_size=0) as sink:
+        sink.begin(ContentDescriptor(name="pixel.gif", size=1))
+        sink.write(b"x")
+
+        assert sink.commit().size == 1
 
 
 def test_a_payload_of_unknown_size_is_accepted(tmp_path: Path) -> None:

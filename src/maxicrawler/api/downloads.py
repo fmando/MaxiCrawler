@@ -992,14 +992,17 @@ the whole process open.
 
 
 def _is_unarrived(run: DownloadRun) -> bool:
-    """Return whether *run* is over and left nothing in the library.
+    """Return whether *run* is over and asking again could end differently.
 
     The same question the history's own "Try again" asks of one row: a dead
     share, a broken transfer, and a stop somebody has since reconsidered are one
-    set, because in all three the file is not there.
+    set, because in all three the file is not there *and* a second attempt could
+    change that. A payload a configured limit turned away is in neither half —
+    see :attr:`~maxicrawler.domain.downloads.DownloadStatus.invites_retry`,
+    which is where the three places that ask this agree on the answer.
     """
     snapshot = run.snapshot()
-    return snapshot.is_finished and not snapshot.status.is_success
+    return snapshot.is_finished and snapshot.status.invites_retry
 
 
 def _moved_to(index: int, where: Move, total: int) -> int:

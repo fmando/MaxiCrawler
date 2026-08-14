@@ -39,8 +39,18 @@ def render_report(report: DownloadReport) -> str:
         f"Failed: {len(report.failed)}",
         f"Stored: {format_size(report.bytes_written)}",
     ]
+    # Only when there were any. A run under no limit would otherwise carry a
+    # line about a rule that was never consulted.
+    if report.refused:
+        lines.insert(2, f"Not kept: {len(report.refused)}")
     if report.library_root is not None:
         lines.append(f"Library: {_display(report.library_root)}")
+    if report.refused:
+        lines.extend(("", "Not kept:"))
+        lines.extend(
+            f"  {outcome.label}: {outcome.reason or 'no reason given'}"
+            for outcome in report.refused
+        )
     if report.failed:
         lines.extend(("", "Failures:"))
         lines.extend(
