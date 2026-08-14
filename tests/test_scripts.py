@@ -10,6 +10,7 @@ Output is checked for the facts it has to carry, never line by line. A test that
 pins the wording turns every improvement to a message into a red build.
 """
 
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -28,8 +29,9 @@ SCRIPTS = REPOSITORY / "scripts"
 
 PRUNE = SCRIPTS / "prune_small_payloads.py"
 SURVEY = SCRIPTS / "survey_library.py"
+CHECK = SCRIPTS / "check_library.py"
 
-WRITING = {"prune_small_payloads.py"}
+WRITING = {"prune_small_payloads.py", "check_library.py"}
 """Scripts that can change the library, and must therefore ask with ``--apply``.
 
 Named rather than detected, so that a script gaining the ability to write is a
@@ -79,24 +81,32 @@ def write(
     size: int,
     favourite: bool = False,
     verdict: str = "unreviewed",
+    payload: bool = True,
+    checksum: str | None = None,
 ) -> str:
     """Write one stored entry of *size* bytes by hand and return its key.
 
     Written as a document rather than downloaded, for the same reason the
     library service's own tests do it: what is under test reads the shelf, and a
     provider would only add a way for the test to fail.
+
+    The entry is sound unless asked otherwise: the digest really is the digest
+    of what was written, so a doctor checking one has nothing to say. *payload*
+    and *checksum* are how a test breaks exactly one thing about it.
     """
     ref = ResourceRef(
         provider="direct",
         resource_id=handle,
         kind=ResourceKind.FILE,
-        url=f"https://example.test/{filename}",
+        url=f"https://example.test/{handle}/{filename}",
     )
     entry = library.entry(ref)
     entry.path.mkdir(parents=True, exist_ok=True)
-    stored = entry.content_path(filename)
-    stored.parent.mkdir(parents=True, exist_ok=True)
-    stored.write_bytes(b"x" * size)
+    body = b"x" * size
+    if payload:
+        stored = entry.content_path(filename)
+        stored.parent.mkdir(parents=True, exist_ok=True)
+        stored.write_bytes(body)
     document = {
         "schema": 1,
         "provider": "direct",
@@ -116,7 +126,9 @@ def write(
             "filename": filename,
             "path": f"content/{filename}",
             "size": size,
-            "checksums": [{"algorithm": "sha256", "value": "0" * 64}],
+            "checksums": [
+                {"algorithm": "sha256", "value": checksum or hashlib.sha256(body).hexdigest()}
+            ],
         },
         "review": {"verdict": verdict, "favourite": favourite},
     }
@@ -479,3 +491,177 @@ def test_an_empty_library_surveys_to_nothing_rather_than_to_an_error(tmp_path: P
     finished = run(SURVEY, config)
 
     assert finished.returncode == 0, finished.stderr
+
+
+# --- checking the shelf against the disk --------------------------------------
+
+
+def entry_path(library: Library, key: str) -> Path:
+    """Return the directory of the entry under *key*."""
+    return library.root / "direct" / key
+
+
+def test_a_sound_library_has_nothing_to_report(tmp_path: Path) -> None:
+    """Including under ``--checksums``, which is the stricter reading."""
+    config = settings_file(tmp_path)
+    library = Library(tmp_path / "library")
+    write(library, "one", filename="one.jpg", size=5_000)
+    write(library, "two", filename="two.png", size=9_000)
+
+    finished = run(CHECK, config, "--checksums")
+
+    assert finished.returncode == 0, finished.stderr
+    assert "Nothing to report" in finished.stdout
+
+
+def test_a_record_pointing_at_a_missing_file_is_reported_with_its_url(tmp_path: Path) -> None:
+    """The one fault that is worth acting on, so the URL is worth printing."""
+    config = settings_file(tmp_path)
+    library = Library(tmp_path / "library")
+    write(library, "lost", filename="lost.jpg", size=5_000, payload=False)
+
+    finished = run(CHECK, config, "--urls")
+
+    assert finished.returncode == 0, finished.stderr
+    assert "not there" in finished.stdout
+    assert "https://example.test/lost/lost.jpg" in finished.stdout
+
+
+def test_a_file_of_the_wrong_size_is_reported(tmp_path: Path) -> None:
+    config = settings_file(tmp_path)
+    library = Library(tmp_path / "library")
+    key = write(library, "grown", filename="grown.jpg", size=5_000)
+    (entry_path(library, key) / "content" / "grown.jpg").write_bytes(b"y" * 9_000)
+
+    finished = run(CHECK, config)
+
+    assert finished.returncode == 0, finished.stderr
+    assert "not the size its record gives" in finished.stdout
+    assert "5.0 KB" in finished.stdout
+    assert "9.0 KB" in finished.stdout
+
+
+def test_a_changed_file_is_only_caught_when_the_checksums_are_asked_for(tmp_path: Path) -> None:
+    """Reading every byte of a library is not something to do unasked."""
+    config = settings_file(tmp_path)
+    library = Library(tmp_path / "library")
+    write(library, "tampered", filename="changed.jpg", size=5_000, checksum="f" * 64)
+
+    quiet = run(CHECK, config)
+    assert "checksum" not in quiet.stdout
+
+    asked = run(CHECK, config, "--checksums")
+    assert asked.returncode == 0, asked.stderr
+    assert "does not match its recorded checksum" in asked.stdout
+
+
+def test_a_file_no_record_mentions_is_reported(tmp_path: Path) -> None:
+    """What a re-download under a new name leaves behind."""
+    config = settings_file(tmp_path)
+    library = Library(tmp_path / "library")
+    key = write(library, "renamed", filename="new.jpg", size=5_000)
+    (entry_path(library, key) / "content" / "old.jpg").write_bytes(b"z" * 3_000)
+
+    finished = run(CHECK, config)
+
+    assert finished.returncode == 0, finished.stderr
+    assert "no record mentions" in finished.stdout
+    assert "old.jpg" in finished.stdout
+
+
+def test_an_unreadable_document_is_reported_and_not_treated_as_absent(tmp_path: Path) -> None:
+    config = settings_file(tmp_path)
+    library = Library(tmp_path / "library")
+    key = write(library, "broken", filename="fine.jpg", size=5_000)
+    (entry_path(library, key) / "metadata.json").write_text("{ not json", encoding="utf-8")
+
+    finished = run(CHECK, config)
+
+    assert finished.returncode == 0, finished.stderr
+    assert "could not be read" in finished.stdout
+
+
+def test_a_directory_with_content_and_no_document_is_reported(tmp_path: Path) -> None:
+    config = settings_file(tmp_path)
+    library = Library(tmp_path / "library")
+    stray = library.root / "direct" / "no-document-here" / "content"
+    stray.mkdir(parents=True)
+    (stray / "stray.bin").write_bytes(b"w" * 700)
+
+    finished = run(CHECK, config)
+
+    assert finished.returncode == 0, finished.stderr
+    assert "holds no metadata document" in finished.stdout
+
+
+def test_applying_clears_what_an_interrupted_download_left(tmp_path: Path) -> None:
+    """A staged file is worthless the moment the transfer stopped (ADR-012)."""
+    config = settings_file(tmp_path)
+    library = Library(tmp_path / "library")
+    key = write(library, "stopped", filename="half.zip", size=5_000)
+    staged = entry_path(library, key) / ".incomplete"
+    staged.mkdir()
+    (staged / "half.zip").write_bytes(b"q" * 120_000)
+
+    reported = run(CHECK, config)
+    assert "left something behind" in reported.stdout
+    assert (staged / "half.zip").exists(), "a plain run must not delete anything"
+
+    finished = run(CHECK, config, "--apply")
+
+    assert finished.returncode == 0, finished.stderr
+    assert not (staged / "half.zip").exists()
+
+
+def test_applying_finishes_a_discard_whose_file_is_still_there(tmp_path: Path) -> None:
+    """The intention is already on record; carrying it out is not a new decision."""
+    config = settings_file(tmp_path)
+    library = Library(tmp_path / "library")
+    key = write(library, "undead", filename="gone.png", size=2_000, verdict="discarded")
+
+    finished = run(CHECK, config, "--apply")
+
+    assert finished.returncode == 0, finished.stderr
+    assert not (entry_path(library, key) / "content" / "gone.png").exists()
+    review = document_of(library, key)["review"]
+    assert isinstance(review, dict)
+    assert review["payload_removed_at"], "the removal has to be written down, not just done"
+
+
+def test_applying_leaves_everything_it_did_not_decide_alone(tmp_path: Path) -> None:
+    """The promise the whole script rests on.
+
+    A file no record mentions might be something somebody put there; a record
+    whose payload is gone might be worth fetching again. Both would need a new
+    decision, and this is a maintenance script, not the person who owns the
+    library.
+    """
+    config = settings_file(tmp_path)
+    library = Library(tmp_path / "library")
+    unclaimed = write(library, "renamed", filename="new.jpg", size=5_000)
+    stray = entry_path(library, unclaimed) / "content" / "old.jpg"
+    stray.write_bytes(b"z" * 3_000)
+    lost = write(library, "lost", filename="lost.jpg", size=5_000, payload=False)
+
+    finished = run(CHECK, config, "--apply")
+
+    assert finished.returncode == 0, finished.stderr
+    assert stray.read_bytes() == b"z" * 3_000
+    record = document_of(library, lost)
+    assert record["content"], "a record whose file is gone is left as it was"
+    assert record["review"] == {"verdict": "unreviewed", "favourite": False}
+
+
+def test_a_second_run_finds_the_repairs_done(tmp_path: Path) -> None:
+    config = settings_file(tmp_path)
+    library = Library(tmp_path / "library")
+    key = write(library, "stopped", filename="half.zip", size=5_000)
+    staged = entry_path(library, key) / ".incomplete"
+    staged.mkdir()
+    (staged / "half.zip").write_bytes(b"q" * 1_000)
+
+    run(CHECK, config, "--apply")
+    again = run(CHECK, config)
+
+    assert again.returncode == 0, again.stderr
+    assert "Nothing to report" in again.stdout

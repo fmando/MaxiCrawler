@@ -58,10 +58,31 @@ over this directory like any other.
 | --- | --- |
 | `prune_small_payloads.py` | Discards stored files below a size, the way the interface would. For the thumbnails and icons collected before `min_download_size` existed (ADR-042). |
 | `survey_library.py` | Describes the whole shelf: how much, of what, how big, and how many pixels the images have. Reports only. |
+| `check_library.py` | Compares every record against the disk and reports where they have come apart. Repairs the two faults that are already decided. |
 
 `_shelf.py` is not a script — it holds the four lines each of them needs to find
 a library and read all of it, and the underscore keeps it out of the pass that
 tests the others.
+
+## What the doctor will and will not do
+
+The filesystem is the authority (ADR-010) and every record is a claim about it.
+`check_library.py` walks the directories — not the index, which would only
+repeat what it was told — and reports every place the two have come apart: a
+record pointing at a file that is gone, a file no record mentions, a size or a
+checksum that no longer matches, an interrupted download nobody swept up, a
+document that cannot be read at all.
+
+**It repairs only where the intention is already on record.** With `--apply` it
+clears staging leftovers, which ADR-012 says are worthless the moment a transfer
+stops, and it finishes discards whose file is somehow still there. That is the
+whole list, and the boundary is deliberate: removing a file no record mentions,
+or rewriting a record whose payload has gone, would be a *new* decision about
+what should exist in your library. A maintenance script does not get to make
+those. It reports them, and `--urls` prints what to queue again.
+
+`--checksums` reads every byte of every file, which is worth doing after a disk
+scare and not worth doing on a Tuesday. It is off by default for that reason.
 
 ## What the survey is for
 
