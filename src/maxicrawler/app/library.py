@@ -413,6 +413,27 @@ class LibraryPage:
         return self.page < self.pages
 
 
+@dataclass(frozen=True, slots=True)
+class LibraryPlace:
+    """Where one entry stands in a listing, and what is on either side of it.
+
+    The whole of what turns a file's page into somewhere to work: a position to
+    read, two neighbours to move between, and all three taken from **the listing
+    somebody is actually working through** rather than from the library. Walking
+    a filter of forty is the job; walking nine thousand entries is not.
+    """
+
+    item: LibraryItem
+    position: int
+    """One-based, so it reads beside :attr:`total` the way a page number does."""
+
+    total: int
+    previous: LibraryItem | None = None
+    following: LibraryItem | None = None
+    """``None`` at either end. Not wrapped around: a walk that starts again at
+    the top is one nobody can tell they have finished."""
+
+
 class LibraryService:
     """Everything a client needs to browse the library, and nothing about showing it."""
 
@@ -450,9 +471,7 @@ class LibraryService:
         after paging would order a page instead of the library.
         """
         asked = query if query is not None else LibraryQuery()
-        items = self._marked(tuple(self._items()))
-        matching = tuple(item for item in items if _matches(item, asked))
-        ordered = _ordered(matching, asked)
+        items, ordered = self._ranked(asked)
         per_page = min(max(asked.per_page, 1), MAX_PER_PAGE)
         pages = max(1, ceil(len(ordered) / per_page))
         page = min(max(asked.page, 1), pages)
@@ -473,6 +492,53 @@ class LibraryService:
             # left absent rather than zero when nothing can answer.
             queued=None if self._queued is None else sum(item.queued for item in items),
         )
+
+    def locate(
+        self, provider: str, key: str, query: LibraryQuery | None = None
+    ) -> "LibraryPlace | None":
+        """Return where *provider*/*key* stands in the listing *query* describes.
+
+        The same read, filter and order :meth:`browse` does, minus the paging:
+        somebody moving from one file to the next is walking the whole result,
+        and a neighbour that stopped at a page boundary would be a walk that
+        ends sixty files in without saying so.
+
+        ``None`` when the entry is not in that listing at all, which is an
+        ordinary answer rather than a fault: opening something discarded from a
+        listing that hides the discarded is exactly that case. What it means for
+        a client is that there is no walk to show — not that there is no file.
+
+        Costs one listing. The alternative is remembering an ordering between two
+        requests, which is a second copy of the truth that goes stale the moment
+        anything is judged — and the thing being walked is a filter of what has
+        *not* been judged.
+        """
+        asked = query if query is not None else LibraryQuery()
+        _, ordered = self._ranked(asked)
+        for index, item in enumerate(ordered):
+            if item.directory == provider and item.key == key:
+                return LibraryPlace(
+                    item=item,
+                    position=index + 1,
+                    total=len(ordered),
+                    previous=ordered[index - 1] if index > 0 else None,
+                    following=ordered[index + 1] if index + 1 < len(ordered) else None,
+                )
+        return None
+
+    def _ranked(
+        self, asked: LibraryQuery
+    ) -> tuple[tuple[LibraryItem, ...], tuple[LibraryItem, ...]]:
+        """Return every entry, and the ones *asked* matches in order.
+
+        Both halves, because the two callers need different ones and reading the
+        library twice to answer one request would be the obvious way to make a
+        listing cost double. The facets count over everything; the rows and the
+        walk come from the ordered matches.
+        """
+        items = self._marked(tuple(self._items()))
+        matching = tuple(item for item in items if _matches(item, asked))
+        return items, _ordered(matching, asked)
 
     def item(self, provider: str, key: str) -> LibraryItem | None:
         """Return the stored resource *provider*/*key* names, if there is one.
@@ -509,7 +575,12 @@ class LibraryService:
             path=item.path,
             filename=item.filename,
             size=size,
-            media=verdict_for(item.filename, size, max_bytes=self._settings.max_view_bytes),
+            media=verdict_for(
+                item.filename,
+                size,
+                max_bytes=self._settings.max_view_bytes,
+                max_stream_bytes=self._settings.max_stream_bytes,
+            ),
         )
 
     def review(

@@ -60,6 +60,20 @@ class Display(StrEnum):
     """An image element. Also the answer for SVG, because an ``<img>`` runs no
     script even when the file it points at contains some."""
 
+    AUDIO = "audio"
+    """An ``<audio controls>`` element. The browser's own player, as ever."""
+
+    VIDEO = "video"
+    """A ``<video controls>`` element.
+
+    Its own member rather than a frame, and not because of how it looks: these
+    two are the only types that are *streamed* rather than handed over whole,
+    which is why they are bounded by
+    :attr:`~maxicrawler.config.Settings.max_stream_bytes` and not by the viewer's
+    ordinary ceiling. A page that framed a video would be a page that had to wait
+    for one.
+    """
+
     NONE = "none"
     """Not shown. :attr:`MediaVerdict.reason` says why."""
 
@@ -128,12 +142,38 @@ VIEWABLE: dict[str, tuple[str, Display]] = {
     ".markdown": (PLAIN_TEXT, Display.IFRAME),
     ".html": (HTML, Display.IFRAME),
     ".htm": (HTML, Display.IFRAME),
+    # What a browser here actually plays. Deliberately shorter than the video
+    # and audio categories in `KINDS`: a `.mkv` or a `.wmv` given a content type
+    # is a player that shows a black rectangle and an error, which is a worse
+    # answer than the download link it gets instead. This table is what may be
+    # handed over; `KINDS` is what a person is looking for.
+    ".mp4": ("video/mp4", Display.VIDEO),
+    ".m4v": ("video/mp4", Display.VIDEO),
+    ".webm": ("video/webm", Display.VIDEO),
+    ".ogv": ("video/ogg", Display.VIDEO),
+    ".mov": ("video/quicktime", Display.VIDEO),
+    ".mp3": ("audio/mpeg", Display.AUDIO),
+    ".m4a": ("audio/mp4", Display.AUDIO),
+    ".aac": ("audio/aac", Display.AUDIO),
+    ".flac": ("audio/flac", Display.AUDIO),
+    ".ogg": ("audio/ogg", Display.AUDIO),
+    ".oga": ("audio/ogg", Display.AUDIO),
+    ".opus": ("audio/ogg", Display.AUDIO),
+    ".wav": ("audio/wav", Display.AUDIO),
 }
 """Every suffix this release will show, and nothing else.
 
 An allow-list, so a type nobody thought about is a download rather than a
 guess. ``.xml`` is plain text on purpose: served as XML it could carry a
 stylesheet and become script-capable, and nobody asked to view XML *rendered*.
+"""
+
+STREAMED = frozenset({Display.AUDIO, Display.VIDEO})
+"""The displays a browser fetches in pieces rather than all at once.
+
+Named here rather than tested for member by member, because the property that
+matters is not "is this a video" but "is this handed over whole" — and that is
+the question :func:`verdict_for` asks to decide which limit applies.
 """
 
 
@@ -314,13 +354,24 @@ def kind_for(filename: str | None) -> MediaKind:
 
 
 def verdict_for(
-    filename: str, size: int | None = None, *, max_bytes: int = DEFAULT_MAX_VIEW_BYTES
+    filename: str,
+    size: int | None = None,
+    *,
+    max_bytes: int = DEFAULT_MAX_VIEW_BYTES,
+    max_stream_bytes: int = 0,
 ) -> MediaVerdict:
     """Return what may be done with a file called *filename*.
 
     The suffix decides the type; *size* only decides whether the answer is used.
     A known type that is too large keeps its type and loses its display, so a
     page can say "a PDF, too large to show" rather than "unknown file".
+
+    **Which limit applies follows from how the browser fetches it.** A framed
+    document arrives whole, so *max_bytes* is what keeps a page from hanging on
+    one. Audio and video arrive in ranges, so that reason does not reach them and
+    *max_stream_bytes* — unbounded by default — is theirs instead. Applying one
+    ceiling to both would refuse every recording worth having for a reason that
+    was never about recordings.
 
     An unknown *size* is treated as within the limit. The library records a size
     for everything it stores, so the case does not arise from a stored entry —
@@ -337,13 +388,13 @@ def verdict_for(
             reason=f"nothing here can show a {extension} in a browser",
         )
     content_type, display = known
-    if size is not None and size > max_bytes:
+    limit = max_stream_bytes if display in STREAMED else max_bytes
+    if limit > 0 and size is not None and size > limit:
         return MediaVerdict(
             content_type=content_type,
             display=Display.NONE,
             reason=(
-                f"the file is {format_size(size)}, above the viewer's "
-                f"{format_size(max_bytes)} limit"
+                f"the file is {format_size(size)}, above the viewer's {format_size(limit)} limit"
             ),
         )
     return MediaVerdict(content_type=content_type, display=display)

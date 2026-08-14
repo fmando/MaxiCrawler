@@ -34,6 +34,7 @@ from maxicrawler.app import (
     LibraryFacet,
     LibraryItem,
     LibraryPage,
+    LibraryPlace,
     LibraryQuery,
     LibrarySort,
     LinkItem,
@@ -754,7 +755,11 @@ def library_view(
 
 
 def item_view(
-    item: LibraryItem, payload: StoredPayload | None, *, back: str = "/library"
+    item: LibraryItem,
+    payload: StoredPayload | None,
+    *,
+    back: str = "/library",
+    place: LibraryPlace | None = None,
 ) -> dict[str, Any]:
     """Return what one stored file's page shows.
 
@@ -762,9 +767,16 @@ def item_view(
     different situations that the page has to tell apart: a download that failed
     and never wrote a file, and a record claiming a file that has since been
     deleted or moved. The first is a reason; the second is a repair.
+
+    *place* turns the page from *a file* into *the twelfth of forty*. Given one,
+    the page grows a position, a link either way, and buttons that move on when
+    they are pressed; without one it is what it has always been. The page is the
+    same page either way, which is what keeps a bookmarked file and a file being
+    worked through from becoming two designs.
     """
     base = f"/library/{item.directory}/{item.key}"
     return {
+        "walk": _walk_view(place, back),
         "name": item.name,
         "provider": item.provider,
         "directory": item.directory,
@@ -811,11 +823,55 @@ def item_view(
         "payload_missing": (
             payload is None and item.is_stored and item.verdict is not ReviewVerdict.DISCARDED
         ),
-        # Judging from here lands back *here*, not in the listing: somebody
-        # standing on one file is looking at it, and being thrown back to a
-        # table would be the interface deciding they were finished. The listing
-        # they came from rides along so the breadcrumb still knows the way.
-        **_review_of(item, base, _here(base, back)),
+        # Judging from here lands back *here* when the page was opened on its
+        # own: somebody standing on one file is looking at it, and being thrown
+        # back to a table would be the interface deciding they were finished.
+        # Reached from a listing, a decision moves on to the next file in it
+        # instead — which is the same rule read from the other side, because
+        # there the next file is what they are standing in front of.
+        **_review_of(
+            item,
+            base,
+            item_url(item.directory, item.key, back),
+            walk=None if place is None else back,
+        ),
+    }
+
+
+def item_url(directory: str, key: str, back: str) -> str:
+    """Return one file's page, carrying the listing it is being walked from.
+
+    The ``back`` is what makes it a walk rather than a visit: a page that was
+    reached from a listing knows which one, and therefore knows what comes next.
+    Always written, including for the unfiltered library — the parameter used to
+    be dropped there to keep the URL short, and it stopped being decoration the
+    moment something read it.
+    """
+    return f"/library/{directory}/{key}?{urlencode({'back': back})}"
+
+
+def _walk_view(place: LibraryPlace | None, back: str) -> dict[str, Any] | None:
+    """Return the header that says where in a listing this file stands.
+
+    ``None`` when there is no listing being walked, which the template reads as
+    *show none of this*. The neighbours carry the same ``back``, so moving on
+    keeps the walk rather than ending it on the second file.
+    """
+    if place is None:
+        return None
+    previous = place.previous
+    following = place.following
+    return {
+        "position": format_number(place.position),
+        "total": format_number(place.total),
+        "previous_url": None
+        if previous is None
+        else item_url(previous.directory, previous.key, back),
+        "previous_name": None if previous is None else previous.name,
+        "next_url": None
+        if following is None
+        else item_url(following.directory, following.key, back),
+        "next_name": None if following is None else following.name,
     }
 
 
@@ -1185,12 +1241,16 @@ def _library_row(
         "state_tone": _entry_tone(item),
         "kind": str(item.kind),
         "kind_word": KIND_WORDS[item.kind],
-        "url": base,
+        # Carrying the listing, which is what makes opening a tile the start of
+        # a walk through it rather than a visit to one file.
+        "url": item_url(item.directory, item.key, back),
         **_review_of(item, base, back),
     }
 
 
-def _review_of(item: LibraryItem, base: str, back: str) -> dict[str, Any]:
+def _review_of(
+    item: LibraryItem, base: str, back: str, *, walk: str | None = None
+) -> dict[str, Any]:
     """Return what a row says and offers about the judgement passed on it.
 
     The same keys on a tile, on a table row and on the file's own page, because
@@ -1218,7 +1278,7 @@ def _review_of(item: LibraryItem, base: str, back: str) -> dict[str, Any]:
         "favourite_mark": FAVOURITE_MARK if item.favourite else UNFAVOURITE_MARK,
         "favourite_value": "0" if item.favourite else "1",
         "entry_token": f"{item.directory}/{item.key}",
-        "review_action": _review_action(f"{base}/review", back),
+        "review_action": _review_action(f"{base}/review", back, walk=walk),
         # Carried on the row rather than beside it, so the partial that renders
         # the buttons reads the same name whether it is inside a tile, a table
         # row or one file's own page.
@@ -1226,17 +1286,7 @@ def _review_of(item: LibraryItem, base: str, back: str) -> dict[str, Any]:
     }
 
 
-def _here(base: str, back: str) -> str:
-    """Return this file's own page, carrying where the listing was.
-
-    Written out rather than taken from the request, because this module never
-    sees one — which is what lets every link on the page be tested without a
-    server.
-    """
-    return base if back == "/library" else f"{base}?{urlencode({'back': back})}"
-
-
-def _review_action(path: str, back: str) -> str:
+def _review_action(path: str, back: str, *, walk: str | None = None) -> str:
     """Return where a judgement is posted, carrying where to land afterwards.
 
     On the action rather than in a hidden field, which is the arrangement
@@ -1244,8 +1294,16 @@ def _review_action(path: str, back: str) -> str:
     file's own page, and each of those is a different place to come back to.
     :func:`~maxicrawler.api.routes._our_path` is what makes the parameter safe
     to obey.
+
+    *walk* names the listing being worked through, and its presence is what
+    makes a decision move on to the next file of it. Its own parameter rather
+    than a flag on ``back``, because the two say different things: ``back`` is
+    where a press that does *not* move on should land — the file itself, as it
+    has been since these buttons existed — and this is the set the next file
+    comes out of. A file opened on its own has the first and not the second.
     """
-    return f"{path}?{urlencode({'back': back})}"
+    asked = {"back": back} if walk is None else {"back": back, "walk": walk}
+    return f"{path}?{urlencode(asked)}"
 
 
 def _entry_label(item: LibraryItem) -> str:
@@ -2050,6 +2108,14 @@ def settings_view(settings: Settings) -> tuple[dict[str, Any], ...]:
                     "max_view_bytes",
                     format_bytes(settings.max_view_bytes),
                     "Largest stored file the browser is offered inline.",
+                ),
+                _setting(
+                    "max_stream_bytes",
+                    "no limit"
+                    if settings.max_stream_bytes <= 0
+                    else format_size(settings.max_stream_bytes),
+                    "Largest recording the browser is offered to play. Its own "
+                    "limit because audio and video arrive in pieces.",
                 ),
                 _setting(
                     "preview_inline_bytes",

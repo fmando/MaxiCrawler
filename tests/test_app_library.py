@@ -1275,6 +1275,87 @@ def test_nothing_is_served_from_an_entry_whose_file_was_discarded(tmp_path: Path
     assert service.payload("mega", key) is None
 
 
+# --- where one file stands in a listing ---------------------------------------
+
+
+def test_a_place_says_which_of_how_many(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    write(library, "AaBbCcDd", name="a.pdf")
+    middle = write(library, "EeFfGgHh", name="b.pdf")
+    write(library, "IiJjKkLl", name="c.pdf")
+
+    place = service.locate("mega", middle, LibraryQuery(sort=LibrarySort.NAME, descending=False))
+
+    assert place is not None
+    assert place.position == 2
+    assert place.total == 3
+    assert place.previous is not None and place.previous.name == "a.pdf"
+    assert place.following is not None and place.following.name == "c.pdf"
+
+
+def test_a_walk_has_two_ends(tmp_path: Path) -> None:
+    """Not wrapped around: a walk that starts again cannot be finished."""
+    service, library = make_service(tmp_path)
+    first = write(library, "AaBbCcDd", name="a.pdf")
+    last = write(library, "EeFfGgHh", name="b.pdf")
+    ascending = LibraryQuery(sort=LibrarySort.NAME, descending=False)
+
+    beginning = service.locate("mega", first, ascending)
+    end = service.locate("mega", last, ascending)
+
+    assert beginning is not None and beginning.previous is None
+    assert end is not None and end.following is None
+
+
+def test_the_neighbours_are_the_ones_of_that_filter(tmp_path: Path) -> None:
+    """Walking a filter of forty is the job; walking nine thousand is not."""
+    service, library = make_service(tmp_path)
+    write(library, "AaBbCcDd", name="a.pdf", filename="a.pdf")
+    middle = write(library, "EeFfGgHh", name="b.png", filename="b.png")
+    write(library, "IiJjKkLl", name="c.png", filename="c.png")
+
+    place = service.locate(
+        "mega",
+        middle,
+        LibraryQuery(kind=MediaKind.IMAGE, sort=LibrarySort.NAME, descending=False),
+    )
+
+    assert place is not None
+    assert place.total == 2
+    assert place.previous is None
+    assert place.following is not None and place.following.name == "c.png"
+
+
+def test_a_walk_does_not_stop_at_a_page_boundary(tmp_path: Path) -> None:
+    """Somebody moving from one file to the next is walking the whole result."""
+    service, library = make_service(tmp_path)
+    keys = [write(library, handle, name=f"{handle}.pdf") for handle in ("AaBb", "CcDd", "EeFf")]
+
+    place = service.locate(
+        "mega", keys[0], LibraryQuery(per_page=1, sort=LibrarySort.NAME, descending=False)
+    )
+
+    assert place is not None
+    assert place.total == 3
+    assert place.following is not None
+
+
+def test_a_file_outside_the_listing_has_no_place_in_it(tmp_path: Path) -> None:
+    """Opening something discarded from a listing that hides the discarded."""
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd")
+    service.discard("mega", key)
+
+    assert service.locate("mega", key) is None
+    assert service.locate("mega", key, LibraryQuery(verdict=ReviewVerdict.DISCARDED)) is not None
+
+
+def test_locating_something_that_is_not_there_is_not_a_place(tmp_path: Path) -> None:
+    service, _ = make_service(tmp_path)
+
+    assert service.locate("mega", "nothing") is None
+
+
 # --- what a report is told not to offer again ---------------------------------
 
 

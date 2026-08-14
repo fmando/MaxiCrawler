@@ -99,6 +99,62 @@ def test_a_size_nobody_measured_is_shown() -> None:
     assert verdict_for("notes.txt").can_display is True
 
 
+# --- the two types a browser fetches in pieces --------------------------------
+
+
+@pytest.mark.parametrize(
+    ("filename", "content_type", "display"),
+    [
+        ("clip.mp4", "video/mp4", Display.VIDEO),
+        ("clip.M4V", "video/mp4", Display.VIDEO),
+        ("clip.webm", "video/webm", Display.VIDEO),
+        ("clip.mov", "video/quicktime", Display.VIDEO),
+        ("song.mp3", "audio/mpeg", Display.AUDIO),
+        ("song.flac", "audio/flac", Display.AUDIO),
+        ("song.opus", "audio/ogg", Display.AUDIO),
+        ("song.wav", "audio/wav", Display.AUDIO),
+    ],
+)
+def test_what_a_browser_is_asked_to_play(
+    filename: str, content_type: str, display: Display
+) -> None:
+    verdict = verdict_for(filename, size=10)
+
+    assert verdict.content_type == content_type
+    assert verdict.display is display
+    assert verdict.can_display is True
+
+
+@pytest.mark.parametrize("filename", ["clip.mkv", "clip.avi", "clip.wmv", "song.wma", "song.mid"])
+def test_a_container_no_browser_plays_is_a_download(filename: str) -> None:
+    """A player showing a black rectangle is worse than a download link."""
+    assert verdict_for(filename, size=10).display is Display.NONE
+
+
+def test_a_recording_is_not_bounded_by_the_ceiling_for_documents() -> None:
+    """It arrives in ranges, so the reason that ceiling exists does not reach it."""
+    verdict = verdict_for("clip.mp4", size=DEFAULT_MAX_VIEW_BYTES * 100)
+
+    assert verdict.display is Display.VIDEO
+    assert verdict.can_display is True
+
+
+def test_a_recording_has_a_ceiling_of_its_own_when_one_is_set() -> None:
+    assert verdict_for("clip.mp4", size=100, max_stream_bytes=99).can_display is False
+    assert verdict_for("clip.mp4", size=100, max_stream_bytes=100).can_display is True
+
+
+def test_the_streaming_ceiling_does_not_reach_a_document() -> None:
+    """Two limits, two reasons; neither is allowed to answer for the other."""
+    assert verdict_for("notes.txt", size=1_000_000, max_stream_bytes=1).can_display is True
+    assert verdict_for("Jump.pdf", size=1_000_000, max_stream_bytes=1).can_display is True
+
+
+def test_nothing_that_streams_can_execute_script_in_our_origin() -> None:
+    assert verdict_for("clip.mp4", size=1).is_script_capable is False
+    assert verdict_for("song.mp3", size=1).is_script_capable is False
+
+
 # --- the two types that are executable code -----------------------------------
 
 

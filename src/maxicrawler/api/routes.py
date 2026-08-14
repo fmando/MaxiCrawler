@@ -10,11 +10,11 @@ them later. Downloads joined them in Sprint 15, when there was finally a queue
 to put on such a page.
 """
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
@@ -721,7 +721,7 @@ async def library(request: Request) -> Response:
     """
     service = library_of(request)
     layout = views.LibraryLayout.parse(request.query_params.get("view"))
-    listing = service.browse(_query(request, layout))
+    listing = service.browse(_query(request.query_params, layout))
     return page(
         request,
         "library.html",
@@ -746,7 +746,21 @@ async def review_item(request: Request) -> Response:
     a ``back`` it lands on the file's own page, which is where somebody judging
     a single file is standing.
 
-    One of the four deletes the file, and it does so without asking. That is a
+    **Unless the form named a listing**, in which case a decision moves on to the
+    next file of it. That is the whole of what makes sorting through three
+    hundred files one action repeated instead of three hundred round trips, and
+    it needs no script: the server knows the listing, knows the position, and
+    answers with the successor.
+
+    The successor is worked out **before** anything is written, which is not a
+    detail. The listing being walked is usually *the unreviewed*, so the write
+    removes the very row the position was counted from; asking afterwards would
+    hand back the file after the next one, and every judgement would skip one.
+
+    Taking a judgement back does not move on, and neither does the star. A
+    correction belongs on the file it corrects, and a note is not a decision.
+
+    One of the buttons deletes the file, and it does so without asking. That is a
     decision rather than an omission: the confirmation this interface has is on
     the *batch*, where somebody is acting on rows they cannot all see. Here they
     are standing on one file, looking at it, and a dialog on every single
@@ -764,6 +778,7 @@ async def review_item(request: Request) -> Response:
     key = request.path_params["key"]
     shelf = library_of(request)
     verdict = parse_verdict(form.get("verdict"))
+    onward = _onward(request, shelf, provider, key, verdict)
     if verdict is ReviewVerdict.DISCARDED:
         item = shelf.discard(provider, key)
         # Two questions, because the service answers "no such entry" and "would
@@ -776,7 +791,72 @@ async def review_item(request: Request) -> Response:
         item = shelf.review(provider, key, verdict=verdict, favourite=_flag(form.get("favourite")))
     if item is None:
         raise HTTPException(status_code=404, detail="no such stored file")
-    return RedirectResponse(url=_back_to(request, f"/library/{provider}/{key}"), status_code=303)
+    return RedirectResponse(url=onward, status_code=303)
+
+
+ADVANCING = frozenset({ReviewVerdict.KEPT, ReviewVerdict.IGNORED, ReviewVerdict.DISCARDED})
+"""The three words that finish with a file and move on to the next one.
+
+*Unreviewed* is missing because it is a correction, and a correction that threw
+you forward would be one you could not check. The star is missing because it is
+not a verdict at all: starring something and then deciding about it is two
+statements about one file, and the first must not carry you off the file.
+"""
+
+
+def _onward(
+    request: Request,
+    shelf: LibraryService,
+    provider: str,
+    key: str,
+    verdict: ReviewVerdict | None,
+) -> str:
+    """Return where to land after judging this file, worked out beforehand.
+
+    Called before the write, and that is its whole reason for being a function
+    of its own — see :func:`review_item`.
+
+    The listing rides in a parameter of its own rather than in ``back``, because
+    the two answer different questions: ``back`` is where a press that does not
+    move on should land — the file itself, as it has been since these buttons
+    existed — and ``walk`` is the set the next file comes out of.
+
+    The end of a walk lands where ``back`` points rather than nowhere, which is
+    also what says the walk is over.
+    """
+    here = f"/library/{provider}/{key}"
+    asked = _our_path(request.query_params.get("walk", ""), "")
+    walking = _listing(asked)
+    if walking is None or verdict not in ADVANCING:
+        return _back_to(request, here)
+    place = shelf.locate(provider, key, _query(walking[0], walking[1]))
+    if place is None or place.following is None:
+        return _back_to(request, here)
+    return views.item_url(place.following.directory, place.following.key, asked)
+
+
+def _listing(asked: str) -> tuple[Mapping[str, str], views.LibraryLayout] | None:
+    """Return the library listing *asked* names, when it names one of ours.
+
+    A file's page is two things depending on how it was reached: one file, or
+    the twelfth of forty somebody is working through. What tells them apart is
+    whether a listing of ours was named on the way in, and the name arrives as
+    an ordinary path parameter — checked by :func:`_our_path` like every other
+    one, and required to be ``/library`` itself rather than merely ours.
+
+    ``None`` for a page opened on its own: a bookmark, a link in a chat, the
+    address bar. There is no walk to show and no next file to be thrown to, and
+    inventing one out of the whole library would be answering a question nobody
+    asked.
+    """
+    named = _our_path(asked, "")
+    if not named:
+        return None
+    parts = urlsplit(named)
+    if parts.path != "/library":
+        return None
+    values = {name: found[-1] for name, found in parse_qs(parts.query).items()}
+    return values, views.LibraryLayout.parse(values.get("view"))
 
 
 async def review_selection(request: Request) -> Response:
@@ -904,13 +984,22 @@ async def library_item(request: Request) -> Response:
     if item is None:
         raise HTTPException(status_code=404, detail="no such file")
     payload = service.payload(item.directory, item.key)
+    # Where this file stands in the listing it was opened from, and nothing at
+    # all when it was not opened from one. The page reads the same either way;
+    # what a walk adds is a position, two neighbours and buttons that move on.
+    walking = _listing(request.query_params.get("back", ""))
+    place = (
+        None
+        if walking is None
+        else service.locate(item.directory, item.key, _query(walking[0], walking[1]))
+    )
     return page(
         request,
         "library_item.html",
         # Where "back to the library" goes, and where a judgement passed here
         # lands: the listing somebody came from, filters and all, when the link
         # that led here said so.
-        {"item": views.item_view(item, payload, back=_back_to(request, "/library"))},
+        {"item": views.item_view(item, payload, back=_back_to(request, "/library"), place=place)},
         section="library",
     )
 
@@ -1005,14 +1094,19 @@ def _payload(request: Request) -> StoredPayload:
     return payload
 
 
-def _query(request: Request, layout: views.LibraryLayout) -> LibraryQuery:
-    """Return the library query this request asks for.
+def _query(values: Mapping[str, str], layout: views.LibraryLayout) -> LibraryQuery:
+    """Return the library query *values* asks for.
 
     The layout decides only how many entries one page holds. Everything else
     about the query is the same either way, which is what makes switching
     between the two a link rather than a different listing.
+
+    Reads a plain mapping rather than the request, because the same parameters
+    arrive two ways: in the query string of a listing, and inside the parameter
+    naming the listing a file is being walked from. One parser for both is what
+    keeps *the listing you are looking at* and *the listing you are walking* the
+    same set.
     """
-    values = request.query_params
     return LibraryQuery(
         search=values.get("q", "").strip(),
         provider=values.get("provider") or None,

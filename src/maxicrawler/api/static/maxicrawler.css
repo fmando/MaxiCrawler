@@ -804,25 +804,75 @@ footer {
  * the content is inside a sandboxed frame of its own origin, so nothing here
  * can measure it, and a frame that guessed would jump on every load.
  */
-.viewer {
-  margin-top: 16px;
+/* --- one file, and somewhere to work through a listing of them ----------- */
+
+/*
+ * Two columns, and the proportions are the argument: the question being
+ * answered on this page is "do I want this?", which is answered by looking at
+ * the thing rather than by reading its checksum. So the file takes the room and
+ * the facts take a column beside it.
+ *
+ * One column below 900px, file first. A narrow window is a window where the
+ * facts are a scroll away rather than a layout to preserve.
+ */
+.workplace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 16px;
+  padding: 16px;
+}
+@media (max-width: 900px) {
+  .workplace { grid-template-columns: minmax(0, 1fr); }
+}
+
+.stage {
+  min-width: 0;
   background: var(--bg);
   border: 1px solid var(--border-strong);
+  padding: 12px;
 }
-.viewer iframe {
+/*
+ * `70vh` rather than a fixed height: what makes a picture worth judging at a
+ * glance is that it fills the screen it is on, and the screens this runs on
+ * differ by a factor of three.
+ */
+.stage .shown {
   display: block;
+  max-width: 100%;
+  max-height: 70vh;
+  margin: 0 auto;
+  border: 0;
+}
+.stage iframe.shown {
   width: 100%;
   height: 70vh;
   min-height: 320px;
-  border: 0;
   background: #fff;
 }
-.viewer img {
-  display: block;
-  max-width: 100%;
-  height: auto;
-  margin: 0 auto;
+.stage video.shown { width: 100%; background: #000; }
+.stage audio.shown { width: 100%; max-height: none; }
+
+.facts { min-width: 0; }
+.facts .review-bar { padding: 0 0 10px; }
+.facts .grid td { padding: 5px 8px; }
+.facts .url { word-break: break-all; }
+
+/*
+ * Where in the listing this file stands. Both ends are always named; at the
+ * first and last file the link is simply not a link, so the bar does not change
+ * width as somebody walks through it.
+ */
+.walk {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
 }
+.walk-step { text-decoration: none; }
+.walk-count { color: var(--muted); font-variant-numeric: tabular-nums; }
+.walk .aside { margin-left: auto; }
 
 /*
  * One line about the transfer that is running, on the pages you would be on

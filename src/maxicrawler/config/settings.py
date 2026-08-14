@@ -43,6 +43,23 @@ class Settings:
     nothing about what may be stored.
     """
 
+    max_stream_bytes: int = 0
+    """Largest audio or video file the interface will play, or 0 for no limit.
+
+    Its own bound rather than :attr:`max_view_bytes`, because the two limits
+    exist for opposite reasons. That one is about a browser being handed a whole
+    file at once: a 400 MB text document has to arrive and be laid out before
+    anything appears. An ``<audio>`` or ``<video>`` element does not work that
+    way — it asks for the ranges it needs, plays from the first of them, and
+    never holds the file. A two-gigabyte recording therefore starts as quickly as
+    a two-megabyte one, and refusing it would be applying a rule whose reason
+    does not reach it.
+
+    Unbounded by default for the same reason, and configurable anyway: what a
+    person is really bounding here is a network they share, not a browser they
+    might hang.
+    """
+
     preview_inline_bytes: int = 1_000_000
     """Largest image a tile shows as itself, in bytes.
 
@@ -228,6 +245,9 @@ class Settings:
         if self.max_view_bytes < 1:
             msg = "max_view_bytes must be at least 1"
             raise ValueError(msg)
+        if self.max_stream_bytes < 0:
+            msg = "max_stream_bytes must not be negative"
+            raise ValueError(msg)
         if self.preview_inline_bytes < 0:
             msg = "preview_inline_bytes must not be negative"
             raise ValueError(msg)
@@ -278,6 +298,7 @@ class Settings:
             max_redirects=_int_value(app_config, "max_redirects", defaults.max_redirects),
             max_links=_int_value(app_config, "max_links", defaults.max_links),
             max_view_bytes=_int_value(app_config, "max_view_bytes", defaults.max_view_bytes),
+            max_stream_bytes=_int_value(app_config, "max_stream_bytes", defaults.max_stream_bytes),
             preview_inline_bytes=_int_value(
                 app_config, "preview_inline_bytes", defaults.preview_inline_bytes
             ),

@@ -40,6 +40,7 @@ def client(
     *,
     provider: StubProvider | None = None,
     max_view_bytes: int | None = None,
+    max_stream_bytes: int | None = None,
     preview_inline_bytes: int | None = None,
 ) -> Iterator[TestClient]:
     """Yield a client over an application with a throwaway database and library.
@@ -59,6 +60,7 @@ def client(
         # and what is being tested is the page rather than the floor.
         min_download_size=0,
         **({} if max_view_bytes is None else {"max_view_bytes": max_view_bytes}),
+        **({} if max_stream_bytes is None else {"max_stream_bytes": max_stream_bytes}),
         **({} if preview_inline_bytes is None else {"preview_inline_bytes": preview_inline_bytes}),
     )
     service = CrawlService(settings)
@@ -439,7 +441,8 @@ def test_a_row_links_to_the_file_it_describes(tmp_path: Path) -> None:
         finished_download(test_client)
         body = test_client.get("/library").text
 
-    assert re.search(r'href="/library/mega/[a-z0-9-]+"', body)
+    # Carrying the listing it was opened from, which is what makes it a walk.
+    assert re.search(r'href="/library/mega/[a-z0-9-]+\?back=', body)
 
 
 def test_the_library_lists_what_was_downloaded(tmp_path: Path) -> None:
@@ -2154,6 +2157,8 @@ def store(tmp_path: Path, filename: str, payload: bytes = b"hello") -> str:
         ("photo.png", "image/png", "<img"),
         ("drawing.svg", "image/svg+xml", "<img"),
         ("page.html", "text/html; charset=utf-8", "<iframe"),
+        ("clip.mp4", "video/mp4", "<video"),
+        ("song.mp3", "audio/mpeg", "<audio"),
     ],
 )
 def test_a_file_the_browser_can_show_is_shown(
@@ -2165,10 +2170,49 @@ def test_a_file_the_browser_can_show_is_shown(
         body = test_client.get(where).text
         response = test_client.get(f"{where}/view")
 
-    assert f'{element} src="{where}/view"' in body
+    assert f'{element} class="shown" src="{where}/view"' in body
     assert response.status_code == 200
     assert response.headers["content-type"] == content_type
     assert "inline" in response.headers["content-disposition"]
+
+
+def test_a_recording_can_be_asked_for_in_pieces(tmp_path: Path) -> None:
+    """What makes a two-gigabyte video start playing at once.
+
+    Checked rather than assumed: a player that could not seek would have to
+    fetch the whole file to reach the middle of it, and then the ceiling this
+    release lifts for recordings would have been the right ceiling after all.
+    """
+    where = store(tmp_path, "clip.mp4", b"0123456789")
+
+    with client(tmp_path) as test_client:
+        response = test_client.get(f"{where}/view", headers={"Range": "bytes=4-6"})
+
+    assert response.status_code == 206
+    assert response.headers["content-range"] == "bytes 4-6/10"
+    assert response.content == b"456"
+
+
+def test_a_recording_is_not_turned_away_for_being_large(tmp_path: Path) -> None:
+    """The document ceiling does not reach it; nothing else is in its way."""
+    where = store(tmp_path, "clip.mp4", b"0" * 1024)
+
+    with client(tmp_path, max_view_bytes=10) as test_client:
+        body = test_client.get(where).text
+
+        assert f'<video class="shown" src="{where}/view"' in body
+        assert test_client.get(f"{where}/view").status_code == 200
+
+
+def test_a_recording_over_its_own_ceiling_is_offered_as_a_download(tmp_path: Path) -> None:
+    where = store(tmp_path, "clip.mp4", b"0" * 1024)
+
+    with client(tmp_path, max_stream_bytes=10) as test_client:
+        body = test_client.get(where).text
+
+        assert "<video" not in body
+        # Escaped in the page, so the assertion stops before the apostrophe.
+        assert "above the viewer" in body
 
 
 @pytest.mark.parametrize("filename", ["page.html", "drawing.svg"])
@@ -2240,7 +2284,7 @@ def test_an_svg_is_never_framed(tmp_path: Path) -> None:
     with client(tmp_path) as test_client:
         body = test_client.get(where).text
 
-    assert f'<img src="{where}/view"' in body
+    assert f'<img class="shown" src="{where}/view"' in body
     assert "<iframe" not in body
 
 

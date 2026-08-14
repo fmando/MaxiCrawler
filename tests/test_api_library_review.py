@@ -6,10 +6,13 @@ a judgement lands afterwards, and what a page refuses to obey.
 """
 
 import json
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from html import unescape
 from pathlib import Path
+from urllib.parse import quote
 
 from starlette.testclient import TestClient
 
@@ -363,6 +366,151 @@ def test_the_undo_button_says_the_file_does_not_come_back(tmp_path: Path) -> Non
         body = test_client.get("/library?verdict=discarded").text
 
         assert "the deleted file does not come back" in body
+
+
+# --- working through a listing ------------------------------------------------
+
+
+def walking(key: str, listing: str = "/library?sort=name&dir=asc") -> str:
+    """Return one file's page as a tile in *listing* links to it."""
+    return f"/library/mega/{key}?back={quote(listing, safe='')}"
+
+
+def review_action(body: str) -> str:
+    """Return where the buttons on a file's page actually post.
+
+    Read off the page rather than written out here, because half of what these
+    tests are about is that the page carries the walk in the first place.
+    """
+    found = re.search(r'<form class="verdicts" method="post" action="([^"]+)"', body)
+    assert found is not None, "the page offers no way to judge this file"
+    return unescape(found.group(1))
+
+
+def test_a_file_reached_from_a_listing_says_where_it_stands(tmp_path: Path) -> None:
+    with client(tmp_path) as (test_client, _, library):
+        store(library, "AaBbCcDd", name="a.pdf")
+        second = store(library, "EeFfGgHh", name="b.pdf")
+        store(library, "IiJjKkLl", name="c.pdf")
+
+        body = test_client.get(walking(second)).text
+
+        assert "2 of 3" in body
+        assert "← previous" in body
+        assert "next →" in body
+
+
+def test_a_file_opened_on_its_own_is_just_a_file(tmp_path: Path) -> None:
+    """No listing was named, so there is no walk and nothing to invent one from."""
+    with client(tmp_path) as (test_client, _, library):
+        key = store(library, "AaBbCcDd", name="a.pdf")
+        store(library, "EeFfGgHh", name="b.pdf")
+
+        body = test_client.get(f"/library/mega/{key}").text
+
+        assert "of 2" not in body
+        assert "advance=1" not in body
+
+
+def test_the_neighbours_carry_the_listing_on(tmp_path: Path) -> None:
+    """Otherwise the walk would end on the second file."""
+    with client(tmp_path) as (test_client, _, library):
+        first = store(library, "AaBbCcDd", name="a.pdf")
+        store(library, "EeFfGgHh", name="b.pdf")
+
+        body = test_client.get(walking(first)).text
+
+        assert "back=%2Flibrary%3Fsort%3Dname%26dir%3Dasc" in body
+
+
+def test_judging_a_file_being_walked_moves_on_to_the_next(tmp_path: Path) -> None:
+    with client(tmp_path) as (test_client, _, library):
+        first = store(library, "AaBbCcDd", name="a.pdf")
+        second = store(library, "EeFfGgHh", name="b.pdf")
+        action = review_action(test_client.get(walking(first)).text)
+
+        response = test_client.post(action, data={"verdict": "kept"}, follow_redirects=False)
+
+        assert response.headers["location"].startswith(f"/library/mega/{second}?back=")
+
+
+def test_the_next_file_is_the_one_from_before_the_judgement(tmp_path: Path) -> None:
+    """The listing being walked is usually the unreviewed, so the write empties
+    the row the position was counted from. Asked afterwards, every judgement
+    would hand back the file after the next one and skip one each time.
+    """
+    with client(tmp_path) as (test_client, _, library):
+        first = store(library, "AaBbCcDd", name="a.pdf")
+        second = store(library, "EeFfGgHh", name="b.pdf")
+        store(library, "IiJjKkLl", name="c.pdf")
+        listing = "/library?verdict=unreviewed&sort=name&dir=asc"
+        action = review_action(test_client.get(walking(first, listing)).text)
+
+        response = test_client.post(action, data={"verdict": "kept"}, follow_redirects=False)
+
+        assert response.headers["location"].startswith(f"/library/mega/{second}?back=")
+
+
+def test_the_last_file_of_a_walk_lands_back_in_the_listing(tmp_path: Path) -> None:
+    with client(tmp_path) as (test_client, _, library):
+        store(library, "AaBbCcDd", name="a.pdf")
+        last = store(library, "EeFfGgHh", name="b.pdf")
+        action = review_action(test_client.get(walking(last)).text)
+
+        response = test_client.post(action, data={"verdict": "kept"}, follow_redirects=False)
+
+        assert (
+            response.headers["location"]
+            == f"/library/mega/{last}?back=%2Flibrary%3Fsort%3Dname%26dir%3Dasc"
+        )
+
+
+def test_taking_a_judgement_back_stays_on_the_file_it_corrects(tmp_path: Path) -> None:
+    with client(tmp_path) as (test_client, service, library):
+        first = store(library, "AaBbCcDd", name="a.pdf")
+        store(library, "EeFfGgHh", name="b.pdf")
+        service.review("mega", first, verdict=ReviewVerdict.KEPT)
+        action = review_action(test_client.get(walking(first)).text)
+
+        response = test_client.post(action, data={"verdict": "unreviewed"}, follow_redirects=False)
+
+        assert response.headers["location"].startswith(f"/library/mega/{first}?back=")
+
+
+def test_the_star_does_not_carry_anybody_off_the_file(tmp_path: Path) -> None:
+    """Starring something and then deciding about it is two statements."""
+    with client(tmp_path) as (test_client, _, library):
+        first = store(library, "AaBbCcDd", name="a.pdf")
+        store(library, "EeFfGgHh", name="b.pdf")
+        action = review_action(test_client.get(walking(first)).text)
+
+        response = test_client.post(action, data={"favourite": "1"}, follow_redirects=False)
+
+        assert response.headers["location"].startswith(f"/library/mega/{first}?back=")
+
+
+def test_somewhere_that_is_not_a_listing_is_no_walk_at_all(tmp_path: Path) -> None:
+    """A `back` naming another page of ours is still not a set to walk."""
+    with client(tmp_path) as (test_client, _, library):
+        key = store(library, "AaBbCcDd", name="a.pdf")
+        store(library, "EeFfGgHh", name="b.pdf")
+
+        body = test_client.get(f"/library/mega/{key}?back=%2Fdownloads").text
+
+        assert "of 2" not in body
+
+
+def test_the_keyboard_script_is_asked_for_and_served(tmp_path: Path) -> None:
+    with client(tmp_path) as (test_client, _, library):
+        key = store(library, "AaBbCcDd", name="a.pdf")
+
+        assert '<script src="/static/viewer.js" defer></script>' in (
+            test_client.get(f"/library/mega/{key}").text
+        )
+        served = test_client.get("/static/viewer.js")
+        assert served.status_code == 200
+        # It presses controls the page already carries, and nothing else.
+        assert 'value="kept"' in served.text
 
 
 # --- discarding a selection ---------------------------------------------------

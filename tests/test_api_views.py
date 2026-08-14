@@ -38,6 +38,7 @@ from maxicrawler.api.views import (
     format_bytes,
     format_duration,
     format_number,
+    item_view,
     library_view,
     link_rows,
     link_view,
@@ -60,6 +61,7 @@ from maxicrawler.app import (
     LibraryFacet,
     LibraryItem,
     LibraryPage,
+    LibraryPlace,
     LibraryQuery,
     LibrarySort,
     LinkFacet,
@@ -1930,7 +1932,7 @@ def test_the_library_table_has_the_columns_it_promises() -> None:
     assert row["downloaded_at"] == "2026-08-09 14:30"
     assert row["path"] == str(Path("library") / "mega" / "abc" / "content" / "Jump.pdf")
     assert row["state_label"] == "completed"
-    assert row["url"] == "/library/mega/abc"
+    assert row["url"] == "/library/mega/abc?back=%2Flibrary"
 
 
 def test_a_failed_row_says_so_and_shows_no_path() -> None:
@@ -2239,6 +2241,56 @@ def test_a_layout_nobody_recognises_is_the_grid() -> None:
     assert LibraryLayout.parse("mosaic") is LibraryLayout.GRID
     assert LibraryLayout.parse(None) is LibraryLayout.GRID
     assert LibraryLayout.parse("list") is LibraryLayout.LIST
+
+
+# --- one file, and the listing it is being walked through ----------------------
+
+
+def test_a_file_page_opened_on_its_own_has_no_walk() -> None:
+    shown = item_view(make_item(), None)
+
+    assert shown["walk"] is None
+    # And judging it stays on it, which is what a page with no listing means.
+    assert "walk=" not in shown["review_action"]
+
+
+def test_a_walk_says_which_of_how_many_and_links_both_ways() -> None:
+    place = LibraryPlace(
+        item=make_item("b.pdf", key="two"),
+        position=2,
+        total=3,
+        previous=make_item("a.pdf", key="one"),
+        following=make_item("c.pdf", key="three"),
+    )
+
+    walk = item_view(make_item("b.pdf", key="two"), None, back="/library?fav=1", place=place)[
+        "walk"
+    ]
+
+    assert walk["position"] == "2"
+    assert walk["total"] == "3"
+    assert walk["previous_url"] == "/library/mega/one?back=%2Flibrary%3Ffav%3D1"
+    assert walk["next_url"] == "/library/mega/three?back=%2Flibrary%3Ffav%3D1"
+    assert walk["next_name"] == "c.pdf"
+
+
+def test_the_ends_of_a_walk_offer_nothing_beyond_them() -> None:
+    place = LibraryPlace(item=make_item(), position=1, total=1)
+
+    walk = item_view(make_item(), None, place=place)["walk"]
+
+    assert walk["previous_url"] is None
+    assert walk["next_url"] is None
+
+
+def test_judging_a_file_being_walked_carries_the_listing_with_it() -> None:
+    """Two parameters, two questions: where to land, and what to walk."""
+    place = LibraryPlace(item=make_item(), position=1, total=2, following=make_item(key="two"))
+
+    action = item_view(make_item(), None, back="/library?fav=1", place=place)["review_action"]
+
+    assert "walk=%2Flibrary%3Ffav%3D1" in action
+    assert "back=%2Flibrary%2Fmega%2Fabc%3Fback%3D" in action
 
 
 # --- before deleting a batch of files ------------------------------------------
