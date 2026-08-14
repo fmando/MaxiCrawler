@@ -33,8 +33,14 @@ PRUNE = SCRIPTS / "prune_small_payloads.py"
 SURVEY = SCRIPTS / "survey_library.py"
 CHECK = SCRIPTS / "check_library.py"
 START_OVER = SCRIPTS / "start_over.py"
+REINDEX = SCRIPTS / "reindex_library.py"
 
-WRITING = {"prune_small_payloads.py", "check_library.py", "start_over.py"}
+WRITING = {
+    "prune_small_payloads.py",
+    "check_library.py",
+    "start_over.py",
+    "reindex_library.py",
+}
 """Scripts that can change the library, and must therefore ask with ``--apply``.
 
 Named rather than detected, so that a script gaining the ability to write is a
@@ -781,6 +787,99 @@ def test_a_busy_database_stops_it(tmp_path: Path) -> None:
     assert "running server" in finished.stdout
     assert library.root.is_dir(), "nothing is renamed while something holds the database"
     assert not list(tmp_path.glob("library.*"))
+
+
+def test_the_index_can_be_thrown_away_and_nothing_is_lost(tmp_path: Path) -> None:
+    """The claim ADR-037 makes, carried out.
+
+    If anything about the library were only in the cache, a listing taken after
+    the rows are dropped would differ from one taken before. It does not, and
+    that is the whole of what a cache means.
+    """
+    config = settings_file(tmp_path)
+    a_mixed_library(tmp_path)
+    before = run(SURVEY, config, "--skip-dimensions")
+
+    rebuilt = run(REINDEX, config, "--apply")
+    assert rebuilt.returncode == 0, rebuilt.stderr
+
+    after = run(SURVEY, config, "--skip-dimensions")
+    assert after.stdout == before.stdout
+
+
+def test_reindexing_leaves_the_rest_of_the_database_alone(tmp_path: Path) -> None:
+    """The reason this drops rows instead of removing a file.
+
+    The crawl history and the URLs discovery has seen live in the same database
+    and can be rebuilt from nothing at all.
+    """
+    config = settings_file(tmp_path)
+    a_mixed_library(tmp_path)
+    run(REINDEX, config)  # so the database exists with its own tables
+
+    planted = sqlite3.connect(tmp_path / "maxicrawler.db")
+    planted.execute("CREATE TABLE IF NOT EXISTS crawl_sessions (id TEXT PRIMARY KEY, seed TEXT)")
+    planted.execute("INSERT INTO crawl_sessions VALUES ('c1', 'https://example.test/')")
+    planted.commit()
+    planted.close()
+
+    finished = run(REINDEX, config, "--apply")
+
+    assert finished.returncode == 0, finished.stderr
+    reading = sqlite3.connect(tmp_path / "maxicrawler.db")
+    try:
+        assert reading.execute("SELECT seed FROM crawl_sessions").fetchall() == [
+            ("https://example.test/",)
+        ]
+    finally:
+        reading.close()
+
+
+def test_a_row_that_lies_is_put_right(tmp_path: Path) -> None:
+    """What the script is actually for.
+
+    An ordinary listing re-reads a document whose timestamp or length changed.
+    A library copied between machines can carry rows whose stamps still match
+    while the contents no longer do, and only dropping them fixes that.
+    """
+    config = settings_file(tmp_path)
+    library = a_mixed_library(tmp_path)
+    run(SURVEY, config, "--skip-dimensions")  # fills the cache
+
+    lying = sqlite3.connect(tmp_path / "maxicrawler.db")
+    try:
+        document = (tmp_path / "library" / "direct").glob("*/metadata.json")
+        record = json.loads(next(document).read_text(encoding="utf-8"))
+        record["name"] = "a name no document on disk has"
+        changed = lying.execute(
+            "UPDATE library_entries SET document = ? WHERE key = ?",
+            (json.dumps(record), record["key"]),
+        )
+        # Without this the test would pass on an UPDATE that matched nothing,
+        # which is to say it would prove the script fixes a fault it was never
+        # shown.
+        assert changed.rowcount == 1
+        lying.commit()
+    finally:
+        lying.close()
+
+    misled = run(SURVEY, config, "--skip-dimensions")
+    assert misled.returncode == 0, misled.stderr
+
+    run(REINDEX, config, "--apply")
+    honest = run(SURVEY, config, "--skip-dimensions")
+
+    assert honest.returncode == 0, honest.stderr
+    assert (library.root / "direct").is_dir()
+    reading = sqlite3.connect(tmp_path / "maxicrawler.db")
+    try:
+        names = [
+            json.loads(row[0])["name"]
+            for row in reading.execute("SELECT document FROM library_entries").fetchall()
+        ]
+    finally:
+        reading.close()
+    assert "a name no document on disk has" not in names
 
 
 def test_an_absent_library_is_nothing_to_do(tmp_path: Path) -> None:

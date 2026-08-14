@@ -60,6 +60,7 @@ over this directory like any other.
 | `survey_library.py` | Describes the whole shelf: how much, of what, how big, and how many pixels the images have. Reports only. |
 | `check_library.py` | Compares every record against the disk and reports where they have come apart. Repairs the two faults that are already decided. |
 | `start_over.py` | Moves the library and its database aside under a timestamp and leaves an empty one in their place. Renames; never deletes. |
+| `reindex_library.py` | Drops the listing cache and reads every document again. For a library that has moved between machines. |
 
 `_shelf.py` is not a script — it holds the four lines each of them needs to find
 a library and read all of it, and the underscore keeps it out of the pass that
@@ -100,6 +101,23 @@ those. It reports them, and `--urls` prints what to queue again.
 
 `--checksums` reads every byte of every file, which is worth doing after a disk
 scare and not worth doing on a Tuesday. It is off by default for that reason.
+
+## The index is only a cache
+
+`reindex_library.py` drops every cached row for the library and lets the next
+listing rebuild it from the documents. That is a claim ADR-037 makes, and this
+is what makes it checkable: if anything about your library were only in the
+cache, it would be gone afterwards. Nothing is — there is a test that takes a
+survey before and after and compares them.
+
+Worth running after moving a library between machines, where recorded
+modification times may no longer match what sits beside them, or after a crash
+left the two disagreeing. Not worth running routinely: an ordinary listing
+already re-reads any document whose timestamp or length has changed.
+
+**It drops rows; it does not remove a database.** The same file holds the crawl
+history and the URLs discovery has seen, and neither of those can be rebuilt
+from anything at all.
 
 ## What the survey is for
 
