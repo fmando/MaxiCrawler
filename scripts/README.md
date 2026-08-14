@@ -25,10 +25,12 @@ has to be installed.
 
 ## Two rules they all keep
 
-**Nothing is written without `--apply`.** Every script's default run prints what
-it *would* do and stops. A pass over a real library is a list worth reading
-before it is a thing worth doing, and the count at the bottom is usually the
-first surprise.
+**Nothing is written without `--apply`**, and a script that cannot write does
+not offer the flag at all. Both halves are tested: a destructive script without
+it would act unasked, and a reporting script that offers it suggests it might do
+something. Where the flag exists, the default run prints what it *would* do and
+stops — a pass over a real library is a list worth reading before it is a thing
+worth doing, and the count at the bottom is usually the first surprise.
 
 **They go through `LibraryService`, not through the filesystem.** Removing a
 file with `rm` leaves the record behind claiming a payload that is not there —
@@ -55,3 +57,24 @@ over this directory like any other.
 | Script | What it does |
 | --- | --- |
 | `prune_small_payloads.py` | Discards stored files below a size, the way the interface would. For the thumbnails and icons collected before `min_download_size` existed (ADR-042). |
+| `survey_library.py` | Describes the whole shelf: how much, of what, how big, and how many pixels the images have. Reports only. |
+
+`_shelf.py` is not a script — it holds the four lines each of them needs to find
+a library and read all of it, and the underscore keeps it out of the pass that
+tests the others.
+
+## What the survey is for
+
+Two settings were given starting values rather than measured ones, and the
+survey is how they stop being guesses.
+
+`preview_inline_bytes` decides whether a tile shows an image or a symbol in its
+place. Whether one megabyte is right depends on what the library actually holds,
+and "shown as themselves / shown as a symbol" says so directly.
+
+Whether **thumbnails** would be worth generating turns on pixels rather than
+bytes: a 300 KB photograph at 6000x4000 becomes a 96 MB bitmap in a browser, and
+sixty of those is not a page. So the survey reads image headers — PNG, GIF and
+JPEG, a few hundred bytes each, no decoding and no dependency — and prints the
+distribution. A library that is mostly web JPEGs under a megapixel does not need
+thumbnails; one full of camera originals cannot do without them.

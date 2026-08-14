@@ -10,11 +10,13 @@ Output is checked for the facts it has to carry, never line by line. A test that
 pins the wording turns every improvement to a message into a red build.
 """
 
+import importlib.util
 import json
 import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -25,6 +27,15 @@ REPOSITORY = Path(__file__).resolve().parent.parent
 SCRIPTS = REPOSITORY / "scripts"
 
 PRUNE = SCRIPTS / "prune_small_payloads.py"
+SURVEY = SCRIPTS / "survey_library.py"
+
+WRITING = {"prune_small_payloads.py"}
+"""Scripts that can change the library, and must therefore ask with ``--apply``.
+
+Named rather than detected, so that a script gaining the ability to write is a
+line changed here by whoever gave it that ability — the test below fails until
+it is, which is the point of keeping the list by hand.
+"""
 
 
 def every_script() -> list[Path]:
@@ -143,19 +154,29 @@ def document_of(library: Library, key: str) -> dict[str, object]:
 
 
 @pytest.mark.parametrize("script", every_script(), ids=lambda path: path.name)
-def test_every_script_takes_the_same_two_arguments(script: Path, tmp_path: Path) -> None:
-    """``--config`` to find the library, ``--apply`` to be allowed to touch it.
-
-    Spelled the same everywhere, so that knowing one of these scripts is most of
-    knowing the next.
-    """
+def test_every_script_is_found_by_the_same_config(script: Path, tmp_path: Path) -> None:
+    """One way to say which library is meant, spelled the same everywhere."""
     config = settings_file(tmp_path)
 
     finished = run(script, config, "--help")
 
     assert finished.returncode == 0, finished.stderr
     assert "--config" in finished.stdout
-    assert "--apply" in finished.stdout
+
+
+@pytest.mark.parametrize("script", every_script(), ids=lambda path: path.name)
+def test_a_script_asks_before_writing_and_only_if_it_can(script: Path, tmp_path: Path) -> None:
+    """Whether ``--apply`` exists says whether the script can change anything.
+
+    Both directions are checked, because both are how somebody gets surprised: a
+    destructive script without the flag would do it unasked, and a reporting
+    script that offers the flag suggests it might.
+    """
+    config = settings_file(tmp_path)
+
+    finished = run(script, config, "--help")
+
+    assert ("--apply" in finished.stdout) is (script.name in WRITING)
 
 
 @pytest.mark.parametrize("script", every_script(), ids=lambda path: path.name)
@@ -279,3 +300,182 @@ def test_a_limit_of_zero_does_nothing(tmp_path: Path) -> None:
 
     assert finished.returncode == 0, finished.stderr
     assert shelf_contents(library) == before
+
+
+# --- surveying what is there --------------------------------------------------
+
+
+def load(script: Path) -> ModuleType:
+    """Import *script* as a module, to reach a function directly."""
+    spec = importlib.util.spec_from_file_location(script.stem, script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def png_header(width: int, height: int) -> bytes:
+    """Return the opening bytes of a PNG of that size.
+
+    A header rather than an image, because a header is all the survey reads. The
+    same goes for the two below.
+    """
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + (13).to_bytes(4, "big")
+        + b"IHDR"
+        + width.to_bytes(4, "big")
+        + height.to_bytes(4, "big")
+        + b"\x08\x06\x00\x00\x00"
+    )
+
+
+def gif_header(width: int, height: int) -> bytes:
+    return b"GIF89a" + width.to_bytes(2, "little") + height.to_bytes(2, "little") + b"\x00" * 8
+
+
+def jpeg_header(width: int, height: int, *, padding: int = 0) -> bytes:
+    """Return a JPEG whose frame header sits behind *padding* bytes of comment.
+
+    The padding stands in for what really precedes it in a photograph — colour
+    profile, EXIF, an embedded preview — and is why the dimensions have to be
+    found by walking the segments rather than at a fixed offset.
+    """
+    comment = b""
+    if padding:
+        comment = b"\xff\xfe" + (padding + 2).to_bytes(2, "big") + b"\x00" * padding
+    frame = (
+        b"\xff\xc0"
+        + (17).to_bytes(2, "big")
+        + b"\x08"
+        + height.to_bytes(2, "big")
+        + width.to_bytes(2, "big")
+        + b"\x03"
+        + b"\x00" * 9
+    )
+    return b"\xff\xd8" + comment + frame
+
+
+@pytest.mark.parametrize(
+    ("name", "header", "expected"),
+    [
+        ("a.png", png_header(1920, 1080), (1920, 1080)),
+        ("a.gif", gif_header(64, 48), (64, 48)),
+        ("a.jpg", jpeg_header(4000, 3000), (4000, 3000)),
+        ("far.jpg", jpeg_header(6000, 4000, padding=20_000), (6000, 4000)),
+        ("empty.png", b"", None),
+        ("not-an-image.bin", b"nothing here", None),
+        # Truncated in the middle of the frame header: no answer, not a guess
+        # and not an exception.
+        ("cut.jpg", jpeg_header(800, 600)[:8], None),
+    ],
+    # Named, because the parameters themselves are twenty kilobytes of header
+    # and pytest puts a generated id into an environment variable.
+    ids=["png", "gif", "jpeg", "jpeg-behind-a-big-header", "empty", "not-an-image", "truncated"],
+)
+def test_dimensions_are_read_from_the_header(
+    name: str, header: bytes, expected: tuple[int, int] | None, tmp_path: Path
+) -> None:
+    survey = load(SURVEY)
+    path = tmp_path / name
+    path.write_bytes(header)
+
+    assert survey.image_size(path) == expected
+
+
+def test_a_format_this_does_not_read_is_reported_rather_than_guessed(tmp_path: Path) -> None:
+    """A WebP is an image with no dimensions here, and says so."""
+    survey = load(SURVEY)
+    path = tmp_path / "a.webp"
+    path.write_bytes(b"RIFF\x00\x00\x00\x00WEBPVP8 " + b"\x00" * 32)
+
+    assert survey.image_size(path) is None
+
+
+def test_the_survey_counts_what_is_on_the_shelf(tmp_path: Path) -> None:
+    config = settings_file(tmp_path)
+    library = Library(tmp_path / "library")
+    write(library, "photo", filename="photo.jpg", size=400_000)
+    write(library, "doc", filename="notes.txt", size=2_000)
+
+    finished = run(SURVEY, config)
+
+    assert finished.returncode == 0, finished.stderr
+    assert "2" in finished.stdout
+    assert "image" in finished.stdout
+    assert "text" in finished.stdout
+
+
+def test_the_survey_measures_the_images_it_finds(tmp_path: Path) -> None:
+    """The number the thumbnail question turns on: pixels, not bytes."""
+    config = settings_file(tmp_path)
+    library = Library(tmp_path / "library")
+    key = write(library, "big", filename="big.png", size=10)
+    (library.root / "direct" / key / "content" / "big.png").write_bytes(png_header(6000, 4000))
+
+    finished = run(SURVEY, config)
+
+    assert finished.returncode == 0, finished.stderr
+    assert "24.0 MP" in finished.stdout
+
+
+def test_dimensions_are_reported_in_pixels_not_in_bytes(tmp_path: Path) -> None:
+    """Two scales, two units.
+
+    The pixel histogram runs over the same code as the byte one, and reading a
+    picture's size as "12.0 MB" when the number counts pixels is a label
+    somebody acts on before noticing it is the wrong quantity.
+    """
+    config = settings_file(tmp_path)
+    library = Library(tmp_path / "library")
+    key = write(library, "big", filename="big.png", size=10)
+    (library.root / "direct" / key / "content" / "big.png").write_bytes(png_header(6000, 4000))
+
+    finished = run(SURVEY, config)
+
+    dimensions = finished.stdout.split("Image dimensions")[1]
+    assert "MP" in dimensions
+    assert "MB" not in dimensions.split("largest")[0]
+
+
+def test_a_discarded_entry_is_counted_as_a_record_and_not_as_a_file(tmp_path: Path) -> None:
+    """A headstone goes on claiming a payload, and the survey must not believe it.
+
+    ``is_stored`` asks whether the *record* says there is a file, which after a
+    discard is still yes — that is what keeps the entry searchable and unfetched
+    (ADR-041). Counting it as stored would report space that is already free.
+    """
+    config = settings_file(tmp_path)
+    library = Library(tmp_path / "library")
+    write(library, "kept", filename="kept.jpg", size=400_000)
+    write(library, "gone", filename="gone.jpg", size=999_000_000, verdict="discarded")
+
+    finished = run(SURVEY, config)
+
+    assert finished.returncode == 0, finished.stderr
+    header = finished.stdout.split("By type")[0]
+    assert "1 hold a file" in header.replace(",", "")
+    # The discarded entry is present as itself, and its bytes are not in the
+    # total.
+    assert "discarded" in finished.stdout
+    assert "999" not in header
+
+
+def test_the_measuring_can_be_left_out(tmp_path: Path) -> None:
+    config = settings_file(tmp_path)
+    library = Library(tmp_path / "library")
+    key = write(library, "big", filename="big.png", size=10)
+    (library.root / "direct" / key / "content" / "big.png").write_bytes(png_header(6000, 4000))
+
+    finished = run(SURVEY, config, "--skip-dimensions")
+
+    assert finished.returncode == 0, finished.stderr
+    assert "MP" not in finished.stdout
+
+
+def test_an_empty_library_surveys_to_nothing_rather_than_to_an_error(tmp_path: Path) -> None:
+    config = settings_file(tmp_path)
+
+    finished = run(SURVEY, config)
+
+    assert finished.returncode == 0, finished.stderr

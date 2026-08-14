@@ -28,24 +28,17 @@ import argparse
 import sys
 from pathlib import Path
 
-# Run from a checkout without installing it.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from maxicrawler.app import LibraryItem, LibraryQuery, LibraryService  # noqa: E402
-from maxicrawler.config import Settings  # noqa: E402
-from maxicrawler.domain import ReviewVerdict  # noqa: E402
+from _shelf import every_item, holds_a_file, parser_for, settings_from  # noqa: E402
+
+from maxicrawler.app import LibraryItem, LibraryService  # noqa: E402
 from maxicrawler.utils import format_size  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
     """Return what was asked for on the command line."""
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument(
-        "--config",
-        type=Path,
-        default=None,
-        help="settings file to read the library path from; the defaults otherwise",
-    )
+    parser = parser_for(__doc__.splitlines()[0])
     parser.add_argument(
         "--min-size",
         type=int,
@@ -65,27 +58,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def every_item(shelf: LibraryService) -> list[LibraryItem]:
-    """Return every entry in the library, page by page.
-
-    Collected before anything is discarded rather than acted on while paging:
-    each discard changes what page two holds, and a listing that moves under a
-    loop is how half of a set gets skipped.
-    """
-    items: list[LibraryItem] = []
-    page_number = 1
-    while True:
-        page = shelf.browse(LibraryQuery(page=page_number, per_page=500))
-        items.extend(page.items)
-        if page_number >= page.pages:
-            return items
-        page_number += 1
-
-
 def too_small(item: LibraryItem, *, limit: int, favourites: bool) -> bool:
     """Return whether *item* is one of the ones to throw away."""
-    if not item.is_stored or item.verdict is ReviewVerdict.DISCARDED:
-        # Nothing to take back: the record claims no payload, or its payload
+    if not holds_a_file(item):
+        # Nothing to take away: the record claims no payload, or its payload
         # has already gone.
         return False
     if item.favourite and not favourites:
@@ -98,7 +74,7 @@ def too_small(item: LibraryItem, *, limit: int, favourites: bool) -> bool:
 def main() -> int:
     """Print what would go, or throw it away when asked to."""
     args = parse_args()
-    settings = Settings.from_toml(args.config) if args.config else Settings()
+    settings = settings_from(args.config)
     limit = args.min_size if args.min_size is not None else settings.min_download_size
     if limit <= 0:
         print("Nothing to do: the size to prune below is zero or less.")
@@ -109,7 +85,7 @@ def main() -> int:
     doomed = [
         too for too in items if too_small(too, limit=limit, favourites=args.include_favourites)
     ]
-    unknown = sum(1 for item in items if item.is_stored and item.size is None)
+    unknown = sum(1 for item in items if holds_a_file(item) and item.size is None)
 
     print(f"Library:  {settings.library_path}")
     print(f"Entries:  {len(items)}, of which {len(doomed)} are under {format_size(limit)}")
