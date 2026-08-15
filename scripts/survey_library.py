@@ -55,6 +55,16 @@ One megapixel is about what a tile can use; twelve is a phone photograph; above
 thirty a single image is a bitmap larger than most tabs should hold.
 """
 
+TILE_PAGE = 60
+"""How many tiles a page of the grid view holds."""
+
+BITMAP_BYTES_PER_PIXEL = 4
+"""What a decoded image costs in a browser, per pixel.
+
+Four bytes: red, green, blue and alpha, whatever the file was compressed to. The
+number that makes a 300 KB photograph a 96 MB object once it is on screen.
+"""
+
 HEADER_BYTES = 65_536
 """How much of an image is read to find its dimensions.
 
@@ -218,14 +228,17 @@ def report_images(items: Sequence[LibraryItem], *, inline_limit: int, measure: b
         return
 
     measured: list[tuple[int, LibraryItem]] = []
+    inline_pixels: list[int] = []
     unread = 0
-    for item in images:
+    for item, shown in zip(images, fits, strict=True):
         dimensions = image_size(item.path) if item.path is not None else None
         if dimensions is None:
             unread += 1
             continue
         width, height = dimensions
         measured.append((width * height, item))
+        if shown:
+            inline_pixels.append(width * height)
     if not measured:
         print(f"\nImage dimensions\n  none of {len(images):,} could be read")
         return
@@ -238,6 +251,37 @@ def report_images(items: Sequence[LibraryItem], *, inline_limit: int, measure: b
     )
     pixels, largest = max(measured, key=lambda pair: pair[0])
     print(f"  largest: {pixels / 1_000_000:.1f} MP, {format_size(largest.size)}  {largest.name}")
+    report_worst_page(inline_pixels)
+
+
+def report_worst_page(inline_pixels: Sequence[int]) -> None:
+    """Print what a tile page costs a browser, for the images shown at full size.
+
+    The one number the two histograms above cannot be crossed to get, and the
+    one the thumbnail question actually turns on. A file's size says what is
+    sent; its pixels say what the browser then holds, and the ratio between them
+    is the compression, which varies by a factor of twenty. An image just under
+    the byte limit can be eight megapixels, and a page of sixty of those is
+    gigabytes of bitmap while every one of them looked small.
+
+    The worst page is used rather than the average, because that is the one that
+    decides whether a tab survives: a listing is sorted, so the large ones do
+    arrive together.
+    """
+    if not inline_pixels:
+        return
+    biggest = sorted(inline_pixels, reverse=True)[:TILE_PAGE]
+    print(f"\nWhat a page of {TILE_PAGE} tiles costs, for the images shown at full size")
+    over = sum(1 for pixels in inline_pixels if pixels > PIXEL_CLASSES[1])
+    share = 100 * over / len(inline_pixels)
+    print(
+        f"  {over:,} of {len(inline_pixels):,} are over {format_pixels(PIXEL_CLASSES[1])}"
+        f"  ({share:.0f}%)"
+    )
+    print(
+        f"  the {len(biggest)} largest are {format_size(sum(biggest) * BITMAP_BYTES_PER_PIXEL)}"
+        " of bitmap on one page"
+    )
 
 
 def main() -> int:
