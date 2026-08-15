@@ -5,9 +5,13 @@
 - Python 3.12 or newer
 - [uv](https://docs.astral.sh/uv/)
 
-Three optional extras exist: `mega` (cryptography), `brotli`, and `web` (the
-browser interface). Each is part of the `dev` dependencies, so the setup below
-installs all of them.
+Four optional extras exist: `mega` (cryptography), `brotli`, `web` (the browser
+interface), and `thumbnails` (Pillow). Each is part of the `dev` dependencies,
+so the setup below installs all of them.
+
+The tests that need Pillow skip themselves without it rather than failing, since
+the feature it serves is optional in the same way — but a run that skips them
+has not tested the thumbnails.
 
 ## Setup
 

@@ -66,6 +66,7 @@ from pathlib import Path
 from typing import Any
 
 from maxicrawler.app.discovery import StateResolver
+from maxicrawler.app.thumbnails import ThumbnailCache, cache_beside, key_for
 from maxicrawler.app.viewing import Display, MediaKind, MediaVerdict, kind_for, verdict_for
 from maxicrawler.config import Settings
 from maxicrawler.database import IndexedEntry, SQLiteDatabase, SQLiteLibraryIndex
@@ -210,8 +211,21 @@ def parse_verdict(value: str | None) -> ReviewVerdict | None:
 class PreviewShape(StrEnum):
     """What a tile puts where the file would be."""
 
+    THUMBNAIL = "thumbnail"
+    """A small copy made from the stored file, which is what a tile wants.
+
+    Preferred over :attr:`IMAGE` whenever one exists, and not only for the large
+    ones. A byte limit cannot tell a small file from a small picture — a stored
+    image under a megabyte is routinely fourteen megapixels, and a browser holds
+    it decoded at four bytes a pixel however little it was sent as.
+    """
+
     IMAGE = "image"
-    """The stored file itself, small enough to be shown as it is."""
+    """The stored file itself, small enough to be shown as it is.
+
+    What is left when no thumbnail has been made: the extra is not installed, or
+    the maker has not been run over this entry yet.
+    """
 
     EXCERPT = "excerpt"
     """The first few lines of it, read here rather than fetched by the browser."""
@@ -452,10 +466,18 @@ class LibraryService:
         library: Library | None = None,
         index: SQLiteLibraryIndex | None = None,
         queued: StateResolver | None = None,
+        thumbnails: ThumbnailCache | None = None,
     ) -> None:
         self._settings = settings
         self._library = library if library is not None else Library(settings.library_path)
         self._queued = queued
+        # Built here rather than lazily like the index: it is a path and a
+        # number, and nothing is opened until something asks for a picture.
+        self._thumbnails = (
+            thumbnails
+            if thumbnails is not None
+            else ThumbnailCache(cache_beside(settings.database_path))
+        )
         self._injected_index = index
         self._cached_index: SQLiteLibraryIndex | None = None
         self._index_unavailable = False
@@ -747,9 +769,16 @@ class LibraryService:
     def preview(self, item: LibraryItem) -> Preview:
         """Return what one tile shows in place of *item*'s file.
 
-        The order of the questions is the whole rule. Is there a file at all;
-        may a browser be shown this type; is it small enough that sixty of them
-        are a page rather than a download. Only then is it the image itself.
+        The order of the questions is the whole rule. Is there a file at all; is
+        there a small copy of it already made; may a browser be shown this type;
+        is it small enough that sixty of them are a page rather than a download.
+        Only then is it the image itself.
+
+        A thumbnail wins over the stored file whenever there is one, and not
+        only for the large ones. The byte limit below it measures what is sent
+        and the cost that matters is what the browser then holds — an image
+        under that limit is regularly several megapixels, and sixty of those are
+        gigabytes of bitmap while every one of them looked small.
         """
         if item.path is None or item.filename is None or not item.is_stored:
             return Preview(shape=PreviewShape.SYMBOL, kind=item.kind)
@@ -758,6 +787,8 @@ class LibraryService:
                 return Preview(shape=PreviewShape.SYMBOL, kind=item.kind)
         except OSError:
             return Preview(shape=PreviewShape.SYMBOL, kind=item.kind)
+        if self.thumbnail_of(item) is not None:
+            return Preview(shape=PreviewShape.THUMBNAIL, kind=item.kind)
         if self._shows_inline(item):
             return Preview(shape=PreviewShape.IMAGE, kind=item.kind)
         if item.kind is MediaKind.TEXT:
@@ -765,6 +796,49 @@ class LibraryService:
             if excerpt:
                 return Preview(shape=PreviewShape.EXCERPT, kind=item.kind, excerpt=excerpt)
         return Preview(shape=PreviewShape.SYMBOL, kind=item.kind)
+
+    def thumbnail_of(self, item: LibraryItem) -> Path | None:
+        """Return the small copy already made for *item*, if there is one.
+
+        Only ever a lookup. Nothing here makes a thumbnail, because a page of
+        sixty tiles would then be sixty image decodes inside one request, and
+        because a cache that fills itself on demand is a cache whose cost lands
+        on whoever happens to arrive first. They are made by a run of their own
+        (ADR-044).
+        """
+        key = self.thumbnail_key(item)
+        return None if key is None else self._thumbnails.get(key)
+
+    def thumbnail(self, provider: str, key: str) -> Path | None:
+        """Return the small copy for the entry *provider*/*key*, if there is one.
+
+        What a request for a picture reaches. ``None`` covers a name that is not
+        an entry, a file that is not an image and an entry nothing has been made
+        for yet — one answer for all three, as :meth:`payload` has.
+        """
+        item = self.item(provider, key)
+        return None if item is None else self.thumbnail_of(item)
+
+    def thumbnail_key(self, item: LibraryItem) -> str | None:
+        """Return what *item*'s thumbnail is filed under, or ``None`` for none.
+
+        Public because the run that *makes* them needs the same answer this one
+        looks up with. Two spellings of where a picture is filed would be two
+        chances for a maker to fill a cache nothing reads.
+
+        By checksum where the record has one, which costs nothing to read and
+        makes two entries holding the same picture share a thumbnail. Only
+        without one does this touch the disk, and then for the same pair the
+        listing cache trusts a row on.
+        """
+        if item.path is None or item.kind is not MediaKind.IMAGE:
+            return None
+        if item.checksum:
+            return key_for(directory=item.directory, key=item.key, checksum=item.checksum)
+        stamp = _stamp(item.path)
+        if stamp is None:
+            return None
+        return key_for(directory=item.directory, key=item.key, stamp=stamp)
 
     def _shows_inline(self, item: LibraryItem) -> bool:
         """Return whether a tile may load *item*'s own bytes as a picture.

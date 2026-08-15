@@ -667,6 +667,19 @@ LAYOUT_WORDS: Mapping[LibraryLayout, str] = MappingProxyType(
 TILE_NAME_LENGTH = 34
 """How much of a file name a tile shows before eliding the middle of it."""
 
+PREVIEW_ROUTES: Mapping[PreviewShape, Callable[[str], str]] = MappingProxyType(
+    {
+        PreviewShape.THUMBNAIL: lambda base: f"{base}/thumb",
+        PreviewShape.IMAGE: lambda base: f"{base}/view",
+    }
+)
+"""Which route answers for each shape that is a picture.
+
+A table rather than a conditional, so that adding a shape is an entry here and
+the two shapes that are *not* pictures need no mention at all: a missing key is
+"no URL", which is exactly what an excerpt and a symbol want.
+"""
+
 LAYOUT_PER_PAGE: Mapping[LibraryLayout, int] = MappingProxyType(
     {LibraryLayout.GRID: 60, LibraryLayout.LIST: DEFAULT_PER_PAGE}
 )
@@ -1220,11 +1233,13 @@ def _library_row(
         # off, which is where the extension is. See `elide_middle`.
         "short_name": elide_middle(item.name, TILE_NAME_LENGTH),
         "size": format_size(item.size),
-        # What the tile puts where the file would be. The image is the stored
-        # file itself, served by the route that already decides what a browser
-        # may be shown — there is no second delivery path and no generated file.
+        # What the tile puts where the file would be, and which route answers
+        # for it. A thumbnail comes from its own route because it is a file this
+        # application made; the stored image comes from the route that decides
+        # what a browser may be shown, which is a different question and stays
+        # one.
         "preview_shape": str(shape),
-        "preview_url": f"{base}/view" if shape is PreviewShape.IMAGE else None,
+        "preview_url": PREVIEW_ROUTES.get(shape, lambda _: None)(base),
         "excerpt": "" if preview is None else preview.excerpt,
         "is_queued": item.queued,
         "downloaded_at": (

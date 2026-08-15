@@ -30,6 +30,7 @@ maxicrawler = "maxicrawler.cli:app"
 [project.optional-dependencies]
 mega = ["cryptography>=43"]
 brotli = ["brotli>=1.1"]
+thumbnails = ["pillow>=11"]
 web = [
   "jinja2>=3.1",
   "starlette>=1.0",
@@ -41,6 +42,7 @@ dev = [
   "httpx2>=2.10",
   "jinja2>=3.1",
   "mypy>=1.13",
+  "pillow>=11",
   "pre-commit>=4.0",
   "protego>=0.5",
   "pytest>=8.3",

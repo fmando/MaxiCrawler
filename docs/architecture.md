@@ -1701,11 +1701,12 @@ refused if it leaves the library root — including through a symbolic link.
   local program. The path is shown and can be copied.
 - **No htmx.** Sorting and paging are links; on a loopback server a round trip
   costs less than the vendored file would.
-- **No thumbnails, no previews in the table, no text extraction.** All three
-  would mean reading files to render them. Two of the three were revisited in
-  0.16 and came out differently — a tile shows the stored file itself and, for
-  text, its first lines — because neither of those *renders* anything. Producing
-  a thumbnail still does, and still is not done.
+- **No text extraction from documents.** Reading a PDF to index its words is a
+  parser for somebody else's format inside a crawler. The sibling entries here —
+  previews in the table, and thumbnails — were both revisited: a tile shows the
+  stored file, or for text its first lines, and now a small copy where one has
+  been made. Rendering was the thing being avoided, and it is done in a run of
+  its own rather than in a request (ADR-044).
 
 ## The library as a workspace
 
@@ -1767,19 +1768,26 @@ same call that undoes anything else. The removal time is part of the verdict and
 is cleared in the same write, so it cannot outlive it and ride along on the next
 download.
 
-### A tile draws nothing that is not already there
+### A tile draws nothing inside a request
 
-`LibraryService.preview` is one function with three cases, not a registry: the
-stored image below `preview_inline_bytes`, a short read of the first lines for
-text, and a symbol otherwise. A registry is the shape this wants once something
-actually *produces* a preview, and reading three branches is cheaper than reading
-an abstraction that has nothing to abstract yet.
+`LibraryService.preview` is one function with four cases, not a registry: a
+thumbnail where one has been made, the stored image below
+`preview_inline_bytes`, a short read of the first lines for text, and a symbol
+otherwise. Reading four branches is cheaper than reading an abstraction that has
+one implementation.
 
-The ceiling is the whole reason a tile view is possible without thumbnails. Sixty
-originals of twenty megabytes each is more than a gigabyte on the wire and, worse,
-sixty decoded bitmaps sized by pixel count rather than by file size — a 300 KB
-6000×4000 JPEG is 96 MB in the tab. Above the ceiling a tile is a symbol and a
-size, and never the original.
+The order matters more than the branches. **A thumbnail wins whenever there is
+one**, not only above some size, because the byte limit measures what is sent
+and the cost that decides whether a tab survives is what the browser then holds
+— four bytes a pixel, whatever the file was compressed to. Measured on a real
+library: 2% of its images are under a megapixel, 27% of the ones the limit lets
+through are over four, and the sixty largest of those are 3.3 GB of bitmap on
+one page. The limit stays as the fallback for an entry nothing has been made
+for yet.
+
+Thumbnails are made by `scripts/make_thumbnails.py` and served by a route that
+never makes one; the cache lives beside the database and never inside
+`library/` (ADR-044).
 
 ### Walking a listing
 
@@ -1804,8 +1812,8 @@ link.
 
 ### Deliberately not done
 
-- **No thumbnail generation.** If it is ever built: cache only, deletable in
-  full, and never inside `library/`.
+- **No video or PDF thumbnails.** Images only: video would need ffmpeg and PDF a
+  renderer, and each is its own decision.
 - **No comments and no tags.** Not even as a reserved member — an empty field in
   a document is a promise.
 - **No duplicate detection.** The checksum column is filled and the facet

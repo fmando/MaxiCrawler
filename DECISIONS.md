@@ -1384,3 +1384,58 @@ instead of the application.
 else wrote from acting through a browser that can reach this server; it stops
 nobody who can make a request directly. That stays the job of a reverse proxy in
 front, and binding anywhere but loopback stays a deliberate act.
+
+## ADR-044: A thumbnail is only ever a cache
+
+0.16 drew a tile from the stored image below `preview_inline_bytes` and from a
+symbol above it, and said so plainly: honest, and the reason a directory of
+photographs showed mostly symbols. The measurement the plan asked for was taken
+against a real library of 22,692 entries and settles it.
+
+**The byte limit measures the wrong quantity.** A file's size says what is sent;
+a browser then holds the decoded image at four bytes a pixel, whatever it was
+compressed to. Of that library's images only 2% are under a megapixel, and 27%
+of the ones the byte limit still lets through are over four. The sixty largest
+of those come to **3.3 GB of bitmap on one page**, against the 1.5 GB the plan
+set as the criterion. Meanwhile 47% of its images sit above the limit and had no
+preview at all. Both halves are fixed by the same thing, and neither is fixable
+by moving the limit.
+
+**A thumbnail is a cache and nothing else**, which decides everything below:
+
+- It can be deleted in full at any moment and the library is unchanged. Losing
+  the directory costs one run of the maker.
+- It never lives inside `library/`. A library directory holds what was
+  downloaded and what the download said about itself; a picture MaxiCrawler drew
+  is neither. The cache sits beside the metadata database, the other derived
+  thing on the disk.
+- It is never a statement an entry makes about itself. Nothing in the maker
+  writes to a record.
+- It is addressed by content — by the checksum the record already carries — so
+  two entries holding the same picture share one, and a re-download that fetched
+  identical bytes finds it already made. Without a checksum the entry's name and
+  the file's modification time and length stand in, the same pair the listing
+  cache trusts a row on (ADR-037).
+
+**A tile prefers the thumbnail whenever there is one**, not only above some
+size. That is the point: the images that need it most look small.
+
+**The route serves and never makes.** A page of sixty tiles would otherwise be
+sixty image decodes inside one request, and whoever opened a fresh library first
+would pay for all of them. `scripts/make_thumbnails.py` is where the cost goes —
+measured at about forty photographs a second, so a few thousand images is a
+couple of minutes once and seconds afterwards. Until it has run, a tile shows
+what it showed before, which is why nothing about this is a migration.
+
+**Pillow is optional and its absence is an ordinary answer** — the same "no
+thumbnail" a caller already handles for a file that is not an image. It is the
+first dependency here that decodes untrusted bytes, and that is the cost being
+accepted rather than a detail: a few kilobytes of header can claim dimensions
+whose bitmap is tens of gigabytes. So there is one pixel ceiling rather than
+two (Pillow's own sits lower and fires earlier, and is set to ours on import),
+a half-written thumbnail is removed rather than left, and none of it runs in a
+request path.
+
+**Only images.** Video would need ffmpeg and PDF a renderer; both are their own
+decision, and neither is made here.
+

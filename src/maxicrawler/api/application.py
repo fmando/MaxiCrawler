@@ -261,6 +261,12 @@ def create_app(
                 name="library_file",
             ),
             Route(
+                "/library/{provider}/{key}/thumb",
+                routes.library_thumbnail,
+                methods=["GET"],
+                name="library_thumbnail",
+            ),
+            Route(
                 "/library/{provider}/{key}",
                 routes.library_item,
                 methods=["GET"],

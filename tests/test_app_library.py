@@ -19,6 +19,7 @@ from maxicrawler.app import (
     PREVIEW_EXCERPT_BYTES,
     PREVIEW_EXCERPT_LINES,
     Display,
+    LibraryItem,
     LibraryQuery,
     LibraryService,
     LibrarySort,
@@ -889,6 +890,104 @@ def test_zero_switches_inline_pictures_off_altogether(tmp_path: Path) -> None:
     assert item is not None
 
     assert service.preview(item).shape is PreviewShape.SYMBOL
+
+
+def make_thumbnail(service: LibraryService, item: LibraryItem) -> Path:
+    """Put a thumbnail in the cache for *item*, the way the maker would.
+
+    Written rather than generated: what is under test here is which picture the
+    service points a tile at, and Pillow's own behaviour is tested where the
+    cache is.
+    """
+    key = service.thumbnail_key(item)
+    assert key is not None
+    path = service._thumbnails.path_for(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"RIFF....WEBPVP8 ")
+    return path
+
+
+def test_a_thumbnail_is_preferred_over_the_stored_picture(tmp_path: Path) -> None:
+    """Even for a file well under the byte limit, which is the point of it.
+
+    A stored image under a megabyte is routinely several megapixels, and the
+    cost that decides whether a tab survives is what the browser holds decoded,
+    not what was sent.
+    """
+    service, library = make_service(tmp_path, preview_inline_bytes=1_000_000)
+    key = write(library, "AaBbCcDd", name="holiday.jpg", filename="holiday.jpg", size=200_000)
+    item = service.item("mega", key)
+    assert item is not None
+    make_thumbnail(service, item)
+
+    assert service.preview(item).shape is PreviewShape.THUMBNAIL
+
+
+def test_a_thumbnail_rescues_a_picture_that_was_only_a_symbol(tmp_path: Path) -> None:
+    """The other half of the gain: large images get a preview at all now."""
+    service, library = make_service(tmp_path, preview_inline_bytes=1_000_000)
+    key = write(library, "AaBbCcDd", name="raw.jpg", filename="raw.jpg", size=40_000_000)
+    item = service.item("mega", key)
+    assert item is not None
+    make_thumbnail(service, item)
+
+    assert service.preview(item).shape is PreviewShape.THUMBNAIL
+
+
+def test_without_a_thumbnail_nothing_about_the_old_behaviour_changes(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path, preview_inline_bytes=1_000_000)
+    key = write(library, "AaBbCcDd", name="holiday.jpg", filename="holiday.jpg", size=200_000)
+    item = service.item("mega", key)
+    assert item is not None
+
+    assert service.preview(item).shape is PreviewShape.IMAGE
+
+
+def test_two_entries_holding_the_same_bytes_find_one_thumbnail(tmp_path: Path) -> None:
+    """The cache is addressed by the checksum the record already carries."""
+    service, library = make_service(tmp_path)
+    first = write(library, "AaBbCcDd", filename="one.jpg", name="one.jpg", checksum="same")
+    second = write(library, "EeFfGgHh", filename="two.jpg", name="two.jpg", checksum="same")
+    one = service.item("mega", first)
+    other = service.item("mega", second)
+    assert one is not None and other is not None
+    made = make_thumbnail(service, one)
+
+    assert service.thumbnail_of(other) == made
+
+
+def test_a_file_that_is_not_a_picture_is_never_looked_up(tmp_path: Path) -> None:
+    """No stat, no cache lookup, no thumbnail — a PDF has none by definition."""
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd", name="paper.pdf", filename="paper.pdf")
+    item = service.item("mega", key)
+    assert item is not None
+
+    assert service.thumbnail_of(item) is None
+    assert service.thumbnail_key(item) is None
+
+
+def test_the_thumbnail_cache_is_never_inside_the_library(tmp_path: Path) -> None:
+    """The rule the whole thing rests on: a thumbnail is not part of a record."""
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd", filename="one.jpg", name="one.jpg")
+    item = service.item("mega", key)
+    assert item is not None
+    made = make_thumbnail(service, item)
+
+    assert not made.is_relative_to(library.root)
+
+
+def test_asking_for_a_thumbnail_by_name_answers_the_same(tmp_path: Path) -> None:
+    """What a request reaches, and what a listing sees, agree."""
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd", filename="one.jpg", name="one.jpg")
+    item = service.item("mega", key)
+    assert item is not None
+    made = make_thumbnail(service, item)
+
+    assert service.thumbnail("mega", key) == made
+    assert service.thumbnail("mega", "no-such-key") is None
 
 
 def test_a_picture_no_browser_is_handed_stays_a_symbol(tmp_path: Path) -> None:

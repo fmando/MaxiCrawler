@@ -34,14 +34,20 @@ SURVEY = SCRIPTS / "survey_library.py"
 CHECK = SCRIPTS / "check_library.py"
 START_OVER = SCRIPTS / "start_over.py"
 REINDEX = SCRIPTS / "reindex_library.py"
+THUMBNAILS = SCRIPTS / "make_thumbnails.py"
 
 WRITING = {
     "prune_small_payloads.py",
     "check_library.py",
     "start_over.py",
     "reindex_library.py",
+    "make_thumbnails.py",
 }
-"""Scripts that can change the library, and must therefore ask with ``--apply``.
+"""Scripts that write something, and must therefore ask with ``--apply``.
+
+Anything on disk, not only the library: the thumbnail maker never touches an
+entry and still fills a directory and deletes from it, which is exactly as much
+of a reason to ask first.
 
 Named rather than detected, so that a script gaining the ability to write is a
 line changed here by whoever gave it that ability — the test below fails until
@@ -910,6 +916,149 @@ def test_a_row_that_lies_is_put_right(tmp_path: Path) -> None:
     finally:
         reading.close()
     assert "a name no document on disk has" not in names
+
+
+# --- making the small copies --------------------------------------------------
+
+
+COLOURS = ("teal", "coral", "slateblue", "seagreen", "goldenrod")
+
+
+def a_library_of_pictures(tmp_path: Path, count: int = 3) -> Library:
+    """Return a library holding real JPEGs, since these get decoded.
+
+    Each entry records a different checksum, because the cache is addressed by
+    content: entries claiming the same bytes are one picture and share one
+    thumbnail, which is tested on its own below rather than by accident here.
+    """
+    pillow = pytest.importorskip("PIL", reason="the thumbnails extra is not installed")
+    library = Library(tmp_path / "library")
+    library.initialize()
+    for index in range(count):
+        key = write(library, f"photo{index}", filename=f"photo{index}.jpg", size=10 + index)
+        path = entry_path(library, key) / "content" / f"photo{index}.jpg"
+        colour = COLOURS[index % len(COLOURS)]
+        pillow.Image.new("RGB", (900, 600), colour).save(path, "JPEG")
+    return library
+
+
+def cached_thumbnails(tmp_path: Path) -> list[Path]:
+    """Return every thumbnail beside the database."""
+    cache = tmp_path / "maxicrawler.db.thumbs"
+    return sorted(cache.rglob("*.webp")) if cache.is_dir() else []
+
+
+def test_a_plain_run_counts_what_is_missing_and_makes_none(tmp_path: Path) -> None:
+    config = settings_file(tmp_path)
+    a_library_of_pictures(tmp_path)
+
+    finished = run(THUMBNAILS, config)
+
+    assert finished.returncode == 0, finished.stderr
+    assert "Missing:  3" in finished.stdout
+    assert cached_thumbnails(tmp_path) == []
+
+
+def test_applying_makes_one_for_every_picture(tmp_path: Path) -> None:
+    config = settings_file(tmp_path)
+    a_library_of_pictures(tmp_path)
+
+    finished = run(THUMBNAILS, config, "--apply")
+
+    assert finished.returncode == 0, finished.stderr
+    assert len(cached_thumbnails(tmp_path)) == 3
+
+
+def test_entries_claiming_the_same_bytes_get_one_thumbnail_between_them(
+    tmp_path: Path,
+) -> None:
+    """The cache is addressed by content, so a duplicate is made once.
+
+    Two entries recording the same checksum are two names for one picture, and
+    a crawl that reached the same file by two routes is an ordinary way to get
+    there.
+    """
+    pillow = pytest.importorskip("PIL", reason="the thumbnails extra is not installed")
+    config = settings_file(tmp_path)
+    library = Library(tmp_path / "library")
+    library.initialize()
+    for handle in ("one", "two"):
+        key = write(library, handle, filename=f"{handle}.jpg", size=10, checksum="c" * 64)
+        pillow.Image.new("RGB", (900, 600), "teal").save(
+            entry_path(library, key) / "content" / f"{handle}.jpg", "JPEG"
+        )
+
+    finished = run(THUMBNAILS, config, "--apply")
+
+    assert finished.returncode == 0, finished.stderr
+    assert len(cached_thumbnails(tmp_path)) == 1
+    assert "Images:   1" in finished.stdout
+
+
+def test_the_thumbnails_are_never_inside_the_library(tmp_path: Path) -> None:
+    """The rule the whole feature rests on (ADR-044)."""
+    config = settings_file(tmp_path)
+    library = a_library_of_pictures(tmp_path)
+
+    run(THUMBNAILS, config, "--apply")
+
+    assert cached_thumbnails(tmp_path)
+    assert not list(library.root.rglob("*.webp"))
+
+
+def test_a_second_run_has_nothing_left_to_do(tmp_path: Path) -> None:
+    """What makes this cheap to run again after every crawl."""
+    config = settings_file(tmp_path)
+    a_library_of_pictures(tmp_path)
+    run(THUMBNAILS, config, "--apply")
+
+    again = run(THUMBNAILS, config)
+
+    assert again.returncode == 0, again.stderr
+    assert "Nothing to do" in again.stdout
+
+
+def test_a_thumbnail_nothing_can_reach_is_swept(tmp_path: Path) -> None:
+    """A re-download changes what a picture is filed under."""
+    config = settings_file(tmp_path)
+    library = a_library_of_pictures(tmp_path, count=1)
+    run(THUMBNAILS, config, "--apply")
+    (orphan := (tmp_path / "maxicrawler.db.thumbs" / "zz")).mkdir(parents=True, exist_ok=True)
+    (orphan / f"{'z' * 32}.webp").write_bytes(b"RIFF....WEBPVP8 ")
+
+    finished = run(THUMBNAILS, config, "--apply")
+
+    assert finished.returncode == 0, finished.stderr
+    assert "Swept 1" in finished.stdout
+    assert len(cached_thumbnails(tmp_path)) == 1
+    assert library.root.is_dir()
+
+
+def test_an_empty_library_sweeps_nothing_at_all(tmp_path: Path) -> None:
+    """A run pointed at the wrong settings file must not empty the cache."""
+    config = settings_file(tmp_path)
+    Library(tmp_path / "library").initialize()
+    kept = tmp_path / "maxicrawler.db.thumbs" / "aa"
+    kept.mkdir(parents=True)
+    (kept / f"{'a' * 32}.webp").write_bytes(b"RIFF....WEBPVP8 ")
+
+    finished = run(THUMBNAILS, config, "--apply")
+
+    assert finished.returncode == 0, finished.stderr
+    assert len(cached_thumbnails(tmp_path)) == 1
+
+
+def test_a_file_that_is_not_really_a_picture_is_counted_not_raised(tmp_path: Path) -> None:
+    config = settings_file(tmp_path)
+    library = a_library_of_pictures(tmp_path, count=1)
+    key = write(library, "liar", filename="liar.jpg", size=11)
+    (entry_path(library, key) / "content" / "liar.jpg").write_bytes(b"not an image")
+
+    finished = run(THUMBNAILS, config, "--apply")
+
+    assert finished.returncode == 0, finished.stderr
+    assert "1 could not be read as images" in finished.stdout
+    assert len(cached_thumbnails(tmp_path)) == 1
 
 
 def test_an_absent_library_is_nothing_to_do(tmp_path: Path) -> None:
