@@ -78,13 +78,18 @@ thirty is one ordinary afternoon, and a history that forgot the first half of it
 would be a history nobody consults.
 """
 
-DEFAULT_MAX_QUEUED = 500
-"""How many requests may wait at once.
+DEFAULT_MAX_QUEUED = 1000
+"""How many requests may wait at once, when nobody has said.
 
-A ceiling rather than a backlog, because one click on a filtered report will
-soon be able to ask for every match at once. Five hundred is well past any
-afternoon's work and well short of a number that makes this process's memory
-somebody's problem.
+A ceiling rather than a backlog: one click on a filtered report asks for every
+match it has, and what waits is a URL and a little state per request rather
+than bytes. It began at five hundred, which was chosen before there was a real
+library to watch it against — a directory of a crawled site comes to more than
+that often enough, and the cost of the higher number is a few hundred kilobytes
+of this process's memory.
+
+The application sets it from :attr:`~maxicrawler.config.Settings.max_queued`,
+and the two defaults are held together by a test rather than by hope.
 """
 
 REMOVED = "removed from the queue"

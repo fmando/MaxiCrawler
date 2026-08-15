@@ -97,6 +97,20 @@ class Settings:
     state, which is the whole difference between a limit and a disappearance.
     """
 
+    max_queued: int = 1000
+    """How many download requests may wait at once.
+
+    A ceiling on this process's memory rather than on anybody's afternoon: one
+    click on a filtered report asks for every match it has, and a queue holds a
+    URL and a little state per request — not bytes. A thousand of those is
+    nothing, and it is roughly what a directory of a crawled site comes to.
+
+    It is a refusal, not a truncation: asking for more than fits queues what
+    there is room for and says how many were left over, so the number that did
+    not fit is on the page rather than in a log. What is already waiting can be
+    cancelled in a click, which is why this can be generous.
+    """
+
     crawl_depth: int = 0
     """Default link distance a crawl follows; zero fetches the seed alone."""
 
@@ -254,6 +268,9 @@ class Settings:
         if self.min_download_size < 0:
             msg = "min_download_size must not be negative"
             raise ValueError(msg)
+        if self.max_queued < 1:
+            msg = "max_queued must be at least 1"
+            raise ValueError(msg)
         if self.crawl_depth < 0:
             msg = "crawl_depth must not be negative"
             raise ValueError(msg)
@@ -305,6 +322,7 @@ class Settings:
             min_download_size=_int_value(
                 app_config, "min_download_size", defaults.min_download_size
             ),
+            max_queued=_int_value(app_config, "max_queued", defaults.max_queued),
             crawl_depth=_int_value(app_config, "crawl_depth", defaults.crawl_depth),
             crawl_max_pages=_int_value(app_config, "crawl_max_pages", defaults.crawl_max_pages),
             crawl_same_domain=_bool_value(
@@ -350,6 +368,7 @@ class Settings:
             f"max_view_bytes = {self.max_view_bytes}\n"
             f"preview_inline_bytes = {self.preview_inline_bytes}\n"
             f"min_download_size = {self.min_download_size}\n"
+            f"max_queued = {self.max_queued}\n"
             f"crawl_depth = {self.crawl_depth}\n"
             f"crawl_max_pages = {self.crawl_max_pages}\n"
             f"crawl_same_domain = {str(self.crawl_same_domain).lower()}\n"

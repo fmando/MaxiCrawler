@@ -2186,6 +2186,12 @@ def settings_view(settings: Settings) -> tuple[dict[str, Any], ...]:
                     _toml_bool(settings.direct_downloads),
                     "Whether a file at an ordinary URL may be downloaded at all.",
                 ),
+                _setting(
+                    "max_queued",
+                    format_number(settings.max_queued),
+                    "How many requests may wait at once. Asking for more "
+                    "queues what fits and says how many were left over.",
+                ),
             ),
         },
         {
