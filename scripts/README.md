@@ -61,6 +61,7 @@ over this directory like any other.
 | `check_library.py` | Compares every record against the disk and reports where they have come apart. Repairs the two faults that are already decided. |
 | `start_over.py` | Moves the library and its database aside under a timestamp and leaves an empty one in their place. Renames; never deletes. |
 | `reindex_library.py` | Drops the listing cache and reads every document again. For a library that has moved between machines. |
+| `make_thumbnails.py` | Makes the small copies a tile shows, and sweeps up the ones no entry can reach. Needs the `thumbnails` extra. |
 
 `_shelf.py` is not a script — it holds the four lines each of them needs to find
 a library and read all of it, and the underscore keeps it out of the pass that
@@ -101,6 +102,35 @@ those. It reports them, and `--urls` prints what to queue again.
 
 `--checksums` reads every byte of every file, which is worth doing after a disk
 scare and not worth doing on a Tuesday. It is off by default for that reason.
+
+## Making the thumbnails
+
+Nothing makes a thumbnail on demand. A page of sixty tiles would otherwise be
+sixty image decodes inside one request, and whoever opened a fresh library first
+would pay for all of them. `make_thumbnails.py` is where that cost goes instead:
+
+```bash
+uv run python scripts/make_thumbnails.py --config settings.toml --apply
+```
+
+Measured at about forty photographs a second, so a library of a few thousand
+images is a couple of minutes the first time and seconds every time after —
+what already exists is skipped. Worth running after a crawl brings new files in;
+until it does, those tiles show the stored image or a symbol exactly as before.
+
+It needs the optional extra:
+
+```bash
+uv sync --extra thumbnails
+```
+
+Without it every tile behaves as it did before thumbnails existed, and the
+script says so rather than failing.
+
+The same run sweeps: a thumbnail no entry can reach any more — a re-download
+changes what a picture is filed under — is deleted. Nothing is swept when no
+images were found at all, so a run pointed at the wrong settings file empties
+nothing.
 
 ## The index is only a cache
 
