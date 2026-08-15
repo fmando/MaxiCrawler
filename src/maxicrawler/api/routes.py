@@ -50,6 +50,7 @@ from maxicrawler.app import (
     crawl_document,
     parse_verdict,
 )
+from maxicrawler.app.thumbnails import CONTENT_TYPE as THUMBNAIL_CONTENT_TYPE
 from maxicrawler.app.viewing import DOWNLOAD_CONTENT_TYPE, MediaKind
 from maxicrawler.domain import DownloadStatus, ReviewVerdict
 from maxicrawler.utils import parse_size
@@ -1075,6 +1076,46 @@ async def library_view(request: Request) -> Response:
         content_disposition_type="inline",
         headers=headers,
     )
+
+
+THUMBNAIL_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    # Long enough that scrolling back up a grid re-reads nothing, short enough
+    # that a re-downloaded file stops showing yesterday's picture within the
+    # hour. The URL names an entry rather than the picture's own key, so it
+    # cannot be immutable.
+    "Cache-Control": "private, max-age=600",
+}
+"""What a thumbnail carries.
+
+No sandbox policy: this is a WebP this application produced from bytes it
+already had, not something a stranger uploaded, and it cannot execute anything.
+The type is stated because the whole point is that a browser renders it.
+"""
+
+
+async def library_thumbnail(request: Request) -> Response:
+    """Answer with the small copy of a stored image.
+
+    Serves and never makes. A page of sixty tiles asking for sixty thumbnails
+    would otherwise be sixty image decodes inside one request, and the first
+    visitor to a fresh library would pay for all of them; they are made by a run
+    of their own (ADR-044).
+
+    Raises:
+        HTTPException: 404, which covers a name that is not an entry, a file
+            that is not an image, and an entry nothing has been made for. A
+            client has one thing to do about all three — show the symbol it
+            would have shown anyway — and telling them apart would only report
+            on the state of a cache.
+    """
+    path = library_of(request).thumbnail(
+        request.path_params["provider"], request.path_params["key"]
+    )
+    if path is None:
+        raise HTTPException(status_code=404, detail="no thumbnail")
+    return FileResponse(path, media_type=THUMBNAIL_CONTENT_TYPE, headers=THUMBNAIL_HEADERS)
 
 
 def _payload(request: Request) -> StoredPayload:

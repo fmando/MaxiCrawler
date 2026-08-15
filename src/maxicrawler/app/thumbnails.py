@@ -52,6 +52,14 @@ WebP keeps an alpha channel, which JPEG would flatten, and is markedly smaller
 than PNG for the photographs that make up most of a crawl's take.
 """
 
+CONTENT_TYPE = "image/webp"
+"""What a thumbnail is served as.
+
+Stated rather than guessed from the suffix, and safe to state because this
+module wrote the file: it is not somebody's download being given a type, which
+is the distinction :data:`~maxicrawler.app.viewing.VIEWABLE` exists to keep.
+"""
+
 MAX_PIXELS = 120_000_000
 """The largest image this will decode, in pixels.
 
