@@ -21,11 +21,13 @@ uv run pre-commit install
 ```bash
 uv run ruff format --check .
 uv run ruff check .
-uv run mypy src
+uv run mypy src scripts
 uv run pytest
 ```
 
-All four commands must pass before a pull request is opened.
+All four commands must pass before a pull request is opened. The maintenance
+scripts in `scripts/` are checked alongside the package: they are not part of
+what is shipped, but they are read and edited like anything else here.
 
 ## Tests and the network
 
