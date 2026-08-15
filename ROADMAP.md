@@ -40,7 +40,10 @@ The mission, core principles, and non-goals are described in
 -   0.16 The library as a workspace ✅ — tiles you can judge a file from, four
     verdicts that survive the next download, a discard that takes the bytes back
     and is not offered again, and a viewer you can walk a filtered listing
-    through
+    through. Thumbnails followed once the measurement 0.16 asked for was taken
+    on a real library: a tile of photographs was 3.3 GB of bitmap a page, and
+    the byte limit could not fix it because it measures what is sent rather than
+    what a browser holds (ADR-044)
 -   0.17 Scheduler & Automation
 -   0.18 REST API
 -   1.0 Stable Release
@@ -95,13 +98,10 @@ not change.
     floor at the other end is `min_download_size`, checked in the sink at both
     the moment a size is announced and the moment the last byte lands (ADR-042),
     and a ceiling is the same two checkpoints with the comparison turned around
--   Thumbnails, and with them a tile view that does not care how large the
-    picture behind it is. 0.16 draws a tile from the stored file itself below
-    `preview_inline_bytes` and from a symbol above it, which is honest and is
-    also why a directory of 20-megapixel photographs shows mostly symbols. Two
-    rules are already fixed for whenever this is built: a thumbnail is
-    exclusively a cache, deletable in full at any time and never a statement an
-    entry makes about itself, and it never lives inside `library/`
+-   Parallel thumbnail making. The run is sequential and manages about forty
+    photographs a second, which is a couple of minutes for a few thousand
+    images and fine as a one-off; a library an order of magnitude larger would
+    want the decoding spread over cores. Waits for somebody to have that library
 -   Columns for what a listing filters and sorts by, so the index stops handing
     back a document to parse. The saving today is the file read, not the parse:
     two thousand rows come back in one database read and are parsed one JSON

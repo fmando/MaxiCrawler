@@ -24,6 +24,7 @@ what the project deliberately will not do.
 - A download queue you can reorder, pause and retry, and one click to queue everything a filter matches.
 - Downloads for the rest of the web: any file at a plain HTTP(S) URL, through the same library, behind the same private-network guard.
 - A library you can work through: tiles or rows, filters for kind, size and verdict, four judgements that survive the next download, and a discard that takes the bytes back and is not fetched again.
+- Thumbnails made by a run of their own, so a page of tiles over a library of photographs costs megabytes rather than gigabytes — and stays a cache that can be deleted in full at any time.
 - Typed interfaces and strict static checking with mypy.
 - Fast formatting and linting with Ruff.
 - Test-first baseline with pytest.
@@ -40,11 +41,13 @@ cd MaxiCrawler
 uv sync --all-extras
 ```
 
-`--all-extras` includes three optional extras. `mega` pulls in `cryptography`
+`--all-extras` includes four optional extras. `mega` pulls in `cryptography`
 and is needed only to decrypt the names inside a Mega share. `brotli` lets the
 crawler read a Brotli-compressed page; without it, `Accept-Encoding` simply
 does not advertise `br`, so a server sends gzip instead. `web` is the browser
-interface. Everything else works without any of them.
+interface. `thumbnails` pulls in Pillow, which is what makes the small copies a
+tile shows; without it a tile falls back to the stored image or a symbol, which
+is what it did before they existed. Everything else works without any of them.
 
 Create the local configuration and SQLite metadata database:
 
@@ -2148,14 +2151,41 @@ listing; what differs is the template and how many fit on a page (sixty against
 fifty).
 
 A tile shows the file, its name shortened in the middle so the extension
-survives, its size, and its judgement. **Nothing is generated to draw it.** An
-image below `preview_inline_bytes` (1 MB by default) is loaded through the same
-`/view` route the file's own page uses; above that a tile shows a symbol and the
-size, and never the original. That ceiling is the whole reason this needs no
-thumbnails: sixty twenty-megabyte photographs are more than a gigabyte on the
-wire, and the decoded bitmaps are sized by pixel count rather than by file size —
-a 300 KB 6000×4000 JPEG is 96 MB inside the tab. Text and Markdown show their
-first lines, read from the file; everything else shows a symbol.
+survives, its size, and its judgement. **Nothing is generated inside the
+request.** For an image it shows a thumbnail where one has been made, the stored
+image below `preview_inline_bytes` (1 MB by default) where none has, and a
+symbol above that. Text and Markdown show their first lines, read from the file;
+everything else shows a symbol.
+
+### Thumbnails
+
+Make them with a run of their own, after installing the extra:
+
+```bash
+uv run python scripts/make_thumbnails.py --config settings.toml --apply
+```
+
+About forty photographs a second, so a few thousand images is a couple of
+minutes once and seconds every time after — what exists is skipped. Nothing
+makes one on demand: a page of sixty tiles would be sixty image decodes inside
+one request.
+
+**Why a byte limit was not enough.** A file's size says what is sent; a browser
+holds the decoded image at four bytes a pixel however little that was. Measured
+on a real library of 22,692 entries: 2% of its images are under a megapixel,
+27% of the ones the limit still lets through are over four, and the sixty
+largest of those are **3.3 GB of bitmap on a single page**. Meanwhile 47% sat
+above the limit and had no preview at all. A thumbnail therefore wins whenever
+there is one, not only above some size.
+
+**A thumbnail is only ever a cache** (ADR-044). It can be deleted in full at any
+moment, it lives beside the database and never inside `library/`, and it is
+never something an entry says about itself. It is addressed by the checksum the
+record already carries, so two entries holding the same picture share one. The
+same run sweeps up the ones no entry can reach any more.
+
+Without the extra installed, every tile behaves exactly as it did before
+thumbnails existed.
 
 ### Four verbs
 
@@ -2309,11 +2339,8 @@ answered with `403` while the same form from the interface goes through.
 
 ### Still not done, on purpose
 
-**No thumbnails.** The ceiling on inline images is what makes a tile view
-possible without them, and it is also why a directory of 20-megapixel
-photographs shows mostly symbols. If they are ever built, two rules are already
-fixed: a thumbnail is exclusively a cache, deletable in full at any time, and it
-never lives inside `library/`.
+**No video or PDF thumbnails.** Images have them now — see below — and the other
+two would need ffmpeg and a PDF renderer, each of which is its own decision.
 
 **No comments and no tags**, not even as a reserved member. An empty field in a
 document is a promise.

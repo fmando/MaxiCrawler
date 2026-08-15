@@ -241,11 +241,18 @@ mehr. `SameOriginMiddleware` liest `Sec-Fetch-Site`, ersatzweise `Origin` — ke
 Token, keine Session, kein Cookie, und damit funktioniert jedes Formular
 weiterhin ohne JavaScript (ADR-043).
 
-**Die Kachelansicht erzeugt nichts.** Ein Bild unterhalb `preview_inline_bytes`
-wird über dieselbe `/view`-Route geladen, die die Detailseite benutzt, darüber
-steht ein Symbol mit Größenangabe; ein Textauszug ist ein kurzer Lesevorgang,
-kein gerendertes Bild. Thumbnails gibt es nicht, und falls sie je kommen: nur als
-Cache, jederzeit vollständig löschbar, und niemals innerhalb von `library/`.
+**Die Kachelansicht erzeugt nichts im Request.** Ein Textauszug ist ein kurzer
+Lesevorgang, kein gerendertes Bild. Existiert für ein Bild ein Thumbnail, zeigt
+die Kachel dieses; sonst das gespeicherte Bild unterhalb `preview_inline_bytes`
+und darüber ein Symbol.
+
+**Ein Thumbnail ist ausschließlich Cache** (ADR-044): jederzeit vollständig
+löschbar, niemals innerhalb von `library/`, und nie eine Aussage, die ein
+Eintrag über sich selbst macht. Es liegt neben der Metadatenbank und ist über
+seinen Inhalt adressiert, nicht über den Eintrag. **Erzeugt wird es von einem
+eigenen Lauf, nie von der Route** — sechzig Kacheln wären sonst sechzig
+Bilddekodierungen in einem Request. Pillow ist optional; fehlt es, verhält sich
+alles wie zuvor.
 
 **Ein Rundgang ist eine Abfrage, keine Sitzung.** Wer aus einer Liste kommt,
 bekommt „12 von 340" samt Nachbarn; wer die Seite direkt öffnet, bekommt die
