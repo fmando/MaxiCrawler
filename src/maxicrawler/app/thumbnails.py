@@ -166,6 +166,29 @@ class ThumbnailCache:
             return []
         return sorted(self.root.rglob(f"*{SUFFIX}"))
 
+    def usage(self) -> "CacheUsage":
+        """Return how many thumbnails are cached and what they take up.
+
+        A walk of the directory and a `stat` for each file, which is a fraction
+        of a second for the few thousand a real library comes to — and it is
+        asked for by a page somebody opens before deciding to run something, not
+        by one they open all day.
+
+        A file that vanishes between the listing and the measuring is left out
+        rather than counted as nothing, which is the honest answer for a cache
+        the maker may be sweeping at the same moment.
+        """
+        paths = self.every()
+        total = 0
+        counted = 0
+        for path in paths:
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+            counted += 1
+        return CacheUsage(root=self.root, count=counted, total_bytes=total)
+
     def forget(self, keys: set[str]) -> int:
         """Delete every cached thumbnail whose key is not in *keys*, and count them.
 
@@ -183,6 +206,25 @@ class ThumbnailCache:
                 continue
             removed += 1
         return removed
+
+
+@dataclass(frozen=True, slots=True)
+class CacheUsage:
+    """What a thumbnail cache holds, for somebody deciding whether to fill it.
+
+    The room it takes is the only reason to think about a cache at all: what is
+    in it is derived, and deleting the whole directory costs one run of the
+    maker (ADR-044).
+    """
+
+    root: Path
+    """Where it is, so it can be looked at or deleted without hunting."""
+
+    count: int
+    """How many thumbnails are in it."""
+
+    total_bytes: int
+    """What they come to on disk."""
 
 
 def key_for(

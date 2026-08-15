@@ -25,6 +25,7 @@ what the project deliberately will not do.
 - Downloads for the rest of the web: any file at a plain HTTP(S) URL, through the same library, behind the same private-network guard.
 - A library you can work through: tiles or rows, filters for kind, size and verdict, four judgements that survive the next download, and a discard that takes the bytes back and is not fetched again.
 - Thumbnails made by a run of their own, so a page of tiles over a library of photographs costs megabytes rather than gigabytes — and stays a cache that can be deleted in full at any time.
+- Maintenance runs for a library that already exists — survey, doctor, reindex, prune, start over — described in the interface, which prints the command to paste and runs nothing itself.
 - Typed interfaces and strict static checking with mypy.
 - Fast formatting and linting with Ruff.
 - Test-first baseline with pytest.
@@ -2354,6 +2355,63 @@ deliberately left open.
 judgement can lose one of the two writes. What bounds it is that the two writers
 touch different members, so the worst case is one judgement lost rather than a
 document describing a file that is not there.
+
+## Looking after a library
+
+A running installation collects questions the interface does not ask. The
+library page reports damage on *one* entry at a time; it never says "forty-one
+of your records point at files that are gone". A crawl of an image directory
+leaves behind sprites and icons that were fine to fetch and are not worth
+keeping. Those are jobs for a pass over the whole shelf, run once, watched, and
+then forgotten about again.
+
+They live in [`scripts/`](scripts/README.md) and are not part of what is
+shipped: nothing in `src/` imports them, and removing the directory changes
+nothing about what MaxiCrawler does.
+
+| Script | What it does |
+| --- | --- |
+| `survey_library.py` | How much, of what, how big, and how many pixels the images carry. Reports only. |
+| `check_library.py` | Every record against the disk, and where the two have come apart. |
+| `make_thumbnails.py` | The small copies a tile shows, and a sweep of the ones nothing can reach. |
+| `reindex_library.py` | Drops the listing cache so the next listing rebuilds it from the documents. |
+| `prune_small_payloads.py` | Discards stored files below a size, the way the interface would. |
+| `start_over.py` | Moves the library and its database aside under a timestamp. Renames; never deletes. |
+
+Two rules they all keep. **Nothing is written without `--apply`**, and a script
+that cannot write does not offer the flag at all. And **they go through
+`LibraryService`**, not through the filesystem: removing a file with `rm` leaves
+the record claiming a payload that is not there, and the next *"queue every
+match"* fetches it again.
+
+### A page that says what to run, and runs nothing
+
+`Maintenance` became a section in the interface, beside `Settings` and read-only
+in the same way. It carries a card per script — what it is for, what it will
+deliberately not do, and the line that runs it on this machine, ready to copy.
+Where a run writes there are two lines, and the `--apply` flag is the only
+difference between them.
+
+**There is no button, and that is the point.** The interface has no
+authentication (ADR-025) and is served over the network on the machine it
+administers, so a control that started one of these would be one anybody who
+can reach the port may press — and `start_over.py` sets a whole library aside.
+The same-origin check turns away a page somebody else wrote, not somebody
+addressing this port directly (ADR-043). So there is no POST route to the page,
+not even an unused one. What it can honestly offer is the command: whoever
+pastes it is at a shell on that machine already (ADR-045).
+
+The line is built from what the process knows about itself — the interpreter
+running it, the settings file it was started with, the directory beside the
+package — so it works pasted into any working directory, and it is quoted for
+the shell of the machine that printed it. Above the cards sit the two facts a
+command does not carry: which library the runs would act on, and what the
+thumbnail cache already holds.
+
+A description of a program that lives elsewhere goes stale silently, so nothing
+here is taken on trust: the directory decides which runs exist, in both
+directions, and each script's own `--help` decides whether it is one that
+writes.
 
 ## Documentation
 

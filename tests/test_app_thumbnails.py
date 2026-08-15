@@ -251,6 +251,31 @@ def test_a_key_is_usable_as_a_file_name(tmp_path: Path) -> None:
     assert len(key) == 32
 
 
+# --- what it is taking up -----------------------------------------------------
+
+
+def test_a_cache_that_was_never_made_takes_up_nothing(tmp_path: Path) -> None:
+    """The state a fresh installation is in, and no reason to fail in it."""
+    usage = ThumbnailCache(tmp_path / "never-made").usage()
+
+    assert usage.count == 0
+    assert usage.total_bytes == 0
+    assert usage.root == tmp_path / "never-made"
+
+
+def test_the_cache_counts_what_it_holds(tmp_path: Path) -> None:
+    """How much room the small copies come to, which is the only reason to ask."""
+    cache = ThumbnailCache(tmp_path / "thumbs")
+    cache.make(draw(tmp_path / "one.png", 900, 600), "aaaa")
+    cache.make(draw(tmp_path / "two.png", 900, 600, colour="blue"), "bbbb")
+
+    usage = cache.usage()
+
+    assert usage.count == 2
+    assert usage.total_bytes == sum(path.stat().st_size for path in cache.every())
+    assert usage.total_bytes > 0
+
+
 def test_the_cache_lives_beside_the_database_and_never_in_the_library() -> None:
     """The one rule the module exists to keep."""
     beside = cache_beside(Path("/srv/maxicrawler/maxicrawler.db"))

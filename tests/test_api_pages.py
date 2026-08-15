@@ -1947,9 +1947,12 @@ def test_the_detail_page_shows_the_path_in_a_field_it_can_be_copied_from(
         # The path is a column of the dense layout; a tile does not carry one.
         listing = unescape(test_client.get("/library?view=list").text)
 
-    assert 'class="path"' in body
+    # By id rather than by class since the maintenance page came along: one
+    # script serves both, and a page carrying several fields needs each button
+    # to name exactly one of them.
+    assert 'id="item-path"' in body
     assert "readonly" in body
-    assert 'data-copy=".path"' in body
+    assert 'data-copy="#item-path"' in body
     assert "file://" not in body
     # Native separators, and the same spelling in the table as in the field: a
     # path somebody pastes into a file manager has one right form per platform.

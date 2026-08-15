@@ -154,7 +154,12 @@ not change.
     missing is the command that asks them, and it is also the client that would
     show the browser is not the only way to reach a verdict. Pruning is still
     nobody's question: discarding takes the payload and deliberately keeps the
-    record, so removing an entry outright is a different decision
+    record, so removing an entry outright is a different decision. Less pressing
+    since the maintenance scripts arrived and the interface began printing the
+    line that runs each of them (ADR-045): the jobs that were actually being
+    reached for are done, from a shell, by whoever administers the machine —
+    which is the argument for leaving them out of a public interface rather
+    than for promoting them into one
 -   One writer at a time per entry. A download finishing while somebody judges
     the same file can lose one of the two writes: the read and the write are
     consecutive and nothing locks the directory. The damage is bounded by the
@@ -176,7 +181,10 @@ not change.
     `serve` refuses a public address unless `--allow-remote` asks for it. More
     pressing since 0.16, because a button deletes files now: the same-origin
     check (ADR-043) stops a page somebody else wrote from pressing it through a
-    browser, and stops nobody who can reach the port directly
+    browser, and stops nobody who can reach the port directly. It is also what
+    the maintenance page is shaped around — it prints a command rather than
+    running one, because there is nobody to ask who is pressing (ADR-045), and
+    that trade would be worth revisiting once there is
 -   Further providers: Pixeldrain, GoFile, MediaFire. Less urgent than they
     were: a share on one of those still needs its own provider to be *read*,
     but every ordinary file on the web is now fetched by `DirectProvider`

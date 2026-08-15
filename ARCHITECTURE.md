@@ -254,6 +254,15 @@ eigenen Lauf, nie von der Route** — sechzig Kacheln wären sonst sechzig
 Bilddekodierungen in einem Request. Pillow ist optional; fehlt es, verhält sich
 alles wie zuvor.
 
+**Die Wartungsseite zeigt einen Befehl an und führt keinen aus** (ADR-045). Ohne
+Authentifizierung und über das Netz erreichbar wäre ein Knopf, der eines der
+Skripte startet, für jeden erreichbar, der den Port erreicht — und eines davon
+räumt eine ganze Library beiseite. Es gibt deshalb keine POST-Route auf diese
+Seite. Der Befehl wird aus dem gebaut, was der Prozess über sich selbst weiß:
+Interpreter, Konfigurationsdatei, das Verzeichnis neben dem Paket. `src/`
+importiert die Skripte weiterhin nicht; `app/maintenance.py` hält eine
+Beschreibung, und ein Test hält sie mit dem Verzeichnis in Deckung.
+
 **Ein Rundgang ist eine Abfrage, keine Sitzung.** Wer aus einer Liste kommt,
 bekommt „12 von 340" samt Nachbarn; wer die Seite direkt öffnet, bekommt die
 Seite, die sie vorher war. Die Liste reist als eigener Parameter `walk` mit,

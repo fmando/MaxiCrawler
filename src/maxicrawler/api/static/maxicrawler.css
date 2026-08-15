@@ -768,8 +768,9 @@ footer {
 .crumbs span { color: var(--text); }
 
 /*
- * The path of a stored file. A field rather than a line of text, because
- * selecting it is what somebody does with it, and a field selects cleanly.
+ * Something to copy: the path of a stored file, or the line that runs a
+ * maintenance script. A field rather than a line of text, because selecting it
+ * is what somebody does with it, and a field selects cleanly.
  */
 .pathbox { display: flex; align-items: flex-end; gap: 10px; margin-top: 14px; }
 .pathbox label { display: flex; flex-direction: column; gap: 4px; flex: 1 1 auto; }
@@ -779,7 +780,7 @@ footer {
   text-transform: uppercase;
   color: var(--muted);
 }
-.pathbox input.path {
+.pathbox input {
   width: 100%;
   padding: 6px 8px;
   font-family: var(--mono);
@@ -798,6 +799,19 @@ footer {
   cursor: pointer;
 }
 .pathbox button:hover { background: var(--bg); }
+
+/*
+ * One maintenance run. The file name sits in the heading beside the title: the
+ * title says what it is for, and the file name is what you would look for in
+ * the repository -- neither answers for the other.
+ */
+.run > h2 .script {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted);
+}
 
 /*
  * Where the browser shows the file. A fixed height rather than a fitted one:

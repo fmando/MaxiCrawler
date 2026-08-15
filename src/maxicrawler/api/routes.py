@@ -50,6 +50,8 @@ from maxicrawler.app import (
     crawl_document,
     parse_verdict,
 )
+from maxicrawler.app.maintenance import RUNS, toolbox
+from maxicrawler.app.thumbnails import AVAILABLE as THUMBNAILS_AVAILABLE
 from maxicrawler.app.thumbnails import CONTENT_TYPE as THUMBNAIL_CONTENT_TYPE
 from maxicrawler.app.viewing import DOWNLOAD_CONTENT_TYPE, MediaKind
 from maxicrawler.domain import DownloadStatus, ReviewVerdict
@@ -77,13 +79,18 @@ SECTIONS = (
     Section("crawls", "Crawls", "crawls"),
     Section("downloads", "Downloads", "downloads"),
     Section("library", "Library", "library"),
+    Section("maintenance", "Maintenance", "maintenance"),
     Section("settings", "Settings", "settings"),
 )
-"""The five areas, in the order the chain runs through them.
+"""The six areas, in the order the chain runs through them.
 
 Downloads became one of them in Sprint 15. Before the queue there was nothing to
 put on such a page — a transfer had its own page and there was only ever one —
 and a section for it would have been a heading over a single link.
+
+Maintenance sits beside settings rather than under the library, because what it
+describes is run against the whole installation and one of the runs sets the
+library aside altogether. Like settings, it only ever reads.
 """
 
 
@@ -1212,6 +1219,38 @@ async def settings(request: Request) -> Response:
             "source_exists": source is not None and Path(source).exists(),
         },
         section="settings",
+    )
+
+
+async def maintenance(request: Request) -> Response:
+    """Show what can be run against this library, and what to type to run it.
+
+    Read-only in the strongest sense available here: there is no POST route to
+    this page, not even an unused one. The interface has no authentication
+    (ADR-025) and is served over the network on the machine it administers, so a
+    button that ran one of these would be a button anybody who can reach the
+    port may press — and one of them moves a whole library aside. The
+    same-origin check (ADR-043) is no help against that: it turns away a page
+    somebody else wrote, not somebody addressing this port directly.
+
+    What the page can honestly offer is the command. Whoever pastes it is at a
+    shell on this machine already, which is the permission check the interface
+    cannot make.
+    """
+    box = toolbox(request.app.state.config_path)
+    shelf = library_of(request)
+    effective = jobs_of(request).service.settings
+    return page(
+        request,
+        "maintenance.html",
+        {
+            "runs": views.maintenance_view(RUNS, box),
+            "scripts": None if box.scripts is None else box.scripts.as_posix(),
+            "library_path": effective.library_path.as_posix(),
+            "config": None if box.config is None else Path(box.config).as_posix(),
+            "thumbnails": views.cache_view(shelf.thumbnail_usage(), available=THUMBNAILS_AVAILABLE),
+        },
+        section="maintenance",
     )
 
 

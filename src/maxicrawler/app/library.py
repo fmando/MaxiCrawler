@@ -66,7 +66,7 @@ from pathlib import Path
 from typing import Any
 
 from maxicrawler.app.discovery import StateResolver
-from maxicrawler.app.thumbnails import ThumbnailCache, cache_beside, key_for
+from maxicrawler.app.thumbnails import CacheUsage, ThumbnailCache, cache_beside, key_for
 from maxicrawler.app.viewing import Display, MediaKind, MediaVerdict, kind_for, verdict_for
 from maxicrawler.config import Settings
 from maxicrawler.database import IndexedEntry, SQLiteDatabase, SQLiteLibraryIndex
@@ -818,6 +818,16 @@ class LibraryService:
         """
         item = self.item(provider, key)
         return None if item is None else self.thumbnail_of(item)
+
+    def thumbnail_usage(self) -> CacheUsage:
+        """Return what the thumbnail cache for this library holds.
+
+        Asked through the service rather than by building a second cache from
+        the same settings: this one owns the directory, and a caller that
+        computed the path itself would show the default while the service used
+        an injected one.
+        """
+        return self._thumbnails.usage()
 
     def thumbnail_key(self, item: LibraryItem) -> str | None:
         """Return what *item*'s thumbnail is filed under, or ``None`` for none.

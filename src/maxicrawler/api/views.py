@@ -50,6 +50,8 @@ from maxicrawler.app import (
     StoredPayload,
     TargetKind,
 )
+from maxicrawler.app.maintenance import MaintenanceRun, Toolbox
+from maxicrawler.app.thumbnails import CacheUsage
 from maxicrawler.app.viewing import MediaKind
 from maxicrawler.config import Settings
 from maxicrawler.crawler import PluginUsage
@@ -2404,3 +2406,63 @@ def _state_tone(snapshot: JobSnapshot) -> str:
     if snapshot.error is not None:
         return "bad"
     return STATE_TONES[snapshot.state]
+
+
+def maintenance_view(runs: Iterable[MaintenanceRun], box: Toolbox) -> tuple[dict[str, Any], ...]:
+    """Return one card per maintenance script, each with the lines to paste.
+
+    Two lines where a run writes, and the flag is the only difference between
+    them: a pass over a real library is a list worth reading before it is a
+    thing worth doing. One line where it does not write, because there is
+    nothing to read first.
+
+    Without a scripts directory — an installation from a wheel — the cards keep
+    their descriptions and lose their commands. Naming a file that was never
+    copied would be worse than saying there is nothing to run.
+    """
+    return tuple(_maintenance_card(run, box) for run in runs)
+
+
+def _maintenance_card(run: MaintenanceRun, box: Toolbox) -> dict[str, Any]:
+    """Return one card, commands and all."""
+    slug = run.script.removesuffix(".py").replace("_", "-")
+    lines: list[dict[str, Any]] = []
+    dry = box.command(run)
+    if dry is not None:
+        lines.append(
+            {
+                "label": "What it would do" if run.writes else "Run it",
+                "id": f"command-{slug}",
+                "command": dry,
+            }
+        )
+        if run.writes:
+            applied = box.command(run, apply=True)
+            lines.append({"label": "Do it", "id": f"command-{slug}-apply", "command": applied})
+    return {
+        "script": run.script,
+        "title": run.title,
+        "summary": run.summary,
+        "caution": run.caution,
+        # Named as the command that installs it, since that is what somebody
+        # reading this would do next.
+        "extra": None if run.extra is None else f"uv sync --extra {run.extra}",
+        "writes": run.writes,
+        "commands": tuple(lines),
+    }
+
+
+def cache_view(usage: CacheUsage, *, available: bool) -> dict[str, Any]:
+    """Return what the thumbnail cache holds, for the line above the cards.
+
+    The one fact about this installation that no other page carries, and the one
+    worth knowing before running the maker: whether it can run at all, and how
+    much is already there.
+    """
+    return {
+        "root": usage.root.as_posix(),
+        "count": format_number(usage.count),
+        "size": format_size(usage.total_bytes),
+        "empty": usage.count == 0,
+        "available": available,
+    }
