@@ -1,0 +1,96 @@
+{#
+  The jobs that are done from a shell, and the line that does each one.
+
+  No form on this page, and no button that acts -- see `routes.maintenance` for
+  why that is a decision rather than an omission. Everything here is a
+  description and a command to copy; the page cannot run any of it, and a
+  browser that reaches this port cannot either.
+#}
+{% extends "base.html" %}
+{% block title %}Maintenance · MaxiCrawler{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <h2>Runs over the whole library</h2>
+  <div class="body">
+    <p class="muted">
+      The interface answers a question at a time; these ask one of the whole
+      shelf. They are run from a shell on this machine, and this page is where
+      to find out which one to run and what to type.
+    </p>
+    <p class="muted">
+      Nothing here is a button, deliberately. There is no sign-in on this
+      interface, so a button that ran one of these would be one anybody who can
+      reach this port may press — and one of them sets a whole library aside.
+      Pasting the line is the permission check: it needs a shell here.
+    </p>
+    <p class="facts">
+      <span>library <b>{{ library_path }}</b></span>
+      {% if config %}
+        <span>settings <b>{{ config }}</b></span>
+      {% else %}
+        <span>settings <b>the built-in defaults</b></span>
+      {% endif %}
+    </p>
+    <p class="facts">
+      {% if thumbnails.empty %}
+        <span>no thumbnails made yet</span>
+      {% else %}
+        <span><b class="num">{{ thumbnails.count }}</b> thumbnails, <b>{{ thumbnails.size }}</b></span>
+      {% endif %}
+      <span class="muted">{{ thumbnails.root }}</span>
+      {% if not thumbnails.available %}
+        <span class="bad-text">Pillow is not installed here, so none can be made</span>
+      {% endif %}
+    </p>
+    {% if not scripts %}
+      <p class="note">
+        This server is running from an installation rather than a checkout, so
+        the scripts are not beside it. They live in the repository, under
+        <code>scripts/</code>.
+      </p>
+    {% endif %}
+  </div>
+</section>
+
+{% for run in runs %}
+  <section class="panel run">
+    <h2>{{ run.title }} <span class="script">{{ run.script }}</span></h2>
+    <div class="body">
+      <p>{{ run.summary }}</p>
+      {% if run.caution %}
+        <p class="note">{{ run.caution }}</p>
+      {% endif %}
+      {% if run.extra %}
+        <p class="notice">Needs an optional dependency: <code>{{ run.extra }}</code></p>
+      {% endif %}
+      {% if run.writes %}
+        <p class="muted">
+          Writes nothing without <code>--apply</code>. The first line prints
+          what it would do and stops.
+        </p>
+      {% else %}
+        <p class="muted">Reports only. It writes nothing at all, so it takes no flag to say so.</p>
+      {% endif %}
+      {% for line in run.commands %}
+        {#
+          A field rather than a line of text: selecting it is what somebody does
+          with it, and a field selects cleanly with or without the button.
+        #}
+        <div class="pathbox">
+          <label>
+            <span>{{ line.label }}</span>
+            <input id="{{ line.id }}" type="text" value="{{ line.command }}" readonly
+                   spellcheck="false" onclick="this.select()">
+          </label>
+          {# Hidden until the script un-hides it: a button that cannot work is
+             worse than no button. #}
+          <button type="button" class="copy" data-copy="#{{ line.id }}" hidden>Copy</button>
+        </div>
+      {% endfor %}
+    </div>
+  </section>
+{% endfor %}
+
+<script src="/static/copy.js" defer></script>
+{% endblock %}

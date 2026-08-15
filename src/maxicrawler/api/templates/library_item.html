@@ -156,14 +156,15 @@
         <div class="pathbox">
           <label>
             <span>Path</span>
-            <input class="path" type="text" value="{{ item.path }}" readonly
+            <input id="item-path" type="text" value="{{ item.path }}" readonly
                    spellcheck="false" onclick="this.select()">
           </label>
           {#
             Hidden until the script un-hides it: a button that cannot work is
-            worse than no button.
+            worse than no button. By id rather than by class, which is what lets
+            one script serve a page carrying several of these.
           #}
-          <button type="button" class="copy" data-copy=".path" hidden>Copy</button>
+          <button type="button" class="copy" data-copy="#item-path" hidden>Copy</button>
         </div>
         <script src="/static/copy.js" defer></script>
       {% endif %}

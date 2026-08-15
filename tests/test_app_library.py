@@ -978,6 +978,29 @@ def test_the_thumbnail_cache_is_never_inside_the_library(tmp_path: Path) -> None
     assert not made.is_relative_to(library.root)
 
 
+def test_the_service_reports_the_cache_it_actually_uses(tmp_path: Path) -> None:
+    """Asked through the service so it cannot be the wrong directory.
+
+    A caller computing the path from the same settings would show the default
+    while the service read an injected one, and be right most of the time --
+    which is the worst kind of wrong for something a page states as fact.
+    """
+    service, library = make_service(tmp_path)
+    key = write(library, "AaBbCcDd", name="a.jpg", filename="a.jpg", size=2_000)
+    item = service.item("mega", key)
+    assert item is not None
+
+    empty = service.thumbnail_usage()
+    made = make_thumbnail(service, item)
+
+    filled = service.thumbnail_usage()
+
+    assert empty.count == 0
+    assert filled.count == 1
+    assert filled.total_bytes == made.stat().st_size
+    assert made.is_relative_to(filled.root)
+
+
 def test_asking_for_a_thumbnail_by_name_answers_the_same(tmp_path: Path) -> None:
     """What a request reaches, and what a listing sees, agree."""
     service, library = make_service(tmp_path)

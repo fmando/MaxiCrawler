@@ -272,6 +272,10 @@ def create_app(
                 methods=["GET"],
                 name="library_item",
             ),
+            # GET and nothing else, deliberately. See `routes.maintenance`: the
+            # page prints the command and never runs it, and the absence of a
+            # POST route here is where that promise is kept.
+            Route("/maintenance", routes.maintenance, methods=["GET"], name="maintenance"),
             Route("/settings", routes.settings, methods=["GET"], name="settings"),
             Route("/health", health, methods=["GET"], name="health"),
             Mount(
