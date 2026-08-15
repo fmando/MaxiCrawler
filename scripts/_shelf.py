@@ -11,7 +11,6 @@ and running it would do nothing.
 
 import argparse
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 # Run from a checkout without installing it.
@@ -20,11 +19,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from maxicrawler.app import LibraryItem, LibraryQuery, LibraryService  # noqa: E402
 from maxicrawler.config import Settings  # noqa: E402
 from maxicrawler.domain import ReviewVerdict  # noqa: E402
-
-PAGE_SIZE = 500
-"""How many entries are asked for at a time. Large enough that a library of ten
-thousand is twenty questions, small enough that none of them is the whole thing.
-"""
 
 
 def parser_for(description: str) -> argparse.ArgumentParser:
@@ -50,22 +44,23 @@ def settings_from(config: Path | None) -> Settings:
 
 
 def every_item(shelf: LibraryService, *, discarded: bool = False) -> list[LibraryItem]:
-    """Return every entry in the library, page by page.
+    """Return every entry in the library, in one pass.
 
-    Collected in full before anything is done with it rather than acted on while
-    paging: a script that discards as it walks changes what page two holds, and
-    a listing that moves under a loop is how half of a set gets skipped.
+    Through :meth:`LibraryService.every`, which exists for callers like these.
+    This used to ask for page after page, which looked frugal and was the
+    opposite: a listing reads and orders the whole library before cutting a page
+    out of it, so paging over twenty thousand entries did that work a hundred
+    times over. It cost nothing on the small libraries it was written against
+    and minutes on a real one.
 
     A plain listing leaves out what was discarded, and deliberately so — the
     verdict means "out of my way". A script that *describes* the shelf has to
     ask for those separately, hence *discarded*; one that acts on files wants
     the default, since there is nothing left of them to act on.
     """
-    items = _all_pages(shelf, LibraryQuery(per_page=PAGE_SIZE))
+    items = list(shelf.every())
     if discarded:
-        items.extend(
-            _all_pages(shelf, LibraryQuery(per_page=PAGE_SIZE, verdict=ReviewVerdict.DISCARDED))
-        )
+        items.extend(shelf.every(LibraryQuery(verdict=ReviewVerdict.DISCARDED)))
     return items
 
 
@@ -81,15 +76,3 @@ def holds_a_file(item: LibraryItem) -> bool:
     report space that is already free.
     """
     return item.is_stored and item.verdict is not ReviewVerdict.DISCARDED
-
-
-def _all_pages(shelf: LibraryService, query: LibraryQuery) -> list[LibraryItem]:
-    """Return every row *query* matches, asking one page at a time."""
-    items: list[LibraryItem] = []
-    page_number = 1
-    while True:
-        page = shelf.browse(replace(query, page=page_number))
-        items.extend(page.items)
-        if page_number >= page.pages:
-            return items
-        page_number += 1

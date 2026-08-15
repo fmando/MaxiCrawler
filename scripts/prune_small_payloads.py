@@ -81,16 +81,19 @@ def main() -> int:
         return 0
 
     shelf = LibraryService(settings)
+    # Before the reading and flushed: on a large library this is a wait, and a
+    # terminal that has printed nothing looks the same as one that has hung.
+    print(f"Library:  {settings.library_path}")
+    print("Reading every entry...", flush=True)
     items = every_item(shelf)
     doomed = [
         too for too in items if too_small(too, limit=limit, favourites=args.include_favourites)
     ]
     unknown = sum(1 for item in items if holds_a_file(item) and item.size is None)
 
-    print(f"Library:  {settings.library_path}")
-    print(f"Entries:  {len(items)}, of which {len(doomed)} are under {format_size(limit)}")
+    print(f"Entries:  {len(items):,}, of which {len(doomed):,} are under {format_size(limit)}")
     if unknown:
-        print(f"Unsized:  {unknown} stored entries record no size and are left alone")
+        print(f"Unsized:  {unknown:,} stored entries record no size and are left alone")
     if not doomed:
         return 0
 

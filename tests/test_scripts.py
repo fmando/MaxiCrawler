@@ -518,6 +518,36 @@ def test_a_discarded_entry_is_counted_as_a_record_and_not_as_a_file(tmp_path: Pa
     assert "999" not in header
 
 
+def test_the_cost_of_a_tile_page_is_counted_from_the_images_shown_at_full_size(
+    tmp_path: Path,
+) -> None:
+    """The number neither histogram gives on its own.
+
+    A small file can be a large picture: what is sent and what the browser then
+    holds differ by the compression. Only the images below the byte limit are
+    counted, because those are the ones a tile loads as they are.
+    """
+    config = settings_file(tmp_path)
+    library = Library(tmp_path / "library")
+    library.initialize()
+    small_file_big_picture = write(library, "sneaky", filename="sneaky.png", size=900_000)
+    (entry_path(library, small_file_big_picture) / "content" / "sneaky.png").write_bytes(
+        png_header(6000, 4000)
+    )
+    # Over the limit, so a tile shows a symbol for it and it is not counted.
+    heavy = write(library, "heavy", filename="heavy.png", size=8_000_000)
+    (entry_path(library, heavy) / "content" / "heavy.png").write_bytes(png_header(8000, 8000))
+
+    finished = run(SURVEY, config)
+
+    assert finished.returncode == 0, finished.stderr
+    page = finished.stdout.split("What a page of")[1]
+    assert "1 of 1 are over 4 MP" in page
+    # 24 megapixels at four bytes each, and only the one that is shown at full
+    # size: 96 MB, not the 256 MB the other one would add.
+    assert "96.0 MB" in page
+
+
 def test_the_measuring_can_be_left_out(tmp_path: Path) -> None:
     config = settings_file(tmp_path)
     library = Library(tmp_path / "library")
