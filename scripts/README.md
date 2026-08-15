@@ -23,6 +23,12 @@ that is where it learns the library path. Without it, the defaults apply.
 They add `src/` to the import path themselves, so a checkout is enough; nothing
 has to be installed.
 
+If the server is running, its **Maintenance** page prints the line for each of
+these already filled in — the interpreter it is running under and the settings
+file it was started with — ready to copy. It only ever prints: there is no
+button, because there is no sign-in in front of this interface and one of these
+sets a whole library aside (ADR-045).
+
 ## Two rules they all keep
 
 **Nothing is written without `--apply`**, and a script that cannot write does

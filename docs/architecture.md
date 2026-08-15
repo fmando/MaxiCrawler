@@ -1368,7 +1368,7 @@ maxicrawler.api ─┘
 | `downloads` | *"What is transferring?"* A queue of requests, drained one at a time by a worker thread. |
 | `stream` | *"What has changed?"* Snapshots from a worker thread to an `EventSource`, for either of the two. |
 | `errors` | *"What is missing?"* Imports nothing, so it can be read by an installation that cannot import the rest. |
-| `templates/`, `static/` | The pages, one stylesheet, and four small scripts. |
+| `templates/`, `static/` | The pages, one stylesheet, and five small scripts. |
 
 Starlette rather than FastAPI. FastAPI earns its weight through request-model
 validation and a generated OpenAPI document, and this serves HTML with three
@@ -1408,6 +1408,7 @@ crawl, and it does not render one.
 | `GET …/file` | The bytes, as a download. States no type. |
 | `GET …/view` | The bytes, for the browser to display. States a type, from an allow-list. |
 | `GET /settings` | The configuration as it was read. Read-only. |
+| `GET /maintenance` | The maintenance runs, and the line that runs each one here. There is deliberately no POST route beside it (ADR-045). |
 | `GET /health` | That the server is answering — the first route written, and the one that proves the event loop is free while a crawl runs. |
 
 ### Every number leaves `views` as a string
@@ -1788,6 +1789,29 @@ for yet.
 Thumbnails are made by `scripts/make_thumbnails.py` and served by a route that
 never makes one; the cache lives beside the database and never inside
 `library/` (ADR-044).
+
+### A page that describes a script it cannot run
+
+`GET /maintenance` names every script in `scripts/`, what it is for, and the
+line that would run it on this machine — and there is no POST route beside it,
+not even an unused one. Without authentication (ADR-025) and served over the
+network, a control that started one of these would be reachable by anybody who
+can reach the port, and `start_over.py` moves a whole library aside; the
+same-origin check turns away another site's page, not a direct request
+(ADR-043). Printing the command is what a page can honestly offer, because
+pasting it needs a shell on the machine (ADR-045).
+
+`app/maintenance.py` holds the descriptions and builds the command from what
+the process knows about itself: `sys.executable`, the settings path the
+application was given, and the directory beside the package — recognised by
+`_shelf.py` being in it, since a path computed from another path is a guess
+until something in it says otherwise. `api` renders that; nothing in `src/`
+imports a script, and an installation from a wheel keeps the descriptions and
+loses the commands.
+
+The descriptions are checked against the directory rather than trusted: every
+script has a card, every card has a script, and each script's own `--help`
+decides whether the page may call it one that writes.
 
 ### Walking a listing
 

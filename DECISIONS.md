@@ -1439,3 +1439,45 @@ request path.
 **Only images.** Video would need ffmpeg and PDF a renderer; both are their own
 decision, and neither is made here.
 
+
+## ADR-045: The maintenance page prints a command and runs nothing
+
+The scripts in `scripts/` answer questions the interface does not — what is
+actually on the shelf, where records and files have come apart, which payloads
+are too small to keep. Finding out they exist meant reading a directory in a
+checkout, so the interface now has a page describing them.
+
+**It has no button, and that is the decision rather than an omission.** There is
+no authentication here (ADR-025) and the server is run with `--allow-remote` on
+the machine it administers, so a control that started one of these would be one
+anybody who can reach the port may press — and `start_over.py` moves a whole
+library aside. The same-origin check does not help: it turns away a page
+somebody else wrote from acting through a browser, and turns away nobody
+addressing this port directly (ADR-043). So there is no POST route to this page,
+not even an unused one, and a test asserts the page carries no form at all.
+
+**What it can honestly offer is the command.** Whoever pastes it is at a shell
+on that machine already, which is the permission check the interface cannot
+make. The line is built from what the process knows about itself — the
+interpreter running it, the settings file it was started with, the directory
+beside the package — rather than from a guess about somebody's working
+directory, so it can be pasted as it stands. It is quoted for the shell of the
+machine that printed it, since a path with a space in it is ordinary.
+
+**A description of a program that lives elsewhere goes stale silently**, which is
+the risk of writing this down at all: a script gains a flag, is renamed, or is
+deleted, and the page goes on saying what used to be true. So the directory
+decides which runs exist — in both directions — and each script's own `--help`
+decides whether it writes. The list cannot drift without a test failing.
+
+**It reports nothing the runs report.** A survey reads every image header and the
+doctor walks every directory; neither belongs inside a request, and a thinner
+version rendered here would be a second, weaker answer beside the real one. The
+page carries only what the process already knows: which library the runs would
+act on, and what the thumbnail cache holds.
+
+**Nothing in `src/` imports the scripts**, and this does not change that. What
+`maxicrawler.app.maintenance` holds is a description — names, prose, and a
+string to display. Removing the directory still changes nothing about what
+MaxiCrawler does; the page then says so instead of naming files that are not
+there, which is also what an installation from a wheel gets.
