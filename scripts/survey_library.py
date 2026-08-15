@@ -252,6 +252,11 @@ def main() -> int:
     settings = settings_from(args.config)
 
     shelf = LibraryService(settings)
+    # Said before the reading rather than after it, and flushed, because on a
+    # library of twenty thousand this is a wait — and a terminal that has
+    # printed nothing looks the same as one that has hung.
+    print(f"Library:  {settings.library_path}")
+    print("Reading every entry...", flush=True)
     # Discarded entries included: this is a description of the shelf, and the
     # headstones are part of what is on it.
     items = every_item(shelf, discarded=True)
@@ -260,7 +265,6 @@ def main() -> int:
     unsized = sum(1 for item in stored if item.size is None)
     headstones = sum(1 for item in items if item.verdict is ReviewVerdict.DISCARDED)
 
-    print(f"Library:  {settings.library_path}")
     print(f"Entries:  {len(items):,}, of which {len(stored):,} hold a file, {format_size(total)}")
     if headstones:
         print(f"Discarded:{headstones:>6,} more are records of files thrown away")

@@ -501,6 +501,27 @@ class LibraryService:
             queued=None if self._queued is None else sum(item.queued for item in items),
         )
 
+    def every(self, query: LibraryQuery | None = None) -> tuple[LibraryItem, ...]:
+        """Return every item *query* matches, in order, with no page cut from it.
+
+        For a caller that wants the whole answer rather than a screen of it: a
+        maintenance pass, a report over the library, a count. Asking
+        :meth:`browse` for page after page would be the expensive way to get
+        here, and not by a little — a listing reads, filters and orders the
+        entire library before it cuts a page out, so paging through *n* entries
+        does the whole of that ⌈n / :data:`MAX_PER_PAGE`⌉ times. This does it
+        once.
+
+        The ceiling on :attr:`LibraryQuery.per_page` stays where it is and keeps
+        meaning what it means. A request arriving over HTTP for ten thousand
+        rows is a mistake or an attack; a script that has been told to go over
+        the library is neither, and the difference is which door the caller came
+        through, not which method it called.
+        """
+        asked = query if query is not None else LibraryQuery()
+        _, ordered = self._ranked(asked)
+        return ordered
+
     def locate(
         self, provider: str, key: str, query: LibraryQuery | None = None
     ) -> "LibraryPlace | None":

@@ -698,6 +698,53 @@ def test_a_page_size_is_bounded(tmp_path: Path) -> None:
     assert DEFAULT_PER_PAGE == 50
 
 
+def test_everything_can_be_asked_for_at_once(tmp_path: Path) -> None:
+    """Past the page ceiling, which is what a maintenance pass needs.
+
+    The ceiling stays where it is for :meth:`browse`, and means what it means
+    there: a request over HTTP for ten thousand rows is a mistake or an attack.
+    A script told to go over the library is neither.
+    """
+    service, library = make_service(tmp_path)
+    for index in range(MAX_PER_PAGE + 5):
+        write(library, f"Handle{index:04d}")
+
+    assert len(service.every()) == MAX_PER_PAGE + 5
+
+
+def test_everything_is_the_pages_put_back_together(tmp_path: Path) -> None:
+    """Same reading, same filtering, same order — only the cut is missing.
+
+    Worth pinning down, because the cheap way to get the whole answer used to be
+    to ask for page after page, and anything the two disagreed about would be a
+    difference between what a person sees and what a pass over the library acts
+    on.
+    """
+    service, library = make_service(tmp_path)
+    for index in range(7):
+        write(library, f"Handle{index:02d}", name=f"name-{index}")
+    query = LibraryQuery(sort=LibrarySort.NAME, descending=False, per_page=2)
+
+    paged: list[str] = []
+    for number in range(1, service.browse(query).pages + 1):
+        page = service.browse(
+            LibraryQuery(sort=LibrarySort.NAME, descending=False, per_page=2, page=number)
+        )
+        paged.extend(item.key for item in page.items)
+
+    assert [item.key for item in service.every(query)] == paged
+
+
+def test_everything_answers_the_query_it_is_given(tmp_path: Path) -> None:
+    service, library = make_service(tmp_path)
+    write(library, "AaBbCcDd", name="keep me")
+    write(library, "EeFfGgHh", name="not this one")
+
+    found = service.every(LibraryQuery(search="keep"))
+
+    assert [item.name for item in found] == ["keep me"]
+
+
 def test_sorting_happens_before_paging(tmp_path: Path) -> None:
     """The other order would sort a page instead of the library."""
     service, library = make_service(tmp_path)
