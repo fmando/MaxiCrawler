@@ -804,6 +804,10 @@ one host face at once" is the same kind of question `robots.txt` answers for
 crawling, and this sprint is about a person's workflow rather than a host's
 patience.
 
+> Superseded by ADR-046, which answers the politeness question and adds the
+> workers. The claim that a second thread "would need no other change" turned
+> out to be wrong in a way worth reading about there.
+
 **`DownloadService` is still the only thing that starts a download.** The queue
 decides which request is next and whether the worker may take it. Every transfer
 that happens is one `DownloadService.download` call, unchanged, with the same
@@ -1481,3 +1485,66 @@ act on, and what the thumbnail cache holds.
 string to display. Removing the directory still changes nothing about what
 MaxiCrawler does; the page then says so instead of naming files that are not
 there, which is also what an installation from a wheel gets.
+
+## ADR-046: Several transfers at once, and what a host is owed
+
+ADR-033 left the queue draining one request at a time and said why: how many
+transfers a host should face is a politeness question, and that sprint was about
+a person's workflow. The question is answered here, and the answer is what makes
+the workers permissible rather than merely faster.
+
+**Two numbers, and the second is the one that matters.** `download_workers`
+(five) is how many transfers may be under way; `downloads_per_host` (three) is
+how many of those may be fetching from one server. Without the second, the first
+would be five requests at one host every time — a crawl's take comes from one
+site, which is precisely the case the queue exists for. Three is about what a
+browser opens to one origin for an ordinary page. The crawler waits out a host's
+`Crawl-delay` next door; this is the same courtesy on the other half of the
+chain. Both are settings, and `downloads_per_host = 1` restores a queue that
+meets each host singly while still fetching from several.
+
+**The order holds per host, and not across them.** A worker passes over a
+request whose host is busy and takes the next one it may. The alternative is a
+pool that stops at the first busy server with four workers idle, which is the
+same thing as no pool. So "the order they arrived" (ADR-033) now means: within
+one host, exactly that; across hosts, the first request that is allowed to
+start.
+
+**A second thread needed more than a second thread.** ADR-033 said the queue was
+written for more than one worker and that another thread "would need no other
+change". Two threads are what proved otherwise, and the fault was two layers
+down: every download initializes the library, `_replace_atomically` staged every
+write through one `.tmp` name per destination, and so every parallel download
+raced for `library.json`. Four in five failed outright on Windows. On Linux
+nothing would have failed — the two writers would have interleaved into one
+file, quietly, which is the worse of the two outcomes. The temporary file is
+named for the write now, and creating a descriptor somebody else has just
+created is success rather than an error.
+
+Two smaller pieces of shared state went the same way: Mega's API client numbered
+its requests with a bare increment, and `DownloadService` built its provider
+registry outside any lock. Neither would have corrupted anything. Both are the
+kind of thing that is only ever found by looking, because their symptoms are
+invisible.
+
+**A URL is held once.** The queue declines a request it is already holding,
+waiting or running, and hands back the run that is there — so a second click
+lands on the transfer being asked about, and *"queue every match"* pressed twice
+on a half-drained filter says how many were already coming rather than fetching
+them again. What the queue holds is one dictionary, which is also what a report
+reads to mark a row *in queue*: one answer rather than two that can disagree.
+The worker keeps its own check against fetching one URL twice at once, because
+two transfers writing into one entry's staging directory is not a failure
+anybody would recognise from its symptoms.
+
+**The rate is per transfer, and says so.** Transfer time is added across
+transfers that overlap: two files moving for ten seconds each is twenty seconds
+of transferring. Wall-clock time would answer a different question, and the
+queue has no clock of its own to answer it with.
+
+**Not this: a worker per file, or a worker that retires.** Five is a number for
+a machine that is mostly waiting on other people's servers, not a thread pool
+sized to anything measured here. Threads are never retired: a worker costs a
+stack and a wait on a condition, and a queue that has been busy once will be
+busy again. Only as many start as there is work, so a single download queued by
+hand starts one thread rather than five.

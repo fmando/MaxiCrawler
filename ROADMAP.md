@@ -108,16 +108,11 @@ not change.
     string at a time. The columns a judgement needs exist and already answer
     *stored* and *dismissed* without parsing; the rest waits for a measurement
     that says it is worth the extraction rules
--   Deduplicating what is queued. `TransferQueue.submit` will happily hold the
-    same URL twice, and "queue every match" pressed after a partial drain
-    re-queues what already arrived. Half of this landed in 0.15: the set
-    questions are answered — `LibraryService.stored` and `TransferQueue.pending`
-    are what mark a report's rows *in library* and *in queue* (ADR-037) — and a
-    report now shows you before you click. 0.16 added the first refusal: what
-    somebody ignored or discarded is left out of *"queue every match"* and turned
-    away by the worker (ADR-041). What is missing is the queue declining a URL it
-    already holds, which is a decision about what a refusal means rather than
-    about where the answer comes from
+-   ~~Deduplicating what is queued.~~ Done (ADR-046): the queue holds a URL
+    once, waiting or running, and answers a second submission with the run that
+    is already there. What is left of this subject is the *library* question
+    rather than the queue's — one file reached through two different share
+    links, which is the duplicates entry further down
 -   A politeness schedule shared across concurrent crawls. Today a `HostSchedule`
     lives per crawl, which is exactly right while `serve` runs one worker and
     wrong the moment it runs two
@@ -165,11 +160,16 @@ not change.
     consecutive and nothing locks the directory. The damage is bounded by the
     two writers touching disjoint members (ADR-040), so the worst case is one
     judgement lost rather than a document describing a file that is not there —
-    which is why this is named rather than urgent
--   Per-host politeness for downloads. The queue drains one at a time, and that
-    is a decision rather than a limit (ADR-033) — but the reason to keep it is
-    a host's patience, which nothing currently measures. A schedule like the
-    crawler's is what would let the number rise honestly
+    which is why this is named rather than urgent. Bounded a second way since
+    ADR-046: a write stages through a name of its own, so the loser of a race
+    loses its document rather than mixing it into the winner's
+-   ~~Per-host politeness for downloads.~~ Done (ADR-046) — as a count rather
+    than a schedule: `downloads_per_host` bounds how many transfers one server
+    faces at once, which is what let the worker count rise honestly. What a
+    schedule would add on top is *spacing* — a wait between two requests to the
+    same host, the way the crawler honours `Crawl-delay`. Nothing has asked for
+    it yet: a download is one long request rather than a burst of short ones,
+    which is the case a delay is for
 -   Filtering and sorting the *crawl* list. The link and page tables inside one
     report have it since 0.14; the list of crawls itself is still everything in
     the order it was recorded. Still the point at which htmx would earn being
@@ -189,9 +189,11 @@ not change.
     were: a share on one of those still needs its own provider to be *read*,
     but every ordinary file on the web is now fetched by `DirectProvider`
     (ADR-036), which is what most crawl results actually point at
--   Parallel downloads — a second thread on the same drain loop, which needs no
-    other change: the queue is guarded throughout and the worker holds no state
-    between requests
+-   ~~Parallel downloads~~ — done (ADR-046), and the "needs no other change"
+    this entry promised was wrong: every download writes the library descriptor,
+    and every write went through one temporary name, so the first thing two
+    workers did was race for one file. Worth remembering the next time an entry
+    here says a change is free
 -   Resume — HTTP range requests plus a byte offset in the metadata record; the
     staging directory already keeps a partial file out of the library
 -   Provider-side integrity verification beside the recorded SHA-256, starting
