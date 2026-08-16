@@ -11,7 +11,7 @@
 {% block content %}
 <section class="panel">
   <h2>
-    <span class="badge {{ download.state_tone }}" id="download-state">{{ download.state_label }}</span>
+    <span class="badge {{ download.state_tone }}" id="download-state-{{ download.download_id }}">{{ download.state_label }}</span>
     <span class="url">{{ download.label }}</span>
 
     {% if not download.is_finished %}
@@ -102,8 +102,14 @@
   </div>
 </section>
 
+{#
+  One stream, written the same way the queue writes its several: the script has
+  one rule, and this page is the case where there happens to be one of them.
+#}
 {% if not download.is_finished %}
-  <div id="download-live" data-stream="/downloads/{{ download.download_id }}/events" hidden></div>
+  <div id="download-live" hidden>
+    <span data-stream="/downloads/{{ download.download_id }}/events"></span>
+  </div>
   <script src="/static/download.js" defer></script>
 {% endif %}
 {% endblock %}

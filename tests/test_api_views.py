@@ -1204,7 +1204,7 @@ def test_the_strip_wears_only_tones_the_stylesheet_knows() -> None:
 
 def make_queue_snapshot(**overrides: object) -> QueueSnapshot:
     """Return what a queue holds, with no queue behind it."""
-    values: dict[str, object] = {"active": None, "waiting": (), "finished": ()}
+    values: dict[str, object] = {"running": (), "waiting": (), "finished": ()}
     values.update(overrides)
     return QueueSnapshot(**values)  # type: ignore[arg-type]
 
@@ -1215,11 +1215,25 @@ def test_a_queue_with_nothing_left_to_do_is_not_watched() -> None:
 
 
 def test_a_running_transfer_is_what_the_page_listens_to() -> None:
-    follow = queue_follow(make_queue_snapshot(active=make_download_snapshot()))
+    follow = queue_follow(make_queue_snapshot(running=(make_download_snapshot(),)))
 
-    assert follow["stream"] == "/downloads/d1/events"
+    assert follow["streams"] == ("/downloads/d1/events",)
     assert follow["swap"] == "/downloads?part=queue"
     assert follow["into"] == "queue"
+
+
+def test_every_running_transfer_gets_a_stream_of_its_own() -> None:
+    """One bar apiece, and no bar taking another transfer's numbers."""
+    follow = queue_follow(
+        make_queue_snapshot(
+            running=(
+                make_download_snapshot(download_id="d1"),
+                make_download_snapshot(download_id="d2"),
+            )
+        )
+    )
+
+    assert follow["streams"] == ("/downloads/d1/events", "/downloads/d2/events")
 
 
 def test_the_moment_between_two_transfers_is_asked_about_rather_than_listened_to() -> None:
@@ -1231,20 +1245,20 @@ def test_the_moment_between_two_transfers_is_asked_about_rather_than_listened_to
     """
     follow = queue_follow(
         make_queue_snapshot(
-            active=make_download_snapshot(summary=make_summary()),
+            running=(make_download_snapshot(summary=make_summary()),),
             waiting=(make_download_snapshot(),),
         )
     )
 
-    assert follow["stream"] is None
+    assert follow["streams"] == ()
     assert follow["swap"] == "/downloads?part=queue"
 
 
 def test_a_queue_with_something_waiting_and_nothing_running_asks_again() -> None:
-    """The same gap, seen from the other side: the worker has not started yet."""
+    """The same gap, seen from the other side: no worker has started yet."""
     follow = queue_follow(make_queue_snapshot(waiting=(make_download_snapshot(),)))
 
-    assert follow["stream"] is None
+    assert follow["streams"] == ()
     assert follow["into"] == "queue"
 
 
@@ -1261,6 +1275,26 @@ def test_a_paused_queue_is_not_watched_because_nothing_will_start() -> None:
 def make_queue_view(**overrides: object) -> dict[str, Any]:
     """Return what the queue page shows, for a queue in some state."""
     return queue_view(make_queue_snapshot(**overrides), limit=500)
+
+
+def test_the_page_shows_every_transfer_under_way() -> None:
+    """A panel apiece, in the order they started."""
+    view = make_queue_view(
+        running=(
+            make_download_snapshot(download_id="d1"),
+            make_download_snapshot(download_id="d2"),
+        )
+    )
+
+    assert [item["download_id"] for item in view["running"]] == ["d1", "d2"]
+    assert view["running_count"] == "2"
+
+
+def test_a_queue_with_nothing_running_shows_no_panel() -> None:
+    view = make_queue_view(waiting=(make_download_snapshot(),))
+
+    assert view["running"] == ()
+    assert view["running_count"] == "0"
 
 
 def test_the_bar_measures_what_is_done_against_what_is_known() -> None:
@@ -1381,6 +1415,18 @@ def test_a_batch_that_went_through_partly_names_the_remainder() -> None:
         "48 did not fit — the queue is full.",
         "2 could not be fetched by the providers installed here.",
     )
+
+
+def test_a_batch_says_what_the_queue_was_already_holding() -> None:
+    """Pressing this twice on a half-drained filter is ordinary, not a mistake.
+
+    First of the notes because it is the only one that is not a problem: what
+    was already there is still coming.
+    """
+    view = link_view(make_link_page(), base=BASE, queued=QueuedBatch(queued=40, held=12))
+
+    assert view["queued"]["sentence"] == "40 links queued."
+    assert view["queued"]["notes"] == ("12 were already in the queue.",)
 
 
 def test_a_batch_that_queued_nothing_at_all_says_so() -> None:
@@ -1690,6 +1736,7 @@ def test_byte_counts_read_the_way_they_were_configured(value: int, expected: str
 
 def make_download_snapshot(
     *,
+    download_id: str = "d1",
     status: DownloadStatus = DownloadStatus.RUNNING,
     written: int = 500_000,
     total: int | None = 1_300_000,
@@ -1706,7 +1753,7 @@ def make_download_snapshot(
     that has to say so.
     """
     return DownloadSnapshot(
-        download_id="d1",
+        download_id=download_id,
         url="https://mega.nz/file/AaBbCcDd",
         progress=DownloadProgress(
             label="Jump.pdf",

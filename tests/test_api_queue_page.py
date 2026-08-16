@@ -89,10 +89,14 @@ def test_the_running_transfer_is_shown_in_full(tmp_path: Path) -> None:
         body = test_client.get("/downloads").text
         provider.release.set()
 
-    assert "download-progress" in body
     assert "Open this download" in body
+    # The bar, named after the transfer it belongs to -- the queue shows one
+    # panel per worker, and a shared identifier would have them overwrite each
+    # other's numbers.
+    assert "download-bar-" in body
     # The running transfer's own stream, which is what makes this page live.
     assert 'id="download-live"' in body
+    assert "data-stream=" in body
 
 
 def test_a_quiet_queue_streams_nothing(tmp_path: Path) -> None:

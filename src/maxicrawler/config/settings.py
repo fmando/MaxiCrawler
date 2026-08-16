@@ -97,6 +97,48 @@ class Settings:
     state, which is the whole difference between a limit and a disappearance.
     """
 
+    max_queued: int = 1000
+    """How many download requests may wait at once.
+
+    A ceiling on this process's memory rather than on anybody's afternoon: one
+    click on a filtered report asks for every match it has, and a queue holds a
+    URL and a little state per request — not bytes. A thousand of those is
+    nothing, and it is roughly what a directory of a crawled site comes to.
+
+    It is a refusal, not a truncation: asking for more than fits queues what
+    there is room for and says how many were left over, so the number that did
+    not fit is on the page rather than in a log. What is already waiting can be
+    cancelled in a click, which is why this can be generous.
+    """
+
+    download_workers: int = 5
+    """How many downloads may be transferring at once.
+
+    One was never a limit anybody measured — it was the honest answer while the
+    queue's subject was a person's workflow rather than a host's patience. Five
+    is a throughput number: most of a transfer is waiting for the other end, and
+    five waits overlap into roughly five times the work for one connection's
+    worth of this machine.
+
+    What keeps five from being five requests at one poor server is
+    :attr:`downloads_per_host`, which is the setting that actually governs
+    politeness. Raising this one without raising that changes how many *hosts*
+    are busy at once, not how hard any of them is pushed.
+    """
+
+    downloads_per_host: int = 3
+    """How many of those may be fetching from the same host.
+
+    Three, which is about what a browser opens to one origin for an ordinary
+    page, and the reason this exists at all: a crawl's take usually comes from
+    one site, so without a per-host rule "five at a time" would mean five at one
+    server every time. The crawler waits out a host's `Crawl-delay` next door;
+    this is the same courtesy on the other half of the chain.
+
+    One turns it back into a queue that is polite to each host and still fetches
+    from several at once.
+    """
+
     crawl_depth: int = 0
     """Default link distance a crawl follows; zero fetches the seed alone."""
 
@@ -254,6 +296,15 @@ class Settings:
         if self.min_download_size < 0:
             msg = "min_download_size must not be negative"
             raise ValueError(msg)
+        if self.max_queued < 1:
+            msg = "max_queued must be at least 1"
+            raise ValueError(msg)
+        if self.download_workers < 1:
+            msg = "download_workers must be at least 1"
+            raise ValueError(msg)
+        if self.downloads_per_host < 1:
+            msg = "downloads_per_host must be at least 1"
+            raise ValueError(msg)
         if self.crawl_depth < 0:
             msg = "crawl_depth must not be negative"
             raise ValueError(msg)
@@ -305,6 +356,11 @@ class Settings:
             min_download_size=_int_value(
                 app_config, "min_download_size", defaults.min_download_size
             ),
+            max_queued=_int_value(app_config, "max_queued", defaults.max_queued),
+            download_workers=_int_value(app_config, "download_workers", defaults.download_workers),
+            downloads_per_host=_int_value(
+                app_config, "downloads_per_host", defaults.downloads_per_host
+            ),
             crawl_depth=_int_value(app_config, "crawl_depth", defaults.crawl_depth),
             crawl_max_pages=_int_value(app_config, "crawl_max_pages", defaults.crawl_max_pages),
             crawl_same_domain=_bool_value(
@@ -350,6 +406,9 @@ class Settings:
             f"max_view_bytes = {self.max_view_bytes}\n"
             f"preview_inline_bytes = {self.preview_inline_bytes}\n"
             f"min_download_size = {self.min_download_size}\n"
+            f"max_queued = {self.max_queued}\n"
+            f"download_workers = {self.download_workers}\n"
+            f"downloads_per_host = {self.downloads_per_host}\n"
             f"crawl_depth = {self.crawl_depth}\n"
             f"crawl_max_pages = {self.crawl_max_pages}\n"
             f"crawl_same_domain = {str(self.crawl_same_domain).lower()}\n"

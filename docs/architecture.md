@@ -1365,7 +1365,7 @@ maxicrawler.api ─┘
 | `routes` | *"What does this URL reply with?"* Reads the request, asks a service, hands plain data to a template. |
 | `views` | *"How is this shown?"* Every decision that is not one of those three, testable without a request. |
 | `jobs` | *"What is running?"* Crawls on worker threads, and a registry of them. |
-| `downloads` | *"What is transferring?"* A queue of requests, drained one at a time by a worker thread. |
+| `downloads` | *"What is transferring?"* A queue of requests, drained by a small pool of worker threads under a per-host limit. |
 | `stream` | *"What has changed?"* Snapshots from a worker thread to an `EventSource`, for either of the two. |
 | `errors` | *"What is missing?"* Imports nothing, so it can be read by an installation that cannot import the rest. |
 | `templates/`, `static/` | The pages, one stylesheet, and five small scripts. |
@@ -1558,11 +1558,12 @@ is one class: a `ProgressReporter` implementation inside the service that turns
 `DownloadJob` and `DownloadOutcome` into a `DownloadProgress` and calls a
 listener with it.
 
-### A queue, drained one at a time
+### A queue, drained by a small pool
 
-`TransferQueue` holds the requests and one long-lived worker takes them in the
-order they arrived. A second request waits rather than being refused; above the
-ceiling it raises `QueueFullError`, which becomes a page naming the limit.
+`TransferQueue` holds the requests and a pool of long-lived workers takes them
+in the order they arrived. A request that will not fit is refused above the
+ceiling with `QueueFullError`, which becomes a page naming the limit; one the
+queue is already holding is not refused but answered with the run that is there.
 
 Until Sprint 15 there was no queue at all, and the reason was written down: a
 queue needs a policy for ordering, cancelling, resuming and surviving a restart,
@@ -1571,9 +1572,18 @@ and none of it was worth inventing before one download worked end to end
 surviving a restart, which cannot be built honestly before a partial transfer
 can be resumed.
 
-One worker is a politeness decision rather than a limit. Every mutation is
-guarded by one condition and the worker holds no state between requests, so a
-second thread on `_drain` would need no other change.
+`download_workers` bounds how many transfers run; `downloads_per_host` bounds
+how many of those touch one server, and it is the rule that lets the pool exist
+at all — a crawl's take is usually one site, and five at one server is not what
+a program that waits out `Crawl-delay` next door should be doing (ADR-046). A
+worker passes over a request whose host is busy and takes the next one it may,
+so arrival order holds per host and becomes "the first one allowed to start"
+across them. It passes over a URL another worker holds as well, which is the
+second of two answers to that: `submit` already declines a duplicate.
+
+ADR-033 had claimed a second thread would need no other change. What it needed
+was a library that tolerates two writers — see *Two writers, one descriptor*
+below.
 
 There are two classes called something like this, one above the other, and they
 are named apart on purpose. `downloader.queue.DownloadQueue` holds the jobs of
@@ -1583,11 +1593,26 @@ resolved. `api.downloads.TransferQueue` holds *requests* nobody has planned yet.
 class name alone, so two `DownloadQueue`s would have made a real rule
 unenforceable.
 
+### Two writers, one descriptor
+
+Every download initializes the library, so every parallel download wrote
+`library.json`. `_replace_atomically` staged each write through one `.tmp` name
+per destination, which is safe for one writer and nothing else: on Windows the
+second `os.replace` fails, and on Linux the two writers interleave into one file
+without complaint. The temporary file is named for the write, and
+`Library.initialize` treats a descriptor somebody else has just created as
+success.
+
+That is the whole of what parallel transfers needed below the queue, and it was
+found by running them rather than by reading. Two smaller pieces of shared state
+were found by reading and locked: Mega's request numbering and the provider
+registry's lazy build.
+
 ### Queueing a set rather than a link
 
 A batch is partial rather than atomic: `submit_all` returns how many were
-queued, how many were not URLs, and how many did not fit, because those need
-three different sentences.
+queued, how many were not URLs, how many did not fit and how many the queue was
+already holding, because those need four different sentences.
 
 Two controls put a set in the queue, and the difference between them is worth
 reading twice. Ticked rows send their URLs in the body. "Every fetchable match"

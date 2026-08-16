@@ -21,10 +21,18 @@ unenforceable to save one word.
 
 Four decisions shape this module.
 
-**Order, and one worker.** Requests are drained in the order they arrived, by a
-single long-lived thread. One worker is not a placeholder for a thread pool: how
-many transfers a host should face at once is a politeness question, and this
-sprint's subject is a person's workflow rather than a host's patience.
+**Order, and several workers.** Requests are drained by a small pool of
+long-lived threads, and the order is the order they arrived in — with one
+exception, which is the whole of the politeness rule: a worker passes over a
+request whose host already has ``downloads_per_host`` transfers running and
+takes the next one it may. So the order holds *per host*, and across hosts it
+is "the first request that is allowed to start". It also passes over a URL
+another worker is already fetching, which is what keeps two transfers out of
+one entry's staging directory.
+
+This was one worker until there was something to measure it against. One was
+never a limit anybody had measured; it was the honest answer while nothing
+here knew a host's patience from a throughput number.
 
 **Nothing here executes a download.**
 :meth:`~maxicrawler.app.DownloadService.download` does, unchanged. This module
@@ -50,7 +58,7 @@ This is a smaller exposure than it sounds: the same URL, fragment included, is
 already written to SQLite by discovery and rendered into the report's table.
 """
 
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -58,6 +66,7 @@ from enum import StrEnum
 from pathlib import Path
 from threading import Condition, Lock, Thread
 from time import monotonic
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from maxicrawler.api.errors import QueueFullError
@@ -78,13 +87,34 @@ thirty is one ordinary afternoon, and a history that forgot the first half of it
 would be a history nobody consults.
 """
 
-DEFAULT_MAX_QUEUED = 500
-"""How many requests may wait at once.
+DEFAULT_MAX_QUEUED = 1000
+"""How many requests may wait at once, when nobody has said.
 
-A ceiling rather than a backlog, because one click on a filtered report will
-soon be able to ask for every match at once. Five hundred is well past any
-afternoon's work and well short of a number that makes this process's memory
-somebody's problem.
+A ceiling rather than a backlog: one click on a filtered report asks for every
+match it has, and what waits is a URL and a little state per request rather
+than bytes. It began at five hundred, which was chosen before there was a real
+library to watch it against — a directory of a crawled site comes to more than
+that often enough, and the cost of the higher number is a few hundred kilobytes
+of this process's memory.
+
+The application sets it from :attr:`~maxicrawler.config.Settings.max_queued`,
+and the two defaults are held together by a test rather than by hope.
+"""
+
+DEFAULT_WORKERS = 5
+"""How many transfers may be under way at once, when nobody has said.
+
+Most of a transfer is waiting for the other end, so five waits overlap into
+about five times the work for one connection's worth of this machine. What
+keeps that from being five requests at one server is :data:`DEFAULT_PER_HOST`.
+"""
+
+DEFAULT_PER_HOST = 3
+"""How many of those may be fetching from the same host.
+
+About what a browser opens to one origin, and the reason the pool is allowed to
+exist: a crawl's take usually comes from one site, so without this "five at a
+time" would mean five at one server every time.
 """
 
 REMOVED = "removed from the queue"
@@ -348,9 +378,22 @@ class Accepted:
     no_room: int = 0
     """How many were left unqueued because the queue filled up."""
 
+    held: int = 0
+    """How many were already in the queue, waiting or being fetched.
+
+    Counted rather than passed over in silence. Pressing *"queue every match"*
+    twice on a filter that has half drained is an ordinary thing to do, and a
+    page that answered "forty links queued" to a hundred and twenty would leave
+    somebody counting to find out what happened to the rest.
+    """
+
     @property
     def queued(self) -> int:
-        """Return how many are now in the queue."""
+        """Return how many are now in the queue.
+
+        The runs this batch added, so a request that was already held is not
+        counted twice — it is reported under :attr:`held` instead.
+        """
         return len(self.runs)
 
     @property
@@ -401,7 +444,15 @@ class Departed:
 class QueueSnapshot:
     """What the queue holds at the moment it was asked."""
 
-    active: DownloadSnapshot | None
+    running: tuple[DownloadSnapshot, ...]
+    """The transfers under way, oldest first.
+
+    A tuple rather than one transfer because the queue may drain with more than
+    one worker. Everything counted below sums over it, which is the whole of
+    what "more than one at a time" means to a page: no number here is ever
+    *the* running download's.
+    """
+
     waiting: tuple[DownloadSnapshot, ...]
     finished: tuple[DownloadSnapshot, ...]
     """Newest first, which is the order somebody checking on them reads."""
@@ -411,9 +462,19 @@ class QueueSnapshot:
     """The runs this queue counted and no longer holds."""
 
     @property
+    def active(self) -> DownloadSnapshot | None:
+        """Return the oldest transfer under way, or ``None``.
+
+        For the parts of the interface that still speak in the singular. They
+        are what the next commit is about; until then this is exactly the
+        running download, because exactly one worker takes requests off.
+        """
+        return self.running[0] if self.running else None
+
+    @property
     def remaining(self) -> int:
-        """Return how many downloads have still to happen, the running one included."""
-        return len(self.waiting) + (1 if self.active is not None else 0)
+        """Return how many downloads have still to happen, the running ones included."""
+        return len(self.waiting) + len(self.running)
 
     @property
     def is_busy(self) -> bool:
@@ -462,13 +523,10 @@ class QueueSnapshot:
 
     @property
     def bytes_written(self) -> int:
-        """Return how many bytes this queue has moved, the running one included."""
+        """Return how many bytes this queue has moved, the running ones included."""
         written = sum(run.progress.bytes_written for run in self.finished)
-        return (
-            self.departed.bytes_written
-            + written
-            + (0 if self.active is None else self.active.progress.bytes_written)
-        )
+        under_way = sum(run.progress.bytes_written for run in self.running)
+        return self.departed.bytes_written + written + under_way
 
     @property
     def transfer_seconds(self) -> float:
@@ -477,13 +535,16 @@ class QueueSnapshot:
         The transfers added together, not the wall clock. A queue that sat
         paused overnight did not get slower while it was paused, and a rate
         divided by the hours nobody was downloading would say it did.
+
+        Added together across transfers that overlap, deliberately. Two files
+        moving for ten seconds each is twenty seconds of transferring, and the
+        rate this divides into is a per-transfer average — which is what the
+        page calls it. Wall-clock time would answer a different question, and
+        the queue has no clock of its own to answer it with.
         """
         spent = sum(run.elapsed_seconds for run in self.finished)
-        return (
-            self.departed.seconds
-            + spent
-            + (0.0 if self.active is None else self.active.elapsed_seconds)
-        )
+        under_way = sum(run.elapsed_seconds for run in self.running)
+        return self.departed.seconds + spent + under_way
 
 
 @dataclass(frozen=True, slots=True)
@@ -524,12 +585,13 @@ class QueueTally:
 
 
 class TransferQueue:
-    """The downloads this process knows about, drained one at a time.
+    """The downloads this process knows about, and what is being fetched now.
 
-    Every mutation is guarded by one condition, and the worker waits on that
-    same condition rather than polling. Adding a second worker would be a matter
-    of starting a second thread on :meth:`_drain`; what stops that from being
-    done here is politeness, not this class.
+    Every mutation is guarded by one condition, and a worker waits on that same
+    condition rather than polling. What is under way is a mapping rather than a
+    field, so nothing here counts on there being exactly one — the second
+    worker that fills it is the next thing to arrive, and it should find a queue
+    that does not have to be rewritten to admit it.
     """
 
     def __init__(
@@ -538,6 +600,8 @@ class TransferQueue:
         *,
         retain: int = DEFAULT_RETAINED_RUNS,
         limit: int = DEFAULT_MAX_QUEUED,
+        workers: int = DEFAULT_WORKERS,
+        per_host: int = DEFAULT_PER_HOST,
     ) -> None:
         if retain < 1:
             msg = "retain must be at least 1"
@@ -545,18 +609,39 @@ class TransferQueue:
         if limit < 1:
             msg = "limit must be at least 1"
             raise ValueError(msg)
+        if workers < 1:
+            msg = "workers must be at least 1"
+            raise ValueError(msg)
+        if per_host < 1:
+            msg = "per_host must be at least 1"
+            raise ValueError(msg)
         self._service = service
         self._retain = retain
         self._limit = limit
+        self._wanted_workers = workers
+        self._per_host = per_host
         self._condition = Condition()
         self._runs: OrderedDict[str, DownloadRun] = OrderedDict()
         self._waiting: list[str] = []
         self._targets: dict[str, str] = {}
-        self._active: DownloadRun | None = None
+        # What this queue is holding, by fragment-free URL. Kept rather than
+        # searched for: "queue every match" asks about a thousand links at once,
+        # and rebuilding the set per link would be a thousand passes over a
+        # thousand requests. Entries live from being queued until the transfer
+        # ends or is called off -- which is exactly "waiting or running".
+        self._held: dict[str, str] = {}
+        # Keyed by run id and ordered by when each transfer started, which is
+        # the order a page lists them in.
+        self._running: dict[str, DownloadRun] = {}
+        # How many transfers each host is facing right now. The whole of the
+        # politeness rule, and it is kept here rather than derived from
+        # `_running` on demand so that the answer cannot disagree with itself
+        # halfway through a worker choosing what to take.
+        self._hosts: Counter[str] = Counter()
         self._departed = Departed()
         self._paused = False
         self._closed = False
-        self._worker: Thread | None = None
+        self._workers: list[Thread] = []
 
     @property
     def service(self) -> DownloadService:
@@ -571,29 +656,43 @@ class TransferQueue:
     def submit(self, url: str) -> DownloadRun:
         """Put *url* at the end of the queue and return its run.
 
+        A URL this queue is already holding — waiting or being fetched — is not
+        queued twice. The run that is already there comes back instead, so a
+        second click lands on the transfer somebody is asking about rather than
+        adding a duplicate of it.
+
         Raises:
             ValueError: *url* is not an absolute HTTP(S) URL. Checked before
                 anything is queued, so a bad link is a message beside the button
                 rather than an entry that exists only to have failed.
             QueueFullError: the queue already holds :attr:`limit` requests.
         """
+        return self._submit(url)[0]
+
+    def _submit(self, url: str) -> tuple[DownloadRun, bool]:
+        """Return the run for *url* and whether this call is what queued it."""
         target = self._service.require_url(url)
-        run = DownloadRun(uuid4().hex, strip_fragment(target))
+        plain = strip_fragment(target)
+        run = DownloadRun(uuid4().hex, plain)
         with self._condition:
             if self._closed:
                 msg = "this queue is shutting down"
                 raise QueueFullError(msg)
+            held = self._held.get(plain)
+            if held is not None:
+                return self._runs[held], False
             if len(self._waiting) >= self._limit:
                 raise QueueFullError(queue_full(len(self._waiting), self._limit))
             self._runs[run.id] = run
             self._waiting.append(run.id)
+            self._held[plain] = run.id
             # The URL with its fragment is held here and nowhere else. The run
             # itself never learns the key; see the module docstring.
             self._targets[run.id] = target
             self._evict()
             self._condition.notify_all()
-        self._ensure_worker()
-        return run
+        self._ensure_workers()
+        return run, True
 
     def room(self) -> int:
         """Return how many more requests would fit right now.
@@ -620,26 +719,47 @@ class TransferQueue:
         asked = tuple(urls)
         queued: list[DownloadRun] = []
         rejected = 0
+        held = 0
         for index, url in enumerate(asked):
             try:
-                queued.append(self.submit(url))
+                run, is_new = self._submit(url)
             except ValueError:
                 rejected += 1
             except QueueFullError:
                 # Full is not "this URL was bad": everything after it would fail
                 # the same way, so stop rather than count them all as refusals.
-                return Accepted(runs=tuple(queued), rejected=rejected, no_room=len(asked) - index)
-        return Accepted(runs=tuple(queued), rejected=rejected)
+                return Accepted(
+                    runs=tuple(queued),
+                    rejected=rejected,
+                    no_room=len(asked) - index,
+                    held=held,
+                )
+            else:
+                if is_new:
+                    queued.append(run)
+                else:
+                    held += 1
+        return Accepted(runs=tuple(queued), rejected=rejected, held=held)
 
     def get(self, download_id: str) -> DownloadRun | None:
         """Return the run called *download_id*, if this process still holds it."""
         with self._condition:
             return self._runs.get(download_id)
 
-    def active(self) -> DownloadRun | None:
-        """Return the download being worked on right now, if there is one."""
+    def running(self) -> tuple[DownloadRun, ...]:
+        """Return the transfers under way right now, oldest first."""
         with self._condition:
-            return self._active
+            return tuple(self._running.values())
+
+    def active(self) -> DownloadRun | None:
+        """Return the oldest transfer under way, if there is one.
+
+        What the parts of the interface that speak of *the* running download
+        ask. With one worker taking requests off, it is that download; when
+        there are more, those parts are what changes rather than this answer.
+        """
+        with self._condition:
+            return next(iter(self._running.values()), None)
 
     def pending(self, urls: Iterable[str]) -> frozenset[str]:
         """Return which of *urls* are waiting or being fetched right now.
@@ -661,9 +781,7 @@ class TransferQueue:
         if not asked:
             return frozenset()
         with self._condition:
-            queued = {self._runs[run_id].url for run_id in self._waiting}
-            if self._active is not None:
-                queued.add(self._active.url)
+            queued = set(self._held)
         return frozenset(url for url in asked if strip_fragment(url) in queued)
 
     def position_of(self, download_id: str) -> int | None:
@@ -696,17 +814,16 @@ class TransferQueue:
         with self._condition:
             queued = set(self._waiting)
             waiting = len(self._waiting)
-            active = self._active
+            under_way = len(self._running)
+            busy = set(self._running)
             paused = self._paused
             departed = self._departed
-            done = [
-                run for key, run in self._runs.items() if key not in queued and run is not active
-            ]
+            done = [run for key, run in self._runs.items() if key not in queued and key not in busy]
         # Outside the lock: each run guards its own fields, and holding the
         # queue's condition while asking fifty of them is a wait nobody needs.
         failed = sum(1 for run in done if run.snapshot().status is DownloadStatus.FAILED)
         return QueueTally(
-            running=1 if active is not None else 0,
+            running=under_way,
             waiting=waiting,
             failed=departed.failed + failed,
             is_paused=paused,
@@ -720,17 +837,18 @@ class TransferQueue:
         state that never existed.
         """
         with self._condition:
-            active = self._active
+            under_way = tuple(self._running.values())
+            busy = set(self._running)
             waiting = tuple(self._runs[run_id] for run_id in self._waiting)
             finished = tuple(
                 run
                 for run in reversed(self._runs.values())
-                if run is not active and run.id not in self._waiting
+                if run.id not in busy and run.id not in self._waiting
             )
             paused = self._paused
             departed = self._departed
         return QueueSnapshot(
-            active=None if active is None else active.snapshot(),
+            running=tuple(run.snapshot() for run in under_way),
             waiting=tuple(run.snapshot() for run in waiting),
             finished=tuple(run.snapshot() for run in finished),
             is_paused=paused,
@@ -774,11 +892,12 @@ class TransferQueue:
                 return False
             if download_id in self._waiting:
                 self._waiting.remove(download_id)
+                self._release(run.url)
                 # The target stays. It is what a retry needs, and dropping it
                 # here would make "remove, then think better of it" the one
                 # thing this queue cannot undo. It goes when the run does.
                 self._condition.notify_all()
-            elif run is self._active:
+            elif download_id in self._running:
                 run.stop()
                 return True
             else:
@@ -835,7 +954,7 @@ class TransferQueue:
                 target
                 for key, run in self._runs.items()
                 if key not in self._waiting
-                and run is not self._active
+                and key not in self._running
                 and (target := self._targets.get(key)) is not None
                 and _is_unarrived(run)
             ]
@@ -861,7 +980,7 @@ class TransferQueue:
                 key
                 for key, run in self._runs.items()
                 if key not in self._waiting
-                and run is not self._active
+                and key not in self._running
                 and run.snapshot().is_finished
             ]
             for key in keys:
@@ -904,47 +1023,124 @@ class TransferQueue:
             self._closed = True
             self._waiting.clear()
             self._targets.clear()
-            active = self._active
-            worker = self._worker
+            self._held.clear()
+            under_way = tuple(self._running.values())
+            workers = tuple(self._workers)
             self._condition.notify_all()
-        if active is not None:
-            active.stop()
-        if wait and worker is not None:
-            worker.join(timeout=SHUTDOWN_TIMEOUT)
+        for run in under_way:
+            run.stop()
+        if wait:
+            for worker in workers:
+                worker.join(timeout=SHUTDOWN_TIMEOUT)
 
-    def _ensure_worker(self) -> None:
-        """Start the draining thread, once, the first time there is work.
+    def _ensure_workers(self) -> None:
+        """Start as many draining threads as there is work for, up to the limit.
 
         Lazily rather than in ``__init__`` so an application that never
         downloads anything never starts a thread — which is most of the tests
-        and every session that only crawls.
+        and every session that only crawls. And by how much there is to do, so
+        one download queued by hand starts one thread rather than five, four of
+        which would wait forever on a queue nobody else is filling.
+
+        Threads are never retired. A worker costs a stack and a wait on a
+        condition, and a queue that has been busy once is a queue that will be
+        busy again.
         """
         with self._condition:
-            if self._worker is not None or self._closed:
+            if self._closed:
                 return
-            self._worker = Thread(target=self._drain, name="maxidownload", daemon=True)
-            worker = self._worker
-        worker.start()
+            wanted = min(self._wanted_workers, len(self._waiting) + len(self._running))
+            starting = [
+                Thread(target=self._drain, name=f"maxidownload-{index}", daemon=True)
+                for index in range(len(self._workers), wanted)
+            ]
+            self._workers.extend(starting)
+        # Outside the lock: a thread that starts fast enough to reach `_take`
+        # before this returns would otherwise wait for a condition its own
+        # starter is holding.
+        for thread in starting:
+            thread.start()
 
     def _drain(self) -> None:
-        """Take one request at a time until the queue is closed."""
+        """Take requests until the queue is closed, one transfer at a time."""
         while True:
             with self._condition:
-                while not self._closed and (self._paused or not self._waiting):
-                    self._condition.wait()
-                if self._closed:
+                run_id = self._await_work()
+                if run_id is None:
                     return
-                run_id = self._waiting.pop(0)
                 run = self._runs[run_id]
                 target = self._targets[run_id]
-                self._active = run
+                host = _host_of(run.url)
+                self._running[run_id] = run
+                self._hosts[host] += 1
             try:
                 run.begin()
                 self._execute(run, target)
             finally:
                 with self._condition:
-                    self._active = None
+                    self._running.pop(run_id, None)
+                    self._release(run.url)
+                    self._hosts[host] -= 1
+                    if self._hosts[host] <= 0:
+                        del self._hosts[host]
+                    # Every worker, not one: what this transfer freed may be
+                    # the host another of them has been waiting on.
                     self._condition.notify_all()
+
+    def _await_work(self) -> str | None:
+        """Return the next request this worker may start, or ``None`` to stop.
+
+        Callers hold the condition. ``None`` means the queue is closing, which
+        is the only way out of the wait — a worker with nothing it may take
+        sleeps until something is queued or another transfer ends, because both
+        of those can make one takeable.
+        """
+        while not self._closed:
+            if not self._paused:
+                run_id = self._take()
+                if run_id is not None:
+                    return run_id
+            self._condition.wait()
+        return None
+
+    def _release(self, url: str) -> None:
+        """Stop holding *url*, so it may be queued again.
+
+        Callers hold the condition. Removing by URL is removing this run's own
+        claim and nobody else's: while the claim stands every submit of that URL
+        comes back with this run rather than making a second one, so there is no
+        newer claim here to drop by accident.
+        """
+        self._held.pop(url, None)
+
+    def _take(self) -> str | None:
+        """Remove and return the first waiting request that may start now.
+
+        Callers hold the condition. Two rules, and the order they are written
+        in is the order they matter in:
+
+        A host may face only :attr:`per_host` transfers at once. That is what
+        makes a pool polite rather than merely fast, and it is why the request
+        taken is not always the first one waiting: a crawl's take comes from
+        one site, and the alternative to passing over it is a queue that stops
+        the moment its first host is busy.
+
+        And a URL another worker is already fetching is passed over whatever
+        the counts say. Two transfers of one resource would write into one
+        entry's staging directory, which is a corrupted download rather than an
+        impolite one. :meth:`submit` declines a duplicate before it ever reaches
+        the waiting list, so this is the second of two answers to one question —
+        kept because the cost is one comparison and the failure it prevents is
+        not one anybody would recognise from its symptoms.
+        """
+        busy = {run.url for run in self._running.values()}
+        for index, run_id in enumerate(self._waiting):
+            url = self._runs[run_id].url
+            if url in busy or self._hosts[_host_of(url)] >= self._per_host:
+                continue
+            del self._waiting[index]
+            return run_id
+        return None
 
     def _execute(self, run: DownloadRun, url: str) -> None:
         """Run one download to its end, whatever that end turns out to be."""
@@ -989,6 +1185,16 @@ A bound rather than a promise. The transfer is asked to stop and does so within
 a chunk; this is what keeps a provider that has stopped answering from holding
 the whole process open.
 """
+
+
+def _host_of(url: str) -> str:
+    """Return the host a URL names, lowercased, or ``""`` for one without.
+
+    What the per-host limit counts by. Case-folded because a host name is
+    case-insensitive and two spellings of one server are one server's patience;
+    the port is deliberately left out for the same reason.
+    """
+    return (urlsplit(url).hostname or "").lower()
 
 
 def _is_unarrived(run: DownloadRun) -> bool:

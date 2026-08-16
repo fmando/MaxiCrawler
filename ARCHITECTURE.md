@@ -254,6 +254,14 @@ eigenen Lauf, nie von der Route** — sechzig Kacheln wären sonst sechzig
 Bilddekodierungen in einem Request. Pillow ist optional; fehlt es, verhält sich
 alles wie zuvor.
 
+**Mehrere Transfers gleichzeitig, und der Host entscheidet mit** (ADR-046).
+`download_workers` (fünf) begrenzt, wie viele Downloads laufen; `downloads_per_host`
+(drei) begrenzt, wie viele davon denselben Server treffen — die zweite Zahl ist
+die eigentliche Entscheidung, weil eine Crawl-Ausbeute fast immer von einer
+Website kommt. Ein Worker überspringt eine Anfrage, deren Host belegt ist: die
+Reihenfolge gilt damit **pro Host**, global gilt „die erste, die darf". Dieselbe
+URL hält die Queue nur einmal, wartend oder laufend.
+
 **Die Wartungsseite zeigt einen Befehl an und führt keinen aus** (ADR-045). Ohne
 Authentifizierung und über das Netz erreichbar wäre ein Knopf, der eines der
 Skripte startet, für jeden erreichbar, der den Port erreicht — und eines davon

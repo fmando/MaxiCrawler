@@ -39,6 +39,7 @@ from collections.abc import Iterator
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 from maxicrawler import __version__
 from maxicrawler.domain import ResourceRef
@@ -310,6 +311,13 @@ class Library:
 
         Calling this on an existing library is harmless and leaves the
         descriptor untouched, so the creation date it records stays true.
+
+        Every download calls this, and downloads run side by side, so two of
+        them can find the descriptor missing and both write it. That is
+        deliberately not an error: whichever lands is a whole descriptor, and
+        the other one's failure to replace a file that now exists is the same
+        outcome by a different route. Windows raises there where Linux does not,
+        which is why this is checked rather than assumed.
         """
         try:
             self._root.mkdir(parents=True, exist_ok=True)
@@ -323,9 +331,12 @@ class Library:
             "generator": f"MaxiCrawler {__version__}",
             "created_at": datetime.now(UTC).isoformat(),
         }
-        _replace_atomically(
-            self.descriptor_path, json.dumps(descriptor, indent=2, ensure_ascii=False) + "\n"
-        )
+        payload = json.dumps(descriptor, indent=2, ensure_ascii=False) + "\n"
+        try:
+            _replace_atomically(self.descriptor_path, payload)
+        except LibraryError:
+            if not self.descriptor_path.exists():
+                raise
 
     def entry(self, ref: ResourceRef) -> LibraryEntry:
         """Return the entry addressing *ref*, whether or not it exists yet."""
@@ -417,10 +428,21 @@ def _is_inside(root: Path, path: Path) -> bool:
 def _replace_atomically(destination: Path, payload: str) -> None:
     """Write *payload* to *destination*, replacing it in one step.
 
+    The temporary file is named for this write rather than for its destination,
+    which is what makes two writers safe. Sharing one ``.tmp`` name was fine
+    while transfers happened one at a time and stopped being fine the moment
+    they did not: on Windows the second writer's ``os.replace`` fails outright,
+    and on Linux the two interleave into one file quietly, which is worse. Every
+    download writes the library descriptor, so this was every parallel download.
+
+    Two writers still mean one of the two documents wins. That is a different
+    question -- see the roadmap on locking an entry -- and this only makes sure
+    the winner is one of them whole rather than a mixture.
+
     Raises:
         LibraryError: the document could not be written.
     """
-    temporary = destination.with_name(f"{destination.name}.tmp")
+    temporary = destination.with_name(f"{destination.name}.{uuid4().hex}.tmp")
     try:
         temporary.write_text(payload, encoding="utf-8")
         os.replace(temporary, destination)

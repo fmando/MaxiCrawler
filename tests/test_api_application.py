@@ -8,6 +8,7 @@ from starlette.testclient import TestClient
 
 from maxicrawler.api import WebDependencyError, create_app
 from maxicrawler.api.application import health
+from maxicrawler.api.downloads import DEFAULT_MAX_QUEUED
 from maxicrawler.api.errors import MISSING_EXTRA
 from maxicrawler.app import CrawlService
 from maxicrawler.config import Settings
@@ -52,6 +53,23 @@ def test_the_application_falls_back_to_the_default_configuration() -> None:
     application = create_app()
 
     assert isinstance(application.state.crawl_service, CrawlService)
+
+
+def test_the_queue_is_built_with_the_ceiling_from_the_settings() -> None:
+    """Otherwise the setting is a number on a page and nothing else."""
+    application = create_app(settings=Settings(max_queued=7))
+
+    assert application.state.downloads.limit == 7
+
+
+def test_the_two_defaults_for_that_ceiling_are_one_number() -> None:
+    """The queue has its own default for callers that build one directly.
+
+    Two numbers that are meant to be the same one drift the moment somebody
+    changes the one they were looking at, and the symptom would be a limit that
+    depends on which client built the queue.
+    """
+    assert Settings().max_queued == DEFAULT_MAX_QUEUED
 
 
 # --- the optional extra ------------------------------------------------------

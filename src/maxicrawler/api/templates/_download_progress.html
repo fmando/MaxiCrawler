@@ -5,21 +5,27 @@
   again on every reload. The identifiers are what the browser patches in place;
   every value it writes was formatted by the same code that rendered this.
 
+  Every identifier carries the download's own id, because the queue page shows
+  as many of these at once as there are workers. One name per field would have
+  meant the first transfer's bar quietly taking every other transfer's numbers.
+  The download's own page renders the same suffix for the one transfer it shows,
+  so the script has a single rule rather than a special case.
+
   The bar is indeterminate when nothing stated a total. A bar sitting at zero
   for two minutes would claim progress nobody can see, so the counter beside it
   says what has actually arrived instead.
 #}
-<div class="progress" id="download-progress">
-  <div class="bar{% if not download.has_total %} unknown{% endif %}" id="download-bar">
+<div class="progress">
+  <div class="bar{% if not download.has_total %} unknown{% endif %}" id="download-bar-{{ download.download_id }}">
     <span style="width: {{ download.progress_percent if download.has_total else 100 }}%"></span>
   </div>
   <p class="bar-caption">
-    <span id="download-transferred">{{ download.transferred }}</span>
+    <span id="download-transferred-{{ download.download_id }}">{{ download.transferred }}</span>
     {% if download.has_total %}
-      · <span id="download-percent">{{ download.progress_percent }}</span>%
+      · <span id="download-percent-{{ download.download_id }}">{{ download.progress_percent }}</span>%
     {% endif %}
     {% if download.has_many_files %}
-      · <span id="download-files">{{ download.files_finished }}</span> of {{ download.files_total }} files
+      · <span id="download-files-{{ download.download_id }}">{{ download.files_finished }}</span> of {{ download.files_total }} files
     {% endif %}
   </p>
 </div>
@@ -27,7 +33,7 @@
 <dl class="readout">
   <div>
     <dt>Transferred</dt>
-    <dd class="num" id="download-bytes">{{ download.bytes_written }}</dd>
+    <dd class="num" id="download-bytes-{{ download.download_id }}">{{ download.bytes_written }}</dd>
   </div>
   <div>
     <dt>Size</dt>
@@ -35,7 +41,7 @@
   </div>
   <div>
     <dt>Elapsed</dt>
-    <dd class="num" id="download-elapsed">{{ download.elapsed or "—" }}</dd>
+    <dd class="num" id="download-elapsed-{{ download.download_id }}">{{ download.elapsed or "—" }}</dd>
   </div>
   {#
     Both absent until they mean something: a rate divided out of the first fifty
@@ -44,12 +50,12 @@
   #}
   <div>
     <dt>Speed</dt>
-    <dd class="num" id="download-rate">{{ download.rate or "—" }}</dd>
+    <dd class="num" id="download-rate-{{ download.download_id }}">{{ download.rate or "—" }}</dd>
   </div>
   {% if not download.is_finished %}
     <div>
       <dt>Remaining</dt>
-      <dd class="num" id="download-remaining">{{ download.remaining or "—" }}</dd>
+      <dd class="num" id="download-remaining-{{ download.download_id }}">{{ download.remaining or "—" }}</dd>
     </div>
   {% endif %}
 </dl>

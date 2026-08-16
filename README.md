@@ -21,7 +21,7 @@ what the project deliberately will not do.
 - A self-describing library: one directory per resource, with versioned JSON metadata beside it.
 - A searchable library in the browser, and a viewer that lets the browser display what it can — no renderer of our own.
 - A crawl report you can search, filter, sort, page and bookmark, with every link classified by what it points at.
-- A download queue you can reorder, pause and retry, and one click to queue everything a filter matches.
+- A download queue you can reorder, pause and retry, and one click to queue everything a filter matches — several transfers at once, never more than a few at any one host, and never the same URL twice.
 - Downloads for the rest of the web: any file at a plain HTTP(S) URL, through the same library, behind the same private-network guard.
 - A library you can work through: tiles or rows, filters for kind, size and verdict, four judgements that survive the next download, and a discard that takes the bytes back and is not fetched again.
 - Thumbnails made by a run of their own, so a page of tiles over a library of photographs costs megabytes rather than gigabytes — and stays a cache that can be deleted in full at any time.
@@ -1746,6 +1746,9 @@ transfers may one host face at once" is the kind of question robots.txt answers
 for crawling, and this sprint is about a person's workflow rather than a host's
 patience.
 
+*Answered since, and the "needs no other change" turned out to be wrong twice
+over — see [Several transfers at once](#several-transfers-at-once) below.*
+
 ### Downloads became a section
 
 `/downloads` shows the whole queue: what is running, what is waiting, and what
@@ -2355,6 +2358,52 @@ deliberately left open.
 judgement can lose one of the two writes. What bounds it is that the two writers
 touch different members, so the worst case is one judgement lost rather than a
 document describing a file that is not there.
+
+## Several transfers at once
+
+The queue drained one request at a time until there was something to measure
+that against. Now five transfers may be under way, and never more than three of
+them at one host (ADR-046).
+
+```toml
+[maxicrawler]
+max_queued = 1000          # how many requests may wait
+download_workers = 5       # how many may be transferring
+downloads_per_host = 3     # how many of those at one server
+```
+
+**The per-host number is the one that matters.** A crawl's take usually comes
+from one site, so without it "five at a time" would be five requests at one
+server every time — while the crawler next door is waiting out that same host's
+`Crawl-delay`. Three is about what a browser opens to one origin for an ordinary
+page. Setting it to `1` gives back a queue that meets each host singly and still
+fetches from several at once.
+
+So a worker passes over a request whose host is busy and takes the next one it
+may: the arrival order holds *within* a host, and across hosts it becomes "the
+first request that is allowed to start". A pool that insisted on the front of
+the line would idle behind one busy server with four workers spare.
+
+Measured against a local host answering at about a megabyte a second: six files
+of 12.6 MB from one host took **24 seconds, against roughly 71 one at a time**.
+
+**The same URL is held once.** A link the queue already has — waiting or
+running — comes back as the request that is already there, so a second click
+lands on that transfer rather than duplicating it, and *"queue every match"*
+pressed twice on a half-drained filter reports how many were already coming.
+
+### What running things in parallel actually cost
+
+ADR-033 had said a second worker "would need no other change". Two threads
+proved otherwise, and the fault was two layers down: every download initializes
+the library, and every write staged through one `.tmp` name per destination — so
+every parallel download raced for `library.json`. Four in five failed outright
+on Windows. On Linux nothing would have failed at all; the two writers would
+have interleaved into one file quietly, which is the worse of the two.
+
+Two smaller things went the same way: Mega's API client numbered its requests
+with a bare increment, and the provider registry was built outside any lock.
+Neither would have corrupted anything, and neither would ever have been noticed.
 
 ## Looking after a library
 

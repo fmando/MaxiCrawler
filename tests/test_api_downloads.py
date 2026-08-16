@@ -6,10 +6,11 @@ and while it runs, what survives it, and what is refused.
 """
 
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 from threading import enumerate as enumerate_threads
 from time import monotonic, sleep
 
@@ -20,11 +21,13 @@ from maxicrawler.api.downloads import (
     DownloadRun,
     DownloadSnapshot,
     Move,
+    QueueSnapshot,
     TransferQueue,
+    _host_of,
 )
 from maxicrawler.api.errors import QueueFullError
 from maxicrawler.api.stream import download_events, download_payload
-from maxicrawler.app import DownloadService
+from maxicrawler.app import DownloadProgress, DownloadService
 from maxicrawler.config import Settings
 from maxicrawler.domain import ContentDescriptor, DownloadStatus, ProviderCapability, ResourceRef
 from maxicrawler.library import Library
@@ -189,9 +192,14 @@ def test_the_queue_knows_which_download_is_running(tmp_path: Path) -> None:
 
 
 def test_a_second_download_waits_its_turn(tmp_path: Path) -> None:
-    """What ADR-026 refused and ADR-033 queues."""
+    """What ADR-026 refused and ADR-033 queues.
+
+    Both URLs are on one host, so one at a time is what `per_host=1` asks for
+    here. Waiting is no longer what a queue does by default — it is what it does
+    when starting would be one transfer too many for that host.
+    """
     provider = BlockingProvider()
-    with registry(tmp_path, provider) as runs:
+    with registry(tmp_path, provider, per_host=1) as runs:
         first = runs.submit(FILE_URL)
         assert provider.transferring.wait(timeout=10)
 
@@ -369,7 +377,7 @@ def test_waiting_requests_are_counted(tmp_path: Path) -> None:
 
 def test_the_running_one_is_counted_apart_from_the_waiting(tmp_path: Path) -> None:
     provider = BlockingProvider()
-    with registry(tmp_path, provider) as runs:
+    with registry(tmp_path, provider, per_host=1) as runs:
         runs.submit(FILE_URL)
         assert provider.transferring.wait(timeout=10.0)
         runs.submit(OTHER_URL)
@@ -784,7 +792,7 @@ def test_room_freed_by_a_removal_can_be_used_again(tmp_path: Path) -> None:
 
 def test_a_snapshot_never_shows_one_request_in_two_places(tmp_path: Path) -> None:
     provider = BlockingProvider()
-    with registry(tmp_path, provider) as runs:
+    with registry(tmp_path, provider, per_host=1) as runs:
         running = runs.submit(FILE_URL)
         assert provider.transferring.wait(timeout=10)
         waiting = runs.submit(OTHER_URL)
@@ -832,6 +840,330 @@ def test_the_newest_finished_download_is_listed_first(tmp_path: Path) -> None:
     assert listed == [second.id, first.id]
 
 
+# --- the worker pool, and a host's patience -------------------------------------
+
+
+class ManyHosts(StubProvider):
+    """A stub that answers for several hosts and holds every transfer open.
+
+    One event per transfer rather than one for all of them, so a test can let
+    exactly one finish -- which is how the per-host rule is watched taking
+    effect rather than inferred from a total.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("direct", url_prefix="https://", capabilities=DOWNLOADS, payload=PAYLOAD)
+        self.started = Event()
+        self.release = Event()
+        self.transferring: set[str] = set()
+        self._guard = Lock()
+
+    def download(self, ref: ResourceRef, sink: DownloadSink) -> ContentDescriptor:
+        descriptor = ContentDescriptor(name=f"{ref.resource_id}.bin", size=len(PAYLOAD))
+        sink.begin(descriptor)
+        sink.write(PAYLOAD[:4])
+        with self._guard:
+            self.transferring.add(ref.url)
+        self.started.set()
+        self.release.wait(timeout=10)
+        sink.write(PAYLOAD[4:])
+        with self._guard:
+            self.transferring.discard(ref.url)
+        return descriptor
+
+
+def elsewhere(host: str, name: str) -> str:
+    """Return a URL on *host*, for a provider that answers for all of them."""
+    return f"https://{host}/file/{name}"
+
+
+def until(condition: Callable[[], bool], *, timeout: float = 10.0) -> bool:
+    """Wait for *condition*, and return whether it came true."""
+    deadline = monotonic() + timeout
+    while monotonic() < deadline:
+        if condition():
+            return True
+        sleep(0.01)
+    return condition()
+
+
+def test_several_hosts_are_fetched_from_at_once(tmp_path: Path) -> None:
+    """The point of the pool: five waits on five servers overlap into one wait."""
+    provider = ManyHosts()
+    with registry(tmp_path, provider, workers=5) as runs:
+        for index in range(5):
+            runs.submit(elsewhere(f"host{index}.test", "a"))
+
+        assert until(lambda: len(runs.running()) == 5)
+
+        assert runs.tally().running == 5
+        assert runs.tally().waiting == 0
+        provider.release.set()
+
+
+def test_one_host_faces_no_more_than_it_was_allowed(tmp_path: Path) -> None:
+    """And the rest of its files wait, however many workers are idle.
+
+    The case that decides whether a pool may exist at all: a crawl's take comes
+    from one site, so without this "five at a time" would be five at one server
+    every time.
+    """
+    provider = ManyHosts()
+    with registry(tmp_path, provider, workers=5, per_host=3) as runs:
+        for name in ("a", "b", "c", "d", "e"):
+            runs.submit(elsewhere("one.test", name))
+
+        assert until(lambda: len(runs.running()) == 3)
+        sleep(0.1)  # long enough for a fourth to start if nothing stopped it
+
+        assert len(runs.running()) == 3
+        assert runs.tally().waiting == 2
+        provider.release.set()
+
+
+def test_a_busy_host_does_not_hold_up_a_free_one(tmp_path: Path) -> None:
+    """Why the pool passes over a request rather than waiting behind it.
+
+    The queue's order is kept per host; across hosts it is "the first request
+    that is allowed to start". A worker that insisted on the front of the line
+    would idle behind one busy server with four others going spare.
+    """
+    provider = ManyHosts()
+    with registry(tmp_path, provider, workers=3, per_host=1) as runs:
+        first = runs.submit(elsewhere("busy.test", "a"))
+        second = runs.submit(elsewhere("busy.test", "b"))
+        third = runs.submit(elsewhere("free.test", "c"))
+
+        assert until(lambda: len(runs.running()) == 2)
+
+        running = {run.id for run in runs.running()}
+        assert running == {first.id, third.id}
+        assert second.snapshot().is_queued is True
+        provider.release.set()
+
+
+def test_the_same_url_is_never_fetched_twice_at_once(tmp_path: Path) -> None:
+    """Two transfers of one resource would write into one staging directory.
+
+    The queue declines a duplicate before a worker ever sees one, so this is
+    watching the two rules agree: three submissions of one URL are one request
+    and one transfer.
+    """
+    provider = ManyHosts()
+    with registry(tmp_path, provider, workers=4, per_host=4) as runs:
+        submitted = [runs.submit(elsewhere("one.test", "same")) for _ in range(3)]
+
+        assert until(lambda: len(runs.running()) == 1)
+        sleep(0.1)
+
+        assert len({run.id for run in submitted}) == 1
+        assert len(runs.running()) == 1
+        assert runs.tally().waiting == 0
+        provider.release.set()
+
+
+def test_only_as_many_workers_start_as_there_is_work(tmp_path: Path) -> None:
+    """One download queued by hand starts one thread, not five.
+
+    Identified by thread rather than by name: a queue from an earlier test may
+    still be winding down, and its workers are called the same thing as these.
+    """
+    before = {thread.ident for thread in enumerate_threads()}
+    provider = ManyHosts()
+    with registry(tmp_path, provider, workers=5) as runs:
+        runs.submit(elsewhere("one.test", "a"))
+        assert provider.started.wait(timeout=10)
+
+        started = [
+            thread
+            for thread in enumerate_threads()
+            if thread.ident not in before and thread.name.startswith("maxidownload")
+        ]
+
+        assert len(started) == 1
+        provider.release.set()
+
+
+def test_a_pool_will_not_be_built_with_nothing_in_it(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="workers must be at least 1"):
+        TransferQueue(make_service(tmp_path), workers=0)
+    with pytest.raises(ValueError, match="per_host must be at least 1"):
+        TransferQueue(make_service(tmp_path), per_host=0)
+
+
+def test_a_host_is_one_host_however_it_is_spelled() -> None:
+    """Case-folded, because two spellings of one server are one server."""
+    assert _host_of("https://Example.TEST/file/a") == "example.test"
+    assert _host_of("https://example.test:8443/file/a") == "example.test"
+    assert _host_of("not a url") == ""
+
+
+# --- a queue holds a URL once ---------------------------------------------------
+
+
+def test_queueing_the_same_link_twice_returns_the_request_already_there(
+    tmp_path: Path,
+) -> None:
+    """A second click lands on the transfer being asked about, not beside it."""
+    with paused(tmp_path) as runs:
+        first = runs.submit(FILE_URL)
+        again = runs.submit(FILE_URL)
+
+        assert again is first
+        assert runs.tally().waiting == 1
+
+
+def test_the_key_in_a_link_does_not_make_it_a_different_link(tmp_path: Path) -> None:
+    """The queue holds URLs without their fragment, and compares them that way."""
+    with paused(tmp_path) as runs:
+        first = runs.submit(FILE_URL)
+
+        again = runs.submit(f"{bare(FILE_URL)}#a-different-key")
+
+        assert again is first
+        assert runs.tally().waiting == 1
+
+
+def test_a_batch_says_how_many_it_was_already_holding(tmp_path: Path) -> None:
+    """What "queue every match" pressed twice on a half-drained filter does."""
+    with paused(tmp_path) as runs:
+        runs.submit_all([FILE_URL, OTHER_URL])
+
+        accepted = runs.submit_all([FILE_URL, OTHER_URL, THIRD_URL])
+
+        assert accepted.queued == 1
+        assert accepted.held == 2
+        assert accepted.rejected == 0
+        assert runs.tally().waiting == 3
+
+
+def test_one_batch_holding_the_same_link_twice_queues_it_once(tmp_path: Path) -> None:
+    """A selection can name a URL twice; a queue still holds it once."""
+    with paused(tmp_path) as runs:
+        accepted = runs.submit_all([FILE_URL, FILE_URL, OTHER_URL])
+
+        assert accepted.queued == 2
+        assert accepted.held == 1
+
+
+def test_a_link_removed_from_the_queue_may_be_queued_again(tmp_path: Path) -> None:
+    """Declining a duplicate must not turn into declining it forever."""
+    with paused(tmp_path) as runs:
+        first = runs.submit(FILE_URL)
+        runs.cancel(first.id)
+
+        again = runs.submit(FILE_URL)
+
+        assert again is not first
+        assert runs.tally().waiting == 1
+
+
+def test_a_finished_download_may_be_queued_again(tmp_path: Path) -> None:
+    """Which is what "Try again" is, and what a re-download of a discard needs."""
+    with registry(tmp_path) as runs:
+        first = runs.submit(FILE_URL)
+        wait_for(first)
+
+        again = runs.submit(FILE_URL)
+
+        assert again is not first
+        wait_for(again)
+
+
+def test_what_the_queue_holds_is_what_a_report_is_told(tmp_path: Path) -> None:
+    """`pending` and the duplicate rule answer from one set, so they agree."""
+    with paused(tmp_path) as runs:
+        runs.submit(FILE_URL)
+
+        assert runs.pending([FILE_URL, OTHER_URL]) == frozenset({FILE_URL})
+        assert runs.pending([bare(FILE_URL)]) == frozenset({bare(FILE_URL)})
+
+
+# --- more than one transfer at a time ------------------------------------------
+#
+# The queue holds what is under way as a mapping rather than as one field. Only
+# one worker fills it today, so these drive the snapshot directly: what is being
+# checked is that nothing counts on there being exactly one, which is what the
+# worker pool arriving next will rely on.
+
+
+def under_way(download_id: str, *, bytes_written: int, seconds: float) -> DownloadSnapshot:
+    """Return a snapshot of a transfer that is moving bytes right now."""
+    return DownloadSnapshot(
+        download_id=download_id,
+        url=f"https://mega.nz/file/{download_id}",
+        progress=DownloadProgress(
+            label=download_id, status=DownloadStatus.PENDING, bytes_written=bytes_written
+        ),
+        started_at=datetime.now(UTC),
+        elapsed_seconds=seconds,
+    )
+
+
+def test_a_snapshot_holds_every_transfer_under_way() -> None:
+    snapshot = QueueSnapshot(
+        running=(
+            under_way("one", bytes_written=100, seconds=2.0),
+            under_way("two", bytes_written=400, seconds=3.0),
+        ),
+        waiting=(),
+        finished=(),
+    )
+
+    assert [item.download_id for item in snapshot.running] == ["one", "two"]
+    assert snapshot.remaining == 2
+    assert snapshot.is_busy is True
+
+
+def test_what_is_under_way_counts_towards_the_totals() -> None:
+    """Every number sums over the running transfers rather than reading one."""
+    snapshot = QueueSnapshot(
+        running=(
+            under_way("one", bytes_written=100, seconds=2.0),
+            under_way("two", bytes_written=400, seconds=3.0),
+        ),
+        waiting=(),
+        finished=(),
+    )
+
+    assert snapshot.bytes_written == 500
+    assert snapshot.transfer_seconds == pytest.approx(5.0)
+
+
+def test_the_oldest_transfer_is_what_the_singular_still_means() -> None:
+    """For the parts of the interface that have not learned the plural yet."""
+    snapshot = QueueSnapshot(
+        running=(
+            under_way("one", bytes_written=1, seconds=1.0),
+            under_way("two", bytes_written=1, seconds=1.0),
+        ),
+        waiting=(),
+        finished=(),
+    )
+
+    assert snapshot.active is not None
+    assert snapshot.active.download_id == "one"
+    assert QueueSnapshot(running=(), waiting=(), finished=()).active is None
+
+
+def test_the_queue_reports_what_it_is_transferring(tmp_path: Path) -> None:
+    """Through `running`, which is the answer `active` is now derived from."""
+    provider = BlockingProvider()
+    with registry(tmp_path, provider) as runs:
+        assert runs.running() == ()
+        started = runs.submit(FILE_URL)
+        assert provider.transferring.wait(timeout=10)
+
+        assert [run.id for run in runs.running()] == [started.id]
+        assert runs.active() is started
+        assert runs.tally().running == 1
+
+        provider.release.set()
+        wait_for(started)
+
+    assert runs.running() == ()
+
+
 def test_an_empty_queue_says_it_has_nothing_to_do(tmp_path: Path) -> None:
     with registry(tmp_path) as runs:
         snapshot = runs.snapshot()
@@ -844,7 +1176,7 @@ def test_an_empty_queue_says_it_has_nothing_to_do(tmp_path: Path) -> None:
 def test_shutting_down_drops_what_was_still_waiting(tmp_path: Path) -> None:
     """A queue that lives in memory ends with the process."""
     provider = BlockingProvider()
-    runs = TransferQueue(make_service(tmp_path, provider))
+    runs = TransferQueue(make_service(tmp_path, provider), per_host=1)
     running = runs.submit(FILE_URL)
     assert provider.transferring.wait(timeout=10)
     waiting = runs.submit(OTHER_URL)
@@ -910,9 +1242,14 @@ def test_what_is_still_to_come_is_counted_in_as_well(tmp_path: Path) -> None:
 
 
 def test_time_spent_waiting_is_not_time_spent_transferring(tmp_path: Path) -> None:
-    """A queue that sat paused overnight did not get slower while it was paused."""
+    """A queue that sat paused overnight did not get slower while it was paused.
+
+    One transfer at a time here, so the total is that transfer's own elapsed
+    time. Several overlapping transfers add up instead, which is what the rate
+    calls itself: an average per transfer rather than over the wall clock.
+    """
     provider = BlockingProvider()
-    with registry(tmp_path, provider) as runs:
+    with registry(tmp_path, provider, per_host=1) as runs:
         running = runs.submit(FILE_URL)
         assert provider.transferring.wait(timeout=10)
         runs.submit(OTHER_URL)

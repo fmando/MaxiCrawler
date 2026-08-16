@@ -79,7 +79,12 @@ def create_app(
     transfers = (
         downloads
         if downloads is not None
-        else TransferQueue(DownloadService(crawl_service.settings))
+        else TransferQueue(
+            DownloadService(crawl_service.settings),
+            limit=crawl_service.settings.max_queued,
+            workers=crawl_service.settings.download_workers,
+            per_host=crawl_service.settings.downloads_per_host,
+        )
     )
     # The queue is handed to the library the same way the library is handed to
     # the report below: as one bound method answering one question in bulk.

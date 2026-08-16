@@ -131,6 +131,7 @@ def test_the_library_path_round_trips_through_toml(tmp_path: Path) -> None:
         ({"max_redirects": -1}, "max_redirects must not be negative"),
         ({"max_links": 0}, "max_links must be at least 1"),
         ({"max_stream_bytes": -1}, "max_stream_bytes must not be negative"),
+        ({"max_queued": 0}, "max_queued must be at least 1"),
     ],
 )
 def test_crawl_settings_reject_impossible_values(kwargs: dict[str, int], message: str) -> None:
@@ -163,6 +164,23 @@ def test_crawl_settings_load_from_toml(tmp_path: Path) -> None:
 def test_crawl_settings_round_trip_through_toml(tmp_path: Path) -> None:
     path = tmp_path / "settings.toml"
     original = Settings(max_page_bytes=4096, max_redirects=2, max_links=50)
+    path.write_text(original.to_toml(), encoding="utf-8")
+
+    assert Settings.from_toml(path) == original
+
+
+def test_how_many_downloads_may_wait_is_configurable(tmp_path: Path) -> None:
+    """A thousand by default, and a number an installation may raise or lower."""
+    path = tmp_path / "settings.toml"
+    path.write_text("[maxicrawler]\nmax_queued = 4000\n", encoding="utf-8")
+
+    assert Settings().max_queued == 1000
+    assert Settings.from_toml(path).max_queued == 4000
+
+
+def test_the_queue_ceiling_round_trips_through_toml(tmp_path: Path) -> None:
+    path = tmp_path / "settings.toml"
+    original = Settings(max_queued=4000)
     path.write_text(original.to_toml(), encoding="utf-8")
 
     assert Settings.from_toml(path) == original
