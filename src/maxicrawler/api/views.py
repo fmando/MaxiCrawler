@@ -380,7 +380,8 @@ def queue_view(snapshot: QueueSnapshot, *, limit: int) -> dict[str, Any]:
         "is_paused": snapshot.is_paused,
         "is_busy": snapshot.is_busy,
         "follow": queue_follow(snapshot),
-        "active": None if snapshot.active is None else download_view(snapshot.active),
+        "running": tuple(download_view(item) for item in snapshot.running),
+        "running_count": format_number(len(snapshot.running)),
         "waiting": waiting,
         "finished": tuple(_finished_row(item) for item in snapshot.finished),
         "remaining": format_number(snapshot.remaining),
@@ -447,13 +448,18 @@ def queue_follow(snapshot: QueueSnapshot) -> dict[str, Any] | None:
     """Return what the queue page has left to watch, or ``None``.
 
     Three answers rather than two, and the third is what this exists for. There
-    is a transfer to listen to; there is nothing left to do at all; and there is
-    the moment *between* two transfers, where the queue is busy and the worker
-    has not picked the next one up. A page that read the third as the second
-    would stop following a batch of two hundred at whichever file lost that
-    race — which over two hundred files is not a rare event, it is an expected
-    one. So the third is answered with somewhere to ask again and nothing to
-    listen to, and the browser asks again.
+    are transfers to listen to; there is nothing left to do at all; and there is
+    the moment *between* two transfers, where the queue is busy and no worker
+    has picked the next one up. A page that read the third as the second would
+    stop following a batch of two hundred at whichever file lost that race —
+    which over two hundred files is not a rare event, it is an expected one. So
+    the third is answered with somewhere to ask again and nothing to listen to,
+    and the browser asks again.
+
+    A stream apiece rather than one for the queue as a whole. The alternative —
+    asking for the panels on a timer — would re-render every waiting row on
+    every tick, and there can be a thousand of them; a stream carries the
+    numbers of one transfer and costs the page nothing else.
 
     A paused queue is not busy in the sense this means. Nothing will be taken
     off it until somebody presses Resume, and that press is a page load.
@@ -464,10 +470,12 @@ def queue_follow(snapshot: QueueSnapshot) -> dict[str, Any] | None:
     """
     if not snapshot.is_busy or snapshot.is_paused:
         return None
-    active = snapshot.active
-    running = None if active is None or active.is_finished else active
     return {
-        "stream": None if running is None else f"/downloads/{running.download_id}/events",
+        "streams": tuple(
+            f"/downloads/{item.download_id}/events"
+            for item in snapshot.running
+            if not item.is_finished
+        ),
         "swap": QUEUE_FRAGMENT_URL,
         "into": QUEUE_REGION,
     }

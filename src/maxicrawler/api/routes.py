@@ -118,15 +118,14 @@ def discovery_of(request: Request) -> DiscoveryService:
     return service
 
 
-def _running(request: Request) -> dict[str, Any] | None:
-    """Return the transfer running right now, for the pages that mention it.
+def _running(request: Request) -> tuple[dict[str, Any], ...]:
+    """Return the transfers running right now, for the pages that mention them.
 
-    One line on the dashboard and above the library, so navigating away from a
-    download does not mean losing it. ``None`` when nothing is running, which is
+    A line each on the dashboard and above the library, so navigating away from
+    a download does not mean losing it. Empty when nothing is running, which is
     most of the time.
     """
-    run = downloads_of(request).active()
-    return None if run is None else views.download_view(run.snapshot())
+    return tuple(views.download_view(run.snapshot()) for run in downloads_of(request).running())
 
 
 def _download(request: Request) -> DownloadRun:

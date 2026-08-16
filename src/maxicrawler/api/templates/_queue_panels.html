@@ -93,8 +93,8 @@
     {% if queue.is_paused and queue.waiting %}
       <p class="notice">
         The queue is paused: nothing new is taken off it until you resume.
-        {% if queue.active %}
-          The transfer already running is not affected and will finish.
+        {% if queue.running %}
+          What is already running is not affected and will finish.
         {% endif %}
       </p>
     {% endif %}
@@ -108,17 +108,20 @@
   </div>
 </section>
 
-{% if queue.active %}
-  {#
-    The one download with something to report, rendered in full. `download` is
-    what the progress partial reads, and binding the name here means the same
-    markup and the same identifiers serve this page and the download's own --
-    which is why the live update below needs no code of its own.
-  #}
-  {% set download = queue.active %}
+{#
+  Every download with something to report, rendered in full and oldest first.
+  `download` is what the progress partial reads, and binding the name here means
+  the same markup and the same identifiers serve this page and the download's
+  own -- which is why the live update below needs no code of its own.
+
+  A panel apiece rather than a table: what is being transferred right now is the
+  thing somebody is watching, and a row would take away the bar that is the
+  reason they are watching it.
+#}
+{% for download in queue.running %}
   <section class="panel">
     <h2>
-      <span class="badge {{ download.state_tone }}" id="download-state">{{ download.state_label }}</span>
+      <span class="badge {{ download.state_tone }}" id="download-state-{{ download.download_id }}">{{ download.state_label }}</span>
       <span class="url">{{ download.label }}</span>
 
       <form class="stop" method="post" action="/downloads/{{ download.download_id }}/stop?back=/downloads">
@@ -132,7 +135,7 @@
       <p><a class="action" href="/downloads/{{ download.download_id }}">Open this download</a></p>
     </div>
   </section>
-{% endif %}
+{% endfor %}
 
 {% if queue.waiting %}
   <section class="panel">
@@ -193,10 +196,11 @@
 {#
   What is left to watch, decided by the server and read by `download.js`.
 
-  `data-stream` is the running transfer's own stream, borrowed: it updates the
-  bar above without this page needing a stream of its own. It is missing in the
-  gap between two transfers, and that is not an omission -- it is the signal to
-  ask again, because the next file is about to start.
+  One `data-stream` per running transfer, borrowed from the transfers
+  themselves: they update the bars above without this page needing a stream of
+  its own. There are none in the gap between two transfers, and that is not an
+  omission -- it is the signal to ask again, because the next file is about to
+  start.
 
   `data-swap` is where to ask, and `data-into` is where the answer goes. Both
   are absent from a single download's page, which is how one script serves two
@@ -205,8 +209,11 @@
 #}
 {% if queue.follow %}
   <div id="download-live"
-       {% if queue.follow.stream %}data-stream="{{ queue.follow.stream }}"{% endif %}
        data-swap="{{ queue.follow.swap }}"
        data-into="{{ queue.follow.into }}"
-       hidden></div>
+       hidden>
+    {% for stream in queue.follow.streams %}
+      <span data-stream="{{ stream }}"></span>
+    {% endfor %}
+  </div>
 {% endif %}

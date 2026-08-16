@@ -1,12 +1,17 @@
 /*
- * Keep a running transfer's page current -- and, on the queue, the page that
- * outlives it.
+ * Keep running transfers' pages current -- and, on the queue, the page that
+ * outlives them.
  *
  * The same shape as crawl.js, and for the same reason: both pages arrive
  * complete from the server, and a reload is a working way to follow a transfer.
  * Nothing here decides anything or formats anything -- every value written into
  * the page was already formatted by the code that rendered it, and where to
  * look next was decided by the server too.
+ *
+ * There may be several transfers at once, so there are several streams, and
+ * every field a frame writes into is named by its download's id. Listening to
+ * each transfer beats asking the server for the panels on a timer: the panels
+ * carry every waiting row with them, and there can be a thousand of those.
  *
  * What a *finished* transfer means differs between the two pages that load
  * this, and the server says which by writing `data-swap` or leaving it out.
@@ -29,46 +34,63 @@
    * Only reached in the gap between two transfers, which is over in a moment;
    * this is what keeps that moment from ending the batch. */
 
-  function write(id, value) {
-    var node = document.getElementById(id);
+  var sources = [];
+  /* Every stream currently open. They are closed together: one transfer
+   * finishing replaces the panels that hold all of them, and a source left
+   * running would be writing into elements that are no longer on the page. */
+
+  var settling = false;
+  /* Whether the answer to "one of them ended" is already on its way. Two
+   * transfers finishing in the same moment are one refresh, not two. */
+
+  function write(field, downloadId, value) {
+    var node = document.getElementById(field + "-" + downloadId);
     if (node) {
       node.textContent = value;
     }
   }
 
   function paint(download) {
-    write("download-transferred", download.transferred);
-    write("download-bytes", download.bytes_written);
-    write("download-elapsed", download.elapsed);
-    write("download-rate", download.rate || "—");
-    write("download-remaining", download.remaining || "—");
-    write("download-files", download.files_finished);
-    write("download-state", download.state_label);
+    var id = download.download_id;
+    write("download-transferred", id, download.transferred);
+    write("download-bytes", id, download.bytes_written);
+    write("download-elapsed", id, download.elapsed);
+    write("download-rate", id, download.rate || "—");
+    write("download-remaining", id, download.remaining || "—");
+    write("download-files", id, download.files_finished);
+    write("download-state", id, download.state_label);
 
-    var badge = document.getElementById("download-state");
+    var badge = document.getElementById("download-state-" + id);
     if (badge) {
       badge.className = "badge " + download.state_tone;
     }
     // A transfer whose size nobody stated keeps the indeterminate bar it was
     // rendered with; there is no percentage to write into it.
     if (download.has_total) {
-      write("download-percent", download.progress_percent);
-      var bar = document.querySelector("#download-bar > span");
+      write("download-percent", id, download.progress_percent);
+      var bar = document.querySelector("#download-bar-" + id + " > span");
       if (bar) {
         bar.style.width = download.progress_percent + "%";
       }
     }
   }
 
-  function listen(live) {
-    var source = new EventSource(live.dataset.stream);
+  function closeAll() {
+    sources.forEach(function (source) {
+      source.close();
+    });
+    sources = [];
+  }
+
+  function listen(live, url) {
+    var source = new EventSource(url);
+    sources.push(source);
 
     source.addEventListener("progress", function (event) {
       paint(JSON.parse(event.data));
     });
 
     source.addEventListener("finished", function () {
-      source.close();
       ended(live);
     });
 
@@ -80,6 +102,11 @@
   }
 
   function ended(live) {
+    if (settling) {
+      return;
+    }
+    settling = true;
+    closeAll();
     if (live.dataset.swap && window.fetch) {
       swap(live);
     } else {
@@ -102,6 +129,7 @@
           throw new Error("nowhere to put it");
         }
         region.innerHTML = html;
+        settling = false;
         follow();
       })
       .catch(function () {
@@ -117,13 +145,16 @@
       // Nothing running and nothing waiting: the page is as final as it gets.
       return;
     }
-    if (live.dataset.stream) {
-      listen(live);
+    var streams = live.querySelectorAll("[data-stream]");
+    if (streams.length) {
+      Array.prototype.forEach.call(streams, function (node) {
+        listen(live, node.dataset.stream);
+      });
     } else if (live.dataset.swap && window.fetch) {
       // Somewhere to ask but nothing to listen to, which is the moment between
       // two transfers: the one that ended is off the queue and the next has not
       // been picked up. Ask again rather than give up -- the answer either
-      // carries a stream or says there is nothing left, and both end this.
+      // carries streams or says there is nothing left, and both end this.
       window.setTimeout(function () {
         swap(live);
       }, BETWEEN_TRANSFERS);
