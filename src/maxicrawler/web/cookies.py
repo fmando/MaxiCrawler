@@ -11,13 +11,27 @@ That makes the jar a **carrier, not an authenticator**. It cannot obtain a
 session, refresh one, or notice that one has been revoked; the provider learns
 that from what the host answers, which is the only place the truth lives.
 
-**Two shapes, because two ways of getting one are normal.** A browser
-extension writes the Netscape ``cookies.txt`` format. Edge's own developer
-tools produce a single ``Cookie:`` request header, and that route is worth
-supporting precisely because it needs nothing installed — and because the
-session cookies are ``HttpOnly``, so the header is the *only* view of the
-browser that shows all of them. :meth:`CookieJar.from_text` tells the two
-apart by looking, which keeps the instruction to the person short.
+**Three shapes, because three ways of getting one are normal.** A browser
+extension writes the Netscape ``cookies.txt`` format. A person told to copy the
+``Cookie:`` line copies that line. And a person who selects the request-headers
+panel in Edge's developer tools and presses copy gets something different
+again: each header's *name* on one line and its *value* on the next, blank
+lines between. :meth:`CookieJar.from_text` tells all three apart by looking,
+which keeps the instruction to the person short — and the developer-tools route
+is worth supporting properly because it needs nothing installed, and because
+the session cookies are ``HttpOnly``, so that panel is the *only* view of the
+browser that shows all of them.
+
+Getting the shapes wrong here is not a parse error, it is a silent one: a
+``User-Agent`` contains semicolons, so a reader that split the whole file on
+them would turn ``Windows NT 10.0; Win64; x64`` into three cookies and send
+them.
+
+**The user agent is kept when the file carries one**, because a session and the
+browser it was issued to are one fact. A bot check binds its cookie to the
+browser that earned it; replaying that cookie under a different name is
+presenting it in circumstances that no longer match. Reading both from one file
+is what stops them drifting apart.
 
 **Why the domain is a constructor argument rather than a filter applied later.**
 A jar is built *for* a host. :meth:`header_for` answers with the session only
@@ -40,6 +54,7 @@ modules that should be on it.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -65,6 +80,17 @@ work.
 
 NETSCAPE_FIELDS = 7
 """Domain, subdomains flag, path, secure flag, expiry, name, value."""
+
+HEADER_LINE = re.compile(r"^([A-Za-z][A-Za-z0-9-]*)\s*:\s*(.*)$")
+"""``name: value`` on one line, the way a header is usually written down."""
+
+HEADER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9-]*$")
+"""A bare header name on a line of its own, the way Edge's panel copies.
+
+Deliberately strict. A cookie line is full of ``=`` and ``;`` and a URL is full
+of ``/``, so neither can be mistaken for a name — which matters because names
+and values are told apart by shape alone here.
+"""
 
 
 class CookieError(ValueError):
@@ -92,6 +118,15 @@ class CookieJar:
     header: ResourceSecret
     """The assembled ``Cookie:`` value, redacted in every rendering."""
 
+    user_agent: str | None = None
+    """The browser the session was exported from, when the file said.
+
+    Not a secret and deliberately not wrapped: it is one of the least private
+    strings a browser sends. It lives here because it belongs to the same
+    export as the cookies, and keeping the pair together is what stops a
+    session being replayed under a name it was never issued to.
+    """
+
     @classmethod
     def from_file(cls, path: Path, *, domain: str, clock: Clock | None = None) -> CookieJar:
         """Read a session from *path*, in either supported shape.
@@ -114,15 +149,26 @@ class CookieJar:
 
     @classmethod
     def from_text(cls, text: str, *, domain: str, clock: Clock | None = None) -> CookieJar:
-        """Read a session from *text*, telling the two shapes apart by looking.
+        """Read a session from *text*, telling the shapes apart by looking.
 
-        A Netscape line is seven tab-separated fields. Nothing in a ``Cookie:``
-        header is tab-separated, so one tab-bearing line is enough to decide,
-        and deciding by content means the person exporting the session never
-        has to say which button they pressed.
+        A Netscape line is seven tab-separated fields, and nothing in a header
+        block is tab-separated, so one tab-bearing line settles that half.
+        Otherwise the text is read as headers; a ``cookie`` among them means it
+        really was a header block, and its absence means the whole text is the
+        cookie line itself.
+
+        Deciding by content means the person exporting a session never has to
+        say which button they pressed.
         """
         if any(line.count("\t") >= NETSCAPE_FIELDS - 1 for line in text.splitlines()):
             return cls.from_netscape(text, domain=domain, clock=clock)
+        headers = read_headers(text)
+        if "cookie" in headers:
+            return cls._build(
+                _pairs_in(headers["cookie"]),
+                domain=domain,
+                user_agent=headers.get("user-agent"),
+            )
         return cls.from_header_line(text, domain=domain)
 
     @classmethod
@@ -135,16 +181,7 @@ class CookieJar:
         stripped = line.strip()
         if stripped.lower().startswith("cookie:"):
             stripped = stripped.split(":", 1)[1].strip()
-        pairs: list[tuple[str, str]] = []
-        for part in stripped.split(";"):
-            candidate = part.strip()
-            if not candidate or "=" not in candidate:
-                continue
-            name, _, value = candidate.partition("=")
-            name = name.strip()
-            if name:
-                pairs.append((name, value.strip()))
-        return cls._build(pairs, domain=domain)
+        return cls._build(_pairs_in(stripped), domain=domain)
 
     @classmethod
     def from_netscape(cls, text: str, *, domain: str, clock: Clock | None = None) -> CookieJar:
@@ -175,7 +212,13 @@ class CookieJar:
         return cls._build(pairs, domain=domain)
 
     @classmethod
-    def _build(cls, pairs: list[tuple[str, str]], *, domain: str) -> CookieJar:
+    def _build(
+        cls,
+        pairs: list[tuple[str, str]],
+        *,
+        domain: str,
+        user_agent: str | None = None,
+    ) -> CookieJar:
         """Assemble a jar, refusing one that would hold nothing.
 
         An empty jar is not a session with no cookies in it; it is a mistake
@@ -194,6 +237,7 @@ class CookieJar:
             domain=host,
             names=tuple(name for name, _ in pairs),
             header=ResourceSecret("; ".join(f"{name}={value}" for name, value in pairs)),
+            user_agent=user_agent or None,
         )
 
     def header_for(self, url: str) -> str | None:
@@ -214,6 +258,58 @@ class CookieJar:
         if split.scheme != "https" and host not in LOOPBACK_HOSTS:
             return None
         return self.header.reveal()
+
+
+def read_headers(text: str) -> dict[str, str]:
+    """Return the request headers written down in *text*, lowercased by name.
+
+    Two layouts, read in one pass. ``name: value`` on a line is the usual way a
+    header is written. A line that is *only* a name belongs to the other one:
+    Edge's request-headers panel copies each name and value onto separate
+    lines, with blank lines between, and the value is then the next line that
+    has anything on it.
+
+    Reading both in order is what keeps them from confusing each other. A
+    referer's value is a URL, which looks exactly like ``name: value`` — but by
+    the time it is reached it has already been consumed as the value belonging
+    to the name above it, so it is never mistaken for a header of its own.
+
+    The first spelling of a name wins, because a file somebody appended to
+    twice should keep working like the session it was the first time.
+    """
+    headers: dict[str, str] = {}
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        index += 1
+        if not line:
+            continue
+        written = HEADER_LINE.match(line)
+        if written is not None:
+            headers.setdefault(written.group(1).lower(), written.group(2).strip())
+            continue
+        if HEADER_NAME.match(line) is None:
+            continue
+        while index < len(lines) and not lines[index].strip():
+            index += 1
+        if index < len(lines):
+            headers.setdefault(line.lower(), lines[index].strip())
+            index += 1
+    return headers
+
+
+def _pairs_in(cookie: str) -> list[tuple[str, str]]:
+    """Return the name and value of every cookie in a ``Cookie:`` value."""
+    pairs: list[tuple[str, str]] = []
+    for part in cookie.split(";"):
+        candidate = part.strip()
+        if not candidate or "=" not in candidate:
+            continue
+        name, _, value = candidate.partition("=")
+        if name.strip():
+            pairs.append((name.strip(), value.strip()))
+    return pairs
 
 
 def _covers(host: str, domain: str) -> bool:

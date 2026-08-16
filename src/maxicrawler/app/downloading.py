@@ -425,7 +425,12 @@ class DownloadService:
             return {} if value is None else {"Cookie": value}
 
         return UrllibFileTransport(
-            user_agent=settings.musescore_user_agent or settings.user_agent,
+            # The session file's own user agent comes before this program's,
+            # because a session and the browser it was issued to are one fact:
+            # a check that bound its cookie to a browser is being shown that
+            # cookie under a different name otherwise. The setting still wins,
+            # for the installation that knows better than its export.
+            user_agent=settings.musescore_user_agent or jar.user_agent or settings.user_agent,
             timeout=settings.network_timeout,
             max_redirects=settings.max_redirects,
             rule=PrivateNetworkRule(

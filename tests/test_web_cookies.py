@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from maxicrawler.web.cookies import CookieError, CookieJar
+from maxicrawler.web.cookies import CookieError, CookieJar, read_headers
 
 DOMAIN = "musescore.com"
 SCORE_URL = "https://musescore.com/user/21965011/scores/4217351"
@@ -52,6 +52,71 @@ def test_the_word_cookie_in_front_of_the_line_is_tolerated() -> None:
     jar = CookieJar.from_header_line("cookie: mu_sid=abc", domain=DOMAIN)
 
     assert jar.header_for(SCORE_URL) == "mu_sid=abc"
+
+
+def test_a_developer_tools_panel_becomes_a_session() -> None:
+    """Edge copies each header's name and value onto separate lines.
+
+    Nothing needs installing for this route, and it is the only view of the
+    browser that shows the HttpOnly cookies at all, so it has to work as
+    copied rather than after tidying up.
+    """
+    copied = "cookie\nmu_sid=abc; cf_clearance=xyz\n\n\nuser-agent\nMozilla/5.0\n"
+
+    jar = CookieJar.from_text(copied, domain=DOMAIN)
+
+    assert jar.names == ("mu_sid", "cf_clearance")
+    assert jar.header_for(SCORE_URL) == "mu_sid=abc; cf_clearance=xyz"
+
+
+def test_a_user_agent_beside_the_cookies_is_kept() -> None:
+    """The session and the browser it was issued to travel together."""
+    copied = "cookie\nmu_sid=abc\n\nuser-agent\nMozilla/5.0 (Windows NT 10.0; Win64; x64)\n"
+
+    jar = CookieJar.from_text(copied, domain=DOMAIN)
+
+    assert jar.user_agent == "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+
+
+def test_a_user_agent_is_not_mistaken_for_cookies() -> None:
+    """The silent failure this shape exists to prevent.
+
+    A user agent is full of semicolons. Split the whole file on them and
+    ``Windows NT 10.0; Win64; x64`` becomes three cookies that then get sent.
+    """
+    copied = "cookie\nmu_sid=abc\n\nuser-agent\nMozilla/5.0 (Windows NT 10.0; Win64; x64)\n"
+
+    jar = CookieJar.from_text(copied, domain=DOMAIN)
+
+    assert jar.names == ("mu_sid",)
+    assert "Win64" not in (jar.header_for(SCORE_URL) or "")
+
+
+def test_a_referer_url_is_not_read_as_a_header_of_its_own() -> None:
+    """``https://…`` looks exactly like ``name: value`` and is a value."""
+    copied = "cookie\nmu_sid=abc\n\nreferer\nhttps://musescore.com/user/1/scores/2\n"
+
+    headers = read_headers(copied)
+
+    assert headers["referer"] == "https://musescore.com/user/1/scores/2"
+    assert "https" not in headers
+
+
+def test_headers_written_the_usual_way_are_read_too() -> None:
+    block = "cookie: mu_sid=abc\nuser-agent: Mozilla/5.0\n"
+
+    jar = CookieJar.from_text(block, domain=DOMAIN)
+
+    assert jar.header_for(SCORE_URL) == "mu_sid=abc"
+    assert jar.user_agent == "Mozilla/5.0"
+
+
+def test_a_bare_cookie_line_is_still_a_bare_cookie_line() -> None:
+    """No header names in it at all, so the whole text is the value."""
+    jar = CookieJar.from_text("mu_sid=abc; other=1", domain=DOMAIN)
+
+    assert jar.names == ("mu_sid", "other")
+    assert jar.user_agent is None
 
 
 def test_a_netscape_export_becomes_the_same_session() -> None:
