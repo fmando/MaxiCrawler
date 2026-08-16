@@ -2248,6 +2248,25 @@ def settings_view(settings: Settings) -> tuple[dict[str, Any], ...]:
                     "its daily allowance per download, so each one added is "
                     "another day's budget spent on the same music.",
                 ),
+                _setting(
+                    "musescore_daily_limit",
+                    str(settings.musescore_daily_limit),
+                    "How many files may be taken in one day. The host's own "
+                    "number, kept rather than worked around.",
+                ),
+                _setting(
+                    "musescore_reset_hour",
+                    f"{settings.musescore_reset_hour:02d}:00",
+                    "When a new day's allowance is assumed to begin. Assumed, "
+                    "because the host does not say. Too early costs a day; "
+                    "too late costs nothing but patience.",
+                ),
+                _setting(
+                    "musescore_downloads",
+                    settings.musescore_downloads or "(Downloads in your home directory)",
+                    "Where the browser puts what you download. Read only — "
+                    "nothing here is moved, renamed, or cleaned up.",
+                ),
             ),
         },
         {
