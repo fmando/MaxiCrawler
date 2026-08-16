@@ -98,6 +98,18 @@ not change.
     floor at the other end is `min_download_size`, checked in the sink at both
     the moment a size is announced and the moment the last byte lands (ADR-042),
     and a ceiling is the same two checkpoints with the comparison turned around
+-   Making a thumbnail as soon as the file lands, so the maker stops being
+    something to remember. Nothing produces one inside a request and nothing
+    should (ADR-044) — but a download worker is already in the background with
+    the finished file in its hand, which is a different place entirely. Two
+    findings shape the work and are why it is more than the afternoon it looks
+    like: `DownloadSummary` names a directory and a key only when the link
+    turned out to be a *single* resource, so the case that matters — a share
+    holding two hundred images — needs it to carry the whole list; and the
+    decoding wants one thread of its own rather than the five transfer workers,
+    which would otherwise hold five bitmaps of a large photograph at once. Until
+    then a cron entry on the server runs `make_thumbnails.py`, which is what the
+    maintenance page prints the command for
 -   Parallel thumbnail making. The run is sequential and manages about forty
     photographs a second, which is a couple of minutes for a few thousand
     images and fine as a one-off; a library an order of magnitude larger would
