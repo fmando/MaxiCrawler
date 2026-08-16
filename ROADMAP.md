@@ -44,7 +44,9 @@ The mission, core principles, and non-goals are described in
     on a real library: a tile of photographs was 3.3 GB of bitmap a page, and
     the byte limit could not fix it because it measures what is sent rather than
     what a browser holds (ADR-044)
--   0.17 Scheduler & Automation
+-   0.17 Scheduler & Automation — a queue that outlives the process, a daily
+    budget that outlives a restart, and the first host that needs a session the
+    person running MaxiCrawler supplies themselves
 -   0.18 REST API
 -   1.0 Stable Release
 
@@ -84,6 +86,30 @@ not change.
 
 ## Next
 
+-   **MuseScore, and with it a queue that measures its work in weeks.** The
+    subject is a host that answers a subscription with twenty downloads a day
+    and says so in the page: `limit_download_count` and `is_download_limited`
+    sit in the JSON the score page carries, so the allowance can be *asked for*
+    rather than guessed at. A few hundred pieces is therefore not an afternoon,
+    and everything MaxiCrawler owns on that side is built for an afternoon —
+    the queue in `api/downloads.py` lives in memory and is deliberately emptied
+    on shutdown, no counter survives a restart, and nothing starts itself
+    again. Three things follow, in this order. A session the person running
+    MaxiCrawler exports from their own browser, held in `ResourceSecret` and
+    handed only to a transport built for that one host, because the account is
+    a Sign-in-with-Apple account and there is no password to type even if
+    typing one were the right idea (ADR-047). A plugin and a provider, which is
+    the ordinary way to add a host — the score page classifies as a container
+    and inspects into the two files worth keeping, a PDF to read and an MSCZ to
+    edit. And then the part that is genuinely new: a table of intents and a
+    table of days, drained by one thread inside `serve` that spends its budget
+    and waits out the rest (ADR-048). The limit is *kept*, not worked around,
+    and the server keeps the last word over the local count. What stops the
+    work is a challenge: Cloudflare and Akamai both sit in front of the page,
+    solving one is a non-goal ([VISION.md](VISION.md)), so meeting one pauses
+    the queue and says why. Whether a cookie jar without a browser gets past
+    them at all is the open question the first real download answers, and it is
+    asked before the scheduler is built rather than after
 -   Pinning the resolved address onto the connection that is opened, which is
     what closes DNS rebinding. The private-network guard raises the cost of
     reaching an internal address and does not make it impossible (ADR-031), and
