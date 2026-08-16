@@ -7,15 +7,25 @@ from maxicrawler.database.discovery import (
     StoredUrl,
 )
 from maxicrawler.database.library import IndexedEntry, SQLiteLibraryIndex
+from maxicrawler.database.musescore import (
+    RequestState,
+    ScoreRequest,
+    SQLiteRequestQueue,
+    StoredRequest,
+)
 from maxicrawler.database.sqlite import SQLiteDatabase
 
 __all__ = [
     "IndexedEntry",
+    "RequestState",
     "SQLiteCrawlRepository",
     "SQLiteDatabase",
     "SQLiteDiscoveryRepository",
     "SQLiteLibraryIndex",
+    "SQLiteRequestQueue",
+    "ScoreRequest",
     "StoredCrawl",
+    "StoredRequest",
     "StoredSession",
     "StoredUrl",
 ]
