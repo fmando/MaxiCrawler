@@ -406,7 +406,15 @@ class Departed:
 class QueueSnapshot:
     """What the queue holds at the moment it was asked."""
 
-    active: DownloadSnapshot | None
+    running: tuple[DownloadSnapshot, ...]
+    """The transfers under way, oldest first.
+
+    A tuple rather than one transfer because the queue may drain with more than
+    one worker. Everything counted below sums over it, which is the whole of
+    what "more than one at a time" means to a page: no number here is ever
+    *the* running download's.
+    """
+
     waiting: tuple[DownloadSnapshot, ...]
     finished: tuple[DownloadSnapshot, ...]
     """Newest first, which is the order somebody checking on them reads."""
@@ -416,9 +424,19 @@ class QueueSnapshot:
     """The runs this queue counted and no longer holds."""
 
     @property
+    def active(self) -> DownloadSnapshot | None:
+        """Return the oldest transfer under way, or ``None``.
+
+        For the parts of the interface that still speak in the singular. They
+        are what the next commit is about; until then this is exactly the
+        running download, because exactly one worker takes requests off.
+        """
+        return self.running[0] if self.running else None
+
+    @property
     def remaining(self) -> int:
-        """Return how many downloads have still to happen, the running one included."""
-        return len(self.waiting) + (1 if self.active is not None else 0)
+        """Return how many downloads have still to happen, the running ones included."""
+        return len(self.waiting) + len(self.running)
 
     @property
     def is_busy(self) -> bool:
@@ -467,13 +485,10 @@ class QueueSnapshot:
 
     @property
     def bytes_written(self) -> int:
-        """Return how many bytes this queue has moved, the running one included."""
+        """Return how many bytes this queue has moved, the running ones included."""
         written = sum(run.progress.bytes_written for run in self.finished)
-        return (
-            self.departed.bytes_written
-            + written
-            + (0 if self.active is None else self.active.progress.bytes_written)
-        )
+        under_way = sum(run.progress.bytes_written for run in self.running)
+        return self.departed.bytes_written + written + under_way
 
     @property
     def transfer_seconds(self) -> float:
@@ -482,13 +497,16 @@ class QueueSnapshot:
         The transfers added together, not the wall clock. A queue that sat
         paused overnight did not get slower while it was paused, and a rate
         divided by the hours nobody was downloading would say it did.
+
+        Added together across transfers that overlap, deliberately. Two files
+        moving for ten seconds each is twenty seconds of transferring, and the
+        rate this divides into is a per-transfer average — which is what the
+        page calls it. Wall-clock time would answer a different question, and
+        the queue has no clock of its own to answer it with.
         """
         spent = sum(run.elapsed_seconds for run in self.finished)
-        return (
-            self.departed.seconds
-            + spent
-            + (0.0 if self.active is None else self.active.elapsed_seconds)
-        )
+        under_way = sum(run.elapsed_seconds for run in self.running)
+        return self.departed.seconds + spent + under_way
 
 
 @dataclass(frozen=True, slots=True)
@@ -529,12 +547,13 @@ class QueueTally:
 
 
 class TransferQueue:
-    """The downloads this process knows about, drained one at a time.
+    """The downloads this process knows about, and what is being fetched now.
 
-    Every mutation is guarded by one condition, and the worker waits on that
-    same condition rather than polling. Adding a second worker would be a matter
-    of starting a second thread on :meth:`_drain`; what stops that from being
-    done here is politeness, not this class.
+    Every mutation is guarded by one condition, and a worker waits on that same
+    condition rather than polling. What is under way is a mapping rather than a
+    field, so nothing here counts on there being exactly one — the second
+    worker that fills it is the next thing to arrive, and it should find a queue
+    that does not have to be rewritten to admit it.
     """
 
     def __init__(
@@ -557,7 +576,10 @@ class TransferQueue:
         self._runs: OrderedDict[str, DownloadRun] = OrderedDict()
         self._waiting: list[str] = []
         self._targets: dict[str, str] = {}
-        self._active: DownloadRun | None = None
+        # Keyed by run id and ordered by when each transfer started, which is
+        # the order a page lists them in. One worker fills it one at a time
+        # today; nothing below assumes that.
+        self._running: dict[str, DownloadRun] = {}
         self._departed = Departed()
         self._paused = False
         self._closed = False
@@ -641,10 +663,20 @@ class TransferQueue:
         with self._condition:
             return self._runs.get(download_id)
 
-    def active(self) -> DownloadRun | None:
-        """Return the download being worked on right now, if there is one."""
+    def running(self) -> tuple[DownloadRun, ...]:
+        """Return the transfers under way right now, oldest first."""
         with self._condition:
-            return self._active
+            return tuple(self._running.values())
+
+    def active(self) -> DownloadRun | None:
+        """Return the oldest transfer under way, if there is one.
+
+        What the parts of the interface that speak of *the* running download
+        ask. With one worker taking requests off, it is that download; when
+        there are more, those parts are what changes rather than this answer.
+        """
+        with self._condition:
+            return next(iter(self._running.values()), None)
 
     def pending(self, urls: Iterable[str]) -> frozenset[str]:
         """Return which of *urls* are waiting or being fetched right now.
@@ -667,8 +699,7 @@ class TransferQueue:
             return frozenset()
         with self._condition:
             queued = {self._runs[run_id].url for run_id in self._waiting}
-            if self._active is not None:
-                queued.add(self._active.url)
+            queued.update(run.url for run in self._running.values())
         return frozenset(url for url in asked if strip_fragment(url) in queued)
 
     def position_of(self, download_id: str) -> int | None:
@@ -701,17 +732,16 @@ class TransferQueue:
         with self._condition:
             queued = set(self._waiting)
             waiting = len(self._waiting)
-            active = self._active
+            under_way = len(self._running)
+            busy = set(self._running)
             paused = self._paused
             departed = self._departed
-            done = [
-                run for key, run in self._runs.items() if key not in queued and run is not active
-            ]
+            done = [run for key, run in self._runs.items() if key not in queued and key not in busy]
         # Outside the lock: each run guards its own fields, and holding the
         # queue's condition while asking fifty of them is a wait nobody needs.
         failed = sum(1 for run in done if run.snapshot().status is DownloadStatus.FAILED)
         return QueueTally(
-            running=1 if active is not None else 0,
+            running=under_way,
             waiting=waiting,
             failed=departed.failed + failed,
             is_paused=paused,
@@ -725,17 +755,18 @@ class TransferQueue:
         state that never existed.
         """
         with self._condition:
-            active = self._active
+            under_way = tuple(self._running.values())
+            busy = set(self._running)
             waiting = tuple(self._runs[run_id] for run_id in self._waiting)
             finished = tuple(
                 run
                 for run in reversed(self._runs.values())
-                if run is not active and run.id not in self._waiting
+                if run.id not in busy and run.id not in self._waiting
             )
             paused = self._paused
             departed = self._departed
         return QueueSnapshot(
-            active=None if active is None else active.snapshot(),
+            running=tuple(run.snapshot() for run in under_way),
             waiting=tuple(run.snapshot() for run in waiting),
             finished=tuple(run.snapshot() for run in finished),
             is_paused=paused,
@@ -783,7 +814,7 @@ class TransferQueue:
                 # here would make "remove, then think better of it" the one
                 # thing this queue cannot undo. It goes when the run does.
                 self._condition.notify_all()
-            elif run is self._active:
+            elif download_id in self._running:
                 run.stop()
                 return True
             else:
@@ -840,7 +871,7 @@ class TransferQueue:
                 target
                 for key, run in self._runs.items()
                 if key not in self._waiting
-                and run is not self._active
+                and key not in self._running
                 and (target := self._targets.get(key)) is not None
                 and _is_unarrived(run)
             ]
@@ -866,7 +897,7 @@ class TransferQueue:
                 key
                 for key, run in self._runs.items()
                 if key not in self._waiting
-                and run is not self._active
+                and key not in self._running
                 and run.snapshot().is_finished
             ]
             for key in keys:
@@ -909,11 +940,11 @@ class TransferQueue:
             self._closed = True
             self._waiting.clear()
             self._targets.clear()
-            active = self._active
+            under_way = tuple(self._running.values())
             worker = self._worker
             self._condition.notify_all()
-        if active is not None:
-            active.stop()
+        for run in under_way:
+            run.stop()
         if wait and worker is not None:
             worker.join(timeout=SHUTDOWN_TIMEOUT)
 
@@ -942,13 +973,13 @@ class TransferQueue:
                 run_id = self._waiting.pop(0)
                 run = self._runs[run_id]
                 target = self._targets[run_id]
-                self._active = run
+                self._running[run_id] = run
             try:
                 run.begin()
                 self._execute(run, target)
             finally:
                 with self._condition:
-                    self._active = None
+                    self._running.pop(run_id, None)
                     self._condition.notify_all()
 
     def _execute(self, run: DownloadRun, url: str) -> None:

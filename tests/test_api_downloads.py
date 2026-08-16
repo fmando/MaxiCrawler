@@ -8,6 +8,7 @@ and while it runs, what survives it, and what is refused.
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
 from threading import enumerate as enumerate_threads
@@ -20,11 +21,12 @@ from maxicrawler.api.downloads import (
     DownloadRun,
     DownloadSnapshot,
     Move,
+    QueueSnapshot,
     TransferQueue,
 )
 from maxicrawler.api.errors import QueueFullError
 from maxicrawler.api.stream import download_events, download_payload
-from maxicrawler.app import DownloadService
+from maxicrawler.app import DownloadProgress, DownloadService
 from maxicrawler.config import Settings
 from maxicrawler.domain import ContentDescriptor, DownloadStatus, ProviderCapability, ResourceRef
 from maxicrawler.library import Library
@@ -830,6 +832,91 @@ def test_the_newest_finished_download_is_listed_first(tmp_path: Path) -> None:
         listed = [item.download_id for item in runs.snapshot().finished]
 
     assert listed == [second.id, first.id]
+
+
+# --- more than one transfer at a time ------------------------------------------
+#
+# The queue holds what is under way as a mapping rather than as one field. Only
+# one worker fills it today, so these drive the snapshot directly: what is being
+# checked is that nothing counts on there being exactly one, which is what the
+# worker pool arriving next will rely on.
+
+
+def under_way(download_id: str, *, bytes_written: int, seconds: float) -> DownloadSnapshot:
+    """Return a snapshot of a transfer that is moving bytes right now."""
+    return DownloadSnapshot(
+        download_id=download_id,
+        url=f"https://mega.nz/file/{download_id}",
+        progress=DownloadProgress(
+            label=download_id, status=DownloadStatus.PENDING, bytes_written=bytes_written
+        ),
+        started_at=datetime.now(UTC),
+        elapsed_seconds=seconds,
+    )
+
+
+def test_a_snapshot_holds_every_transfer_under_way() -> None:
+    snapshot = QueueSnapshot(
+        running=(
+            under_way("one", bytes_written=100, seconds=2.0),
+            under_way("two", bytes_written=400, seconds=3.0),
+        ),
+        waiting=(),
+        finished=(),
+    )
+
+    assert [item.download_id for item in snapshot.running] == ["one", "two"]
+    assert snapshot.remaining == 2
+    assert snapshot.is_busy is True
+
+
+def test_what_is_under_way_counts_towards_the_totals() -> None:
+    """Every number sums over the running transfers rather than reading one."""
+    snapshot = QueueSnapshot(
+        running=(
+            under_way("one", bytes_written=100, seconds=2.0),
+            under_way("two", bytes_written=400, seconds=3.0),
+        ),
+        waiting=(),
+        finished=(),
+    )
+
+    assert snapshot.bytes_written == 500
+    assert snapshot.transfer_seconds == pytest.approx(5.0)
+
+
+def test_the_oldest_transfer_is_what_the_singular_still_means() -> None:
+    """For the parts of the interface that have not learned the plural yet."""
+    snapshot = QueueSnapshot(
+        running=(
+            under_way("one", bytes_written=1, seconds=1.0),
+            under_way("two", bytes_written=1, seconds=1.0),
+        ),
+        waiting=(),
+        finished=(),
+    )
+
+    assert snapshot.active is not None
+    assert snapshot.active.download_id == "one"
+    assert QueueSnapshot(running=(), waiting=(), finished=()).active is None
+
+
+def test_the_queue_reports_what_it_is_transferring(tmp_path: Path) -> None:
+    """Through `running`, which is the answer `active` is now derived from."""
+    provider = BlockingProvider()
+    with registry(tmp_path, provider) as runs:
+        assert runs.running() == ()
+        started = runs.submit(FILE_URL)
+        assert provider.transferring.wait(timeout=10)
+
+        assert [run.id for run in runs.running()] == [started.id]
+        assert runs.active() is started
+        assert runs.tally().running == 1
+
+        provider.release.set()
+        wait_for(started)
+
+    assert runs.running() == ()
 
 
 def test_an_empty_queue_says_it_has_nothing_to_do(tmp_path: Path) -> None:

@@ -1204,7 +1204,7 @@ def test_the_strip_wears_only_tones_the_stylesheet_knows() -> None:
 
 def make_queue_snapshot(**overrides: object) -> QueueSnapshot:
     """Return what a queue holds, with no queue behind it."""
-    values: dict[str, object] = {"active": None, "waiting": (), "finished": ()}
+    values: dict[str, object] = {"running": (), "waiting": (), "finished": ()}
     values.update(overrides)
     return QueueSnapshot(**values)  # type: ignore[arg-type]
 
@@ -1215,7 +1215,7 @@ def test_a_queue_with_nothing_left_to_do_is_not_watched() -> None:
 
 
 def test_a_running_transfer_is_what_the_page_listens_to() -> None:
-    follow = queue_follow(make_queue_snapshot(active=make_download_snapshot()))
+    follow = queue_follow(make_queue_snapshot(running=(make_download_snapshot(),)))
 
     assert follow["stream"] == "/downloads/d1/events"
     assert follow["swap"] == "/downloads?part=queue"
@@ -1231,7 +1231,7 @@ def test_the_moment_between_two_transfers_is_asked_about_rather_than_listened_to
     """
     follow = queue_follow(
         make_queue_snapshot(
-            active=make_download_snapshot(summary=make_summary()),
+            running=(make_download_snapshot(summary=make_summary()),),
             waiting=(make_download_snapshot(),),
         )
     )
