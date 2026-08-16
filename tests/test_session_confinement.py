@@ -25,7 +25,7 @@ DOMAIN = "musescore.com"
 SCORE_URL = "https://musescore.com/user/21965011/scores/4217351"
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src" / "maxicrawler"
 
-CARRYING_MODULES = {"web/cookies.py"}
+CARRYING_MODULES = {"web/cookies.py", "app/downloading.py"}
 """The only modules allowed to hold a :class:`CookieJar` type at all.
 
 Deliberately exact, and deliberately separate from the reveal check: a module
@@ -34,8 +34,10 @@ whole design depends on the session travelling from settings to transport
 without stopping anywhere that renders itself. Widening this set is the moment
 to ask where the new holder writes things down.
 
-Modules that legitimately pass a jar through — the provider wiring, the
-settings loader — are added here as they arrive, each with a reason.
+``app/downloading.py`` builds the jar from the configured path and turns it
+into a function from a URL to headers. That function is what the transport
+receives, which is why the list stops at two: neither the provider registry nor
+the MuseScore provider itself ever holds a session, so neither can leak one.
 """
 
 

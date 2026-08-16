@@ -181,6 +181,53 @@ class Settings:
     network is the private-network rule, which applies either way.
     """
 
+    musescore_cookies: str = ""
+    """Path to a file holding a MuseScore session, or empty for none.
+
+    **A path, never the session.** This field is round-tripped by
+    :meth:`to_toml`, so anything in it is copied into every backup of the
+    configuration; a filename is safe to copy and a set of cookies is not. The
+    file is read once, when the providers are built.
+
+    Empty is the ordinary state and means the MuseScore provider is built
+    without a transport: score pages still classify and still appear in a
+    report, and nothing can be fetched from them. That is a visible answer to
+    *"is this installation signed in?"* rather than a silent one.
+
+    What goes in the file is either a browser extension's ``cookies.txt`` or
+    the one ``Cookie:`` request header the browser's developer tools show —
+    :mod:`maxicrawler.web.cookies` tells the two apart by looking. MaxiCrawler
+    never obtains a session itself and never refreshes one.
+    """
+
+    musescore_user_agent: str = ""
+    """Which browser the MuseScore session claims to come from.
+
+    Empty means :attr:`user_agent`, which is the honest default and the one
+    that will be refused. A session cookie issued by a bot check is bound to
+    the browser that earned it as well as to the address it was earned from, so
+    a session exported from a browser and replayed under another name is a
+    session presented in circumstances that no longer match.
+
+    Setting this to the exact ``User-Agent`` of the browser the session came
+    from removes one of those mismatches. It does not remove the other: the
+    address is still this machine's, and if that machine is a server somewhere
+    else, no string fixes it. This is a way to stop failing for an avoidable
+    reason, not a way to pass a check.
+    """
+
+    musescore_formats: tuple[str, ...] = ("pdf", "mscz")
+    """Which renderings of a score are kept, in the order they are fetched.
+
+    A PDF to read from and an MSCZ to edit. MuseScore spends its daily
+    allowance per download rather than per score, so this is the setting that
+    decides whether a hundred pieces take a week or a month — every format
+    added is another day's budget spent on the same music.
+
+    A rendering a score does not offer is simply absent; asking for ``mp3`` on
+    a score without one is not an error.
+    """
+
     respect_robots: bool = True
     """Whether a crawl obeys the ``/robots.txt`` of the hosts it visits.
 
@@ -368,6 +415,15 @@ class Settings:
             ),
             crawl_below_seed=_bool_value(app_config, "crawl_below_seed", defaults.crawl_below_seed),
             direct_downloads=_bool_value(app_config, "direct_downloads", defaults.direct_downloads),
+            musescore_cookies=_string_value(
+                app_config, "musescore_cookies", defaults.musescore_cookies
+            ),
+            musescore_user_agent=_string_value(
+                app_config, "musescore_user_agent", defaults.musescore_user_agent
+            ),
+            musescore_formats=_string_list_value(
+                app_config, "musescore_formats", defaults.musescore_formats
+            ),
             respect_robots=_bool_value(app_config, "respect_robots", defaults.respect_robots),
             robots_user_agent=_string_value(
                 app_config, "robots_user_agent", defaults.robots_user_agent
@@ -414,6 +470,11 @@ class Settings:
             f"crawl_same_domain = {str(self.crawl_same_domain).lower()}\n"
             f"crawl_below_seed = {str(self.crawl_below_seed).lower()}\n"
             f"direct_downloads = {str(self.direct_downloads).lower()}\n"
+            # The path only. The session itself must never round-trip through a
+            # file that gets copied into every configuration backup.
+            f'musescore_cookies = "{self.musescore_cookies}"\n'
+            f'musescore_user_agent = "{self.musescore_user_agent}"\n'
+            f"musescore_formats = {_toml_array(self.musescore_formats)}\n"
             f"respect_robots = {str(self.respect_robots).lower()}\n"
             f'robots_user_agent = "{self.robots_user_agent}"\n'
             f"robots_timeout = {self.robots_timeout}\n"

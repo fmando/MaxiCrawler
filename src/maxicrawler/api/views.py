@@ -2222,6 +2222,35 @@ def settings_view(settings: Settings) -> tuple[dict[str, Any], ...]:
             ),
         },
         {
+            # Its own heading because a session is a different subject from a
+            # download policy: everything else here says what this program may
+            # do, and this says who it is doing it as.
+            "heading": "MuseScore",
+            "rows": (
+                _setting(
+                    "musescore_cookies",
+                    settings.musescore_cookies or "(none — score pages are read-only)",
+                    "Path to a session exported from your own browser. The "
+                    "path is shown; the session itself is never displayed, "
+                    "written back, or logged.",
+                ),
+                _setting(
+                    "musescore_user_agent",
+                    settings.musescore_user_agent or "(from user_agent)",
+                    "Which browser the session claims to come from. Matching "
+                    "the one it was exported from removes one avoidable "
+                    "mismatch; it does not make a bot check pass.",
+                ),
+                _setting(
+                    "musescore_formats",
+                    ", ".join(settings.musescore_formats),
+                    "Which renderings of a score are kept. The host spends "
+                    "its daily allowance per download, so each one added is "
+                    "another day's budget spent on the same music.",
+                ),
+            ),
+        },
+        {
             "heading": "Network",
             "rows": (
                 _setting("network_timeout", f"{settings.network_timeout:g} s", ""),

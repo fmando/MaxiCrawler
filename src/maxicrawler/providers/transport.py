@@ -13,7 +13,7 @@ to move content.
 """
 
 import json
-from collections.abc import Generator, Mapping
+from collections.abc import Callable, Generator, Mapping
 from contextlib import closing
 from dataclasses import dataclass
 from email.message import EmailMessage
@@ -323,6 +323,29 @@ class UrllibStreamTransport:
                 yield chunk
 
 
+HeaderSource = Callable[[str], Mapping[str, str]]
+"""Answers which extra headers one URL should carry.
+
+A function of the URL rather than a fixed mapping, and that is the whole point:
+a header that authorises a request to one host must not be sent to another, and
+the only moment that can be decided is when the address is known. A transport
+built with one of these asks it again for **every redirect hop**, so a hop off
+the host takes the credential with it — which is what urllib does by default,
+and the reason this seam is a function.
+
+The transport learns nothing from it beyond header names and values. What makes
+a header worth confining, and where the value came from, stays above.
+"""
+
+
+def merged_headers(base: Mapping[str, str], extra: HeaderSource | None, url: str) -> dict[str, str]:
+    """Return *base* with whatever *extra* wants on a request to *url*."""
+    headers = dict(base)
+    if extra is not None:
+        headers.update(extra(url))
+    return headers
+
+
 class GuardedRedirectHandler(HTTPRedirectHandler):
     """Follows redirects, but only so far, only to HTTP(S), and only outward.
 
@@ -340,10 +363,17 @@ class GuardedRedirectHandler(HTTPRedirectHandler):
     One handler serves one request, so nothing here needs locking.
     """
 
-    def __init__(self, *, rule: PrivateNetworkRule, max_redirects: int) -> None:
+    def __init__(
+        self,
+        *,
+        rule: PrivateNetworkRule,
+        max_redirects: int,
+        extra_headers: HeaderSource | None = None,
+    ) -> None:
         super().__init__()
         self._rule = rule
         self._max_redirects = max_redirects
+        self._extra_headers = extra_headers
         self._hops = 0
 
     def redirect_request(
@@ -366,7 +396,28 @@ class GuardedRedirectHandler(HTTPRedirectHandler):
         if self._hops > self._max_redirects:
             message = f"more than {self._max_redirects} redirects from {safe_target(req.full_url)}"
             raise ProviderTransportError(message)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        following = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if following is None:
+            return None
+        return self._rehead(following, previous=req.full_url, target=newurl)
+
+    def _rehead(self, request: Request, *, previous: str, target: str) -> Request:
+        """Re-decide the extra headers for a hop the base class just built.
+
+        The base class copies the original request's headers onto the new one,
+        stripping only the content headers. For a header that authorises the
+        request that is exactly wrong: a redirect to another host would carry
+        the credential to it. So whatever was added for *previous* comes off,
+        and whatever belongs to *target* goes on — which for a hop off the host
+        is nothing at all.
+        """
+        if self._extra_headers is None:
+            return request
+        for name in self._extra_headers(previous):
+            request.remove_header(name)
+        for name, value in self._extra_headers(target).items():
+            request.add_header(name, value)
+        return request
 
 
 def refuse(rule: PrivateNetworkRule, url: str, *, what: str = "the address") -> None:
@@ -465,6 +516,7 @@ class UrllibFileTransport:
         timeout: float = DEFAULT_TIMEOUT,
         max_redirects: int = DEFAULT_MAX_REDIRECTS,
         rule: PrivateNetworkRule | None = None,
+        extra_headers: HeaderSource | None = None,
     ) -> None:
         if timeout <= 0:
             msg = "timeout must be positive"
@@ -476,6 +528,7 @@ class UrllibFileTransport:
         self._timeout = timeout
         self._max_redirects = max_redirects
         self._rule = rule if rule is not None else PrivateNetworkRule()
+        self._extra_headers = extra_headers
 
     @property
     def rule(self) -> PrivateNetworkRule:
@@ -545,11 +598,17 @@ class UrllibFileTransport:
         refuse(self._rule, url)
         request = Request(  # noqa: S310 - the scheme is checked above
             url,
-            headers={"User-Agent": self._user_agent, "Accept": "*/*"},
+            headers=merged_headers(
+                {"User-Agent": self._user_agent, "Accept": "*/*"}, self._extra_headers, url
+            ),
             method=method,
         )
         opener = build_opener(
-            GuardedRedirectHandler(rule=self._rule, max_redirects=self._max_redirects)
+            GuardedRedirectHandler(
+                rule=self._rule,
+                max_redirects=self._max_redirects,
+                extra_headers=self._extra_headers,
+            )
         )
         try:
             return opener.open(request, timeout=self._timeout)  # type: ignore[no-any-return]
