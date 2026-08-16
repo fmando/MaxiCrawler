@@ -1417,6 +1417,18 @@ def test_a_batch_that_went_through_partly_names_the_remainder() -> None:
     )
 
 
+def test_a_batch_says_what_the_queue_was_already_holding() -> None:
+    """Pressing this twice on a half-drained filter is ordinary, not a mistake.
+
+    First of the notes because it is the only one that is not a problem: what
+    was already there is still coming.
+    """
+    view = link_view(make_link_page(), base=BASE, queued=QueuedBatch(queued=40, held=12))
+
+    assert view["queued"]["sentence"] == "40 links queued."
+    assert view["queued"]["notes"] == ("12 were already in the queue.",)
+
+
 def test_a_batch_that_queued_nothing_at_all_says_so() -> None:
     view = link_view(make_link_page(), base=BASE, queued=QueuedBatch(queued=0))
 

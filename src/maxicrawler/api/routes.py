@@ -475,6 +475,7 @@ def _with_outcome(url: str, accepted: Accepted, *, no_room: int = 0) -> str:
         "queued": accepted.queued,
         "bad": accepted.rejected,
         "full": no_room + accepted.no_room,
+        "held": accepted.held,
     }
     path, _, fragment = url.partition("#")
     written = urlencode(
@@ -1324,6 +1325,7 @@ def _queued_outcome(request: Request) -> views.QueuedBatch | None:
         queued=_count(values.get("queued")),
         rejected=_count(values.get("bad")),
         no_room=_count(values.get("full")),
+        held=_count(values.get("held")),
     )
 
 

@@ -945,19 +945,20 @@ def test_a_busy_host_does_not_hold_up_a_free_one(tmp_path: Path) -> None:
 def test_the_same_url_is_never_fetched_twice_at_once(tmp_path: Path) -> None:
     """Two transfers of one resource would write into one staging directory.
 
-    A queue that accepts the same URL twice is a separate question; this holds
-    whatever the answer to that turns out to be.
+    The queue declines a duplicate before a worker ever sees one, so this is
+    watching the two rules agree: three submissions of one URL are one request
+    and one transfer.
     """
     provider = ManyHosts()
     with registry(tmp_path, provider, workers=4, per_host=4) as runs:
-        for _ in range(3):
-            runs.submit(elsewhere("one.test", "same"))
+        submitted = [runs.submit(elsewhere("one.test", "same")) for _ in range(3)]
 
         assert until(lambda: len(runs.running()) == 1)
         sleep(0.1)
 
+        assert len({run.id for run in submitted}) == 1
         assert len(runs.running()) == 1
-        assert runs.tally().waiting == 2
+        assert runs.tally().waiting == 0
         provider.release.set()
 
 
@@ -995,6 +996,87 @@ def test_a_host_is_one_host_however_it_is_spelled() -> None:
     assert _host_of("https://Example.TEST/file/a") == "example.test"
     assert _host_of("https://example.test:8443/file/a") == "example.test"
     assert _host_of("not a url") == ""
+
+
+# --- a queue holds a URL once ---------------------------------------------------
+
+
+def test_queueing_the_same_link_twice_returns_the_request_already_there(
+    tmp_path: Path,
+) -> None:
+    """A second click lands on the transfer being asked about, not beside it."""
+    with paused(tmp_path) as runs:
+        first = runs.submit(FILE_URL)
+        again = runs.submit(FILE_URL)
+
+        assert again is first
+        assert runs.tally().waiting == 1
+
+
+def test_the_key_in_a_link_does_not_make_it_a_different_link(tmp_path: Path) -> None:
+    """The queue holds URLs without their fragment, and compares them that way."""
+    with paused(tmp_path) as runs:
+        first = runs.submit(FILE_URL)
+
+        again = runs.submit(f"{bare(FILE_URL)}#a-different-key")
+
+        assert again is first
+        assert runs.tally().waiting == 1
+
+
+def test_a_batch_says_how_many_it_was_already_holding(tmp_path: Path) -> None:
+    """What "queue every match" pressed twice on a half-drained filter does."""
+    with paused(tmp_path) as runs:
+        runs.submit_all([FILE_URL, OTHER_URL])
+
+        accepted = runs.submit_all([FILE_URL, OTHER_URL, THIRD_URL])
+
+        assert accepted.queued == 1
+        assert accepted.held == 2
+        assert accepted.rejected == 0
+        assert runs.tally().waiting == 3
+
+
+def test_one_batch_holding_the_same_link_twice_queues_it_once(tmp_path: Path) -> None:
+    """A selection can name a URL twice; a queue still holds it once."""
+    with paused(tmp_path) as runs:
+        accepted = runs.submit_all([FILE_URL, FILE_URL, OTHER_URL])
+
+        assert accepted.queued == 2
+        assert accepted.held == 1
+
+
+def test_a_link_removed_from_the_queue_may_be_queued_again(tmp_path: Path) -> None:
+    """Declining a duplicate must not turn into declining it forever."""
+    with paused(tmp_path) as runs:
+        first = runs.submit(FILE_URL)
+        runs.cancel(first.id)
+
+        again = runs.submit(FILE_URL)
+
+        assert again is not first
+        assert runs.tally().waiting == 1
+
+
+def test_a_finished_download_may_be_queued_again(tmp_path: Path) -> None:
+    """Which is what "Try again" is, and what a re-download of a discard needs."""
+    with registry(tmp_path) as runs:
+        first = runs.submit(FILE_URL)
+        wait_for(first)
+
+        again = runs.submit(FILE_URL)
+
+        assert again is not first
+        wait_for(again)
+
+
+def test_what_the_queue_holds_is_what_a_report_is_told(tmp_path: Path) -> None:
+    """`pending` and the duplicate rule answer from one set, so they agree."""
+    with paused(tmp_path) as runs:
+        runs.submit(FILE_URL)
+
+        assert runs.pending([FILE_URL, OTHER_URL]) == frozenset({FILE_URL})
+        assert runs.pending([bare(FILE_URL)]) == frozenset({bare(FILE_URL)})
 
 
 # --- more than one transfer at a time ------------------------------------------

@@ -378,9 +378,22 @@ class Accepted:
     no_room: int = 0
     """How many were left unqueued because the queue filled up."""
 
+    held: int = 0
+    """How many were already in the queue, waiting or being fetched.
+
+    Counted rather than passed over in silence. Pressing *"queue every match"*
+    twice on a filter that has half drained is an ordinary thing to do, and a
+    page that answered "forty links queued" to a hundred and twenty would leave
+    somebody counting to find out what happened to the rest.
+    """
+
     @property
     def queued(self) -> int:
-        """Return how many are now in the queue."""
+        """Return how many are now in the queue.
+
+        The runs this batch added, so a request that was already held is not
+        counted twice — it is reported under :attr:`held` instead.
+        """
         return len(self.runs)
 
     @property
@@ -611,6 +624,12 @@ class TransferQueue:
         self._runs: OrderedDict[str, DownloadRun] = OrderedDict()
         self._waiting: list[str] = []
         self._targets: dict[str, str] = {}
+        # What this queue is holding, by fragment-free URL. Kept rather than
+        # searched for: "queue every match" asks about a thousand links at once,
+        # and rebuilding the set per link would be a thousand passes over a
+        # thousand requests. Entries live from being queued until the transfer
+        # ends or is called off -- which is exactly "waiting or running".
+        self._held: dict[str, str] = {}
         # Keyed by run id and ordered by when each transfer started, which is
         # the order a page lists them in.
         self._running: dict[str, DownloadRun] = {}
@@ -637,29 +656,43 @@ class TransferQueue:
     def submit(self, url: str) -> DownloadRun:
         """Put *url* at the end of the queue and return its run.
 
+        A URL this queue is already holding — waiting or being fetched — is not
+        queued twice. The run that is already there comes back instead, so a
+        second click lands on the transfer somebody is asking about rather than
+        adding a duplicate of it.
+
         Raises:
             ValueError: *url* is not an absolute HTTP(S) URL. Checked before
                 anything is queued, so a bad link is a message beside the button
                 rather than an entry that exists only to have failed.
             QueueFullError: the queue already holds :attr:`limit` requests.
         """
+        return self._submit(url)[0]
+
+    def _submit(self, url: str) -> tuple[DownloadRun, bool]:
+        """Return the run for *url* and whether this call is what queued it."""
         target = self._service.require_url(url)
-        run = DownloadRun(uuid4().hex, strip_fragment(target))
+        plain = strip_fragment(target)
+        run = DownloadRun(uuid4().hex, plain)
         with self._condition:
             if self._closed:
                 msg = "this queue is shutting down"
                 raise QueueFullError(msg)
+            held = self._held.get(plain)
+            if held is not None:
+                return self._runs[held], False
             if len(self._waiting) >= self._limit:
                 raise QueueFullError(queue_full(len(self._waiting), self._limit))
             self._runs[run.id] = run
             self._waiting.append(run.id)
+            self._held[plain] = run.id
             # The URL with its fragment is held here and nowhere else. The run
             # itself never learns the key; see the module docstring.
             self._targets[run.id] = target
             self._evict()
             self._condition.notify_all()
         self._ensure_workers()
-        return run
+        return run, True
 
     def room(self) -> int:
         """Return how many more requests would fit right now.
@@ -686,16 +719,27 @@ class TransferQueue:
         asked = tuple(urls)
         queued: list[DownloadRun] = []
         rejected = 0
+        held = 0
         for index, url in enumerate(asked):
             try:
-                queued.append(self.submit(url))
+                run, is_new = self._submit(url)
             except ValueError:
                 rejected += 1
             except QueueFullError:
                 # Full is not "this URL was bad": everything after it would fail
                 # the same way, so stop rather than count them all as refusals.
-                return Accepted(runs=tuple(queued), rejected=rejected, no_room=len(asked) - index)
-        return Accepted(runs=tuple(queued), rejected=rejected)
+                return Accepted(
+                    runs=tuple(queued),
+                    rejected=rejected,
+                    no_room=len(asked) - index,
+                    held=held,
+                )
+            else:
+                if is_new:
+                    queued.append(run)
+                else:
+                    held += 1
+        return Accepted(runs=tuple(queued), rejected=rejected, held=held)
 
     def get(self, download_id: str) -> DownloadRun | None:
         """Return the run called *download_id*, if this process still holds it."""
@@ -737,8 +781,7 @@ class TransferQueue:
         if not asked:
             return frozenset()
         with self._condition:
-            queued = {self._runs[run_id].url for run_id in self._waiting}
-            queued.update(run.url for run in self._running.values())
+            queued = set(self._held)
         return frozenset(url for url in asked if strip_fragment(url) in queued)
 
     def position_of(self, download_id: str) -> int | None:
@@ -849,6 +892,7 @@ class TransferQueue:
                 return False
             if download_id in self._waiting:
                 self._waiting.remove(download_id)
+                self._release(run.url)
                 # The target stays. It is what a retry needs, and dropping it
                 # here would make "remove, then think better of it" the one
                 # thing this queue cannot undo. It goes when the run does.
@@ -979,6 +1023,7 @@ class TransferQueue:
             self._closed = True
             self._waiting.clear()
             self._targets.clear()
+            self._held.clear()
             under_way = tuple(self._running.values())
             workers = tuple(self._workers)
             self._condition.notify_all()
@@ -1034,6 +1079,7 @@ class TransferQueue:
             finally:
                 with self._condition:
                     self._running.pop(run_id, None)
+                    self._release(run.url)
                     self._hosts[host] -= 1
                     if self._hosts[host] <= 0:
                         del self._hosts[host]
@@ -1057,6 +1103,16 @@ class TransferQueue:
             self._condition.wait()
         return None
 
+    def _release(self, url: str) -> None:
+        """Stop holding *url*, so it may be queued again.
+
+        Callers hold the condition. Removing by URL is removing this run's own
+        claim and nobody else's: while the claim stands every submit of that URL
+        comes back with this run rather than making a second one, so there is no
+        newer claim here to drop by accident.
+        """
+        self._held.pop(url, None)
+
     def _take(self) -> str | None:
         """Remove and return the first waiting request that may start now.
 
@@ -1072,8 +1128,10 @@ class TransferQueue:
         And a URL another worker is already fetching is passed over whatever
         the counts say. Two transfers of one resource would write into one
         entry's staging directory, which is a corrupted download rather than an
-        impolite one — a queue that holds the same URL twice is a separate
-        question, and this holds either way.
+        impolite one. :meth:`submit` declines a duplicate before it ever reaches
+        the waiting list, so this is the second of two answers to one question —
+        kept because the cost is one comparison and the failure it prevents is
+        not one anybody would recognise from its symptoms.
         """
         busy = {run.url for run in self._running.values()}
         for index, run_id in enumerate(self._waiting):

@@ -1469,7 +1469,7 @@ def _panel_url(base: str, carry: Mapping[str, str], closed: Container[str], *, a
     return f"{base}?{urlencode(written)}#{at}" if written else f"{base}#{at}"
 
 
-TRANSIENT_PARAMS = frozenset({"queued", "bad", "full"})
+TRANSIENT_PARAMS = frozenset({"queued", "bad", "full", "held"})
 """What a report says once and then stops saying.
 
 The outcome of the batch that sent you back here. Neither table owns these and
@@ -1675,6 +1675,9 @@ class QueuedBatch:
     no_room: int = 0
     """How many matched or were selected and did not fit."""
 
+    held: int = 0
+    """How many were already in the queue and were not queued a second time."""
+
 
 def _queued_notice(batch: QueuedBatch) -> dict[str, Any]:
     """Return the strip a report shows about the batch that just left it.
@@ -1690,6 +1693,11 @@ def _queued_notice(batch: QueuedBatch) -> dict[str, Any]:
     maintain the same sentence.
     """
     notes = []
+    if batch.held:
+        # First of the three, because it is the one that is not a problem:
+        # pressing this twice on a filter that has half drained is ordinary,
+        # and the answer is that nothing was lost.
+        notes.append(f"{format_number(batch.held)} were already in the queue.")
     if batch.no_room:
         notes.append(f"{format_number(batch.no_room)} did not fit — the queue is full.")
     if batch.rejected:
