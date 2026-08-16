@@ -1,8 +1,10 @@
 """Tests for the on-disk library layout."""
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 from doubles import make_ref
@@ -149,6 +151,62 @@ def test_writing_a_record_replaces_it_without_leaving_a_temporary(tmp_path: Path
     assert record is not None
     assert record.status is DownloadStatus.COMPLETED
     assert list(entry.path.glob("*.tmp")) == []
+
+
+def test_several_downloads_may_open_one_library_at_once(tmp_path: Path) -> None:
+    """Found by running transfers side by side, and it failed four times in five.
+
+    Every download initializes the library, so every parallel download raced to
+    write one descriptor. Two writers sharing one `.tmp` name is the fault:
+    Windows refuses the second replace outright, and Linux lets the two
+    interleave into one file quietly, which is the worse of the two.
+
+    Writing it twice is not an error. Whichever lands is a whole descriptor, and
+    the loser finding the file already there is the same outcome by another
+    route.
+    """
+    root = tmp_path / "library"
+    barrier = Barrier(8)
+
+    def open_it() -> None:
+        library = Library(root)
+        barrier.wait(timeout=10)
+        library.initialize()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for outcome in [pool.submit(open_it) for _ in range(8)]:
+            outcome.result()
+
+    descriptor = json.loads((root / DESCRIPTOR_FILENAME).read_text(encoding="utf-8"))
+    assert descriptor["schema"] == LIBRARY_SCHEMA
+    assert list(root.glob("*.tmp")) == []
+
+
+def test_two_entries_are_written_at_once_without_treading_on_each_other(
+    tmp_path: Path,
+) -> None:
+    """The pool never fetches one resource twice at a time; it does fetch two."""
+    library = make_library(tmp_path)
+    barrier = Barrier(6)
+
+    def write(handle: str) -> str:
+        ref = make_ref(resource_id=handle)
+        entry = library.entry(ref)
+        barrier.wait(timeout=10)
+        entry.write(new_record(ref, entry.key, status=DownloadStatus.COMPLETED))
+        return entry.key
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        keys = [
+            outcome.result()
+            for outcome in [pool.submit(write, f"handle{index}") for index in range(6)]
+        ]
+
+    assert len(set(keys)) == 6
+    for key in keys:
+        entry = library.entry_at("mega", key)
+        assert entry is not None
+        assert entry.read() is not None
 
 
 def test_a_payload_is_staged_before_it_is_committed(tmp_path: Path) -> None:

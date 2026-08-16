@@ -2200,6 +2200,17 @@ def settings_view(settings: Settings) -> tuple[dict[str, Any], ...]:
                     "How many requests may wait at once. Asking for more "
                     "queues what fits and says how many were left over.",
                 ),
+                _setting(
+                    "download_workers",
+                    str(settings.download_workers),
+                    "How many transfers may be under way at once.",
+                ),
+                _setting(
+                    "downloads_per_host",
+                    str(settings.downloads_per_host),
+                    "How many of those may be fetching from one host. What "
+                    "keeps a pool polite when a crawl's take is all one site.",
+                ),
             ),
         },
         {

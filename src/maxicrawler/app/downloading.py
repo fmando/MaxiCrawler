@@ -42,6 +42,7 @@ server read its own disk on somebody else's click.
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 
 from maxicrawler.config import Settings
 from maxicrawler.domain import DownloadStatus, ProviderCapability, UrlRecord
@@ -186,6 +187,7 @@ class DownloadService:
         self._injected_providers = providers
         self._injected_library = library
         self._cached_providers: ProviderRegistry | None = None
+        self._building = Lock()
         self._resolver = PluginResolver(create_default_registry())
 
     @property
@@ -358,6 +360,17 @@ class DownloadService:
             return self._injected_providers
         if max_entries is None and self._cached_providers is not None:
             return self._cached_providers
+        # Under a lock since transfers began running side by side: two threads
+        # arriving here together would otherwise each build a registry, one of
+        # which is thrown away after paying for itself. Harmless and wasteful,
+        # which is exactly the kind of thing that is never noticed.
+        with self._building:
+            if max_entries is None and self._cached_providers is not None:
+                return self._cached_providers
+            return self._build_providers(max_entries)
+
+    def _build_providers(self, max_entries: int | None) -> ProviderRegistry:
+        """Return a registry built from the settings, caching the default one."""
         settings = self._settings
         registry = create_default_provider_registry(
             transport=UrllibTransport(

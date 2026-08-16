@@ -12,6 +12,7 @@ request. That confinement is what makes a Mega link safe to hand to a server.
 """
 
 from collections.abc import Mapping
+from threading import Lock
 from typing import Any, NoReturn
 
 from maxicrawler.providers.errors import (
@@ -56,6 +57,12 @@ class MegaApiClient:
         self._base_url = base_url
         self._retrier = retrier if retrier is not None else Retrier()
         self._sequence = 0
+        # One client now serves transfers running side by side, and `+= 1` is
+        # three bytecodes rather than one. Two requests carrying the same id
+        # would not corrupt anything here -- there is no session to confuse --
+        # but "monotonic" is what the docstring above promises, and a promise
+        # kept by luck is worth the four characters it costs to keep properly.
+        self._numbering = Lock()
 
     def file_metadata(self, handle: str) -> Mapping[str, Any]:
         """Return size and encrypted attributes of the public file *handle*.
@@ -113,8 +120,10 @@ class MegaApiClient:
 
     def _send(self, command: Mapping[str, Any], folder: str | None) -> Mapping[str, Any]:
         """Send one request and unwrap the single result it answers with."""
-        self._sequence += 1
-        params = {"id": str(self._sequence)}
+        with self._numbering:
+            self._sequence += 1
+            sequence = self._sequence
+        params = {"id": str(sequence)}
         if folder is not None:
             params["n"] = folder
         answer = self._transport.post_json(self._base_url, [command], params=params)
