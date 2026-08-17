@@ -28,6 +28,7 @@ from maxicrawler.app import (
     DownloadService,
     LibraryService,
     LinkState,
+    WorklistService,
 )
 from maxicrawler.config import DEFAULT_CONFIG_PATH, Settings
 
@@ -55,6 +56,7 @@ def create_app(
     downloads: TransferQueue | None = None,
     library: LibraryService | None = None,
     discovery: DiscoveryService | None = None,
+    worklist: WorklistService | None = None,
     config_path: Path | None = None,
 ) -> Starlette:
     """Return the MaxiCrawler web application.
@@ -120,6 +122,12 @@ def create_app(
             },
         )
     )
+
+    # Built by the service from the settings, not here. This module may not
+    # name a database adapter at all (tests/test_api_boundaries.py), which is
+    # the same rule that keeps every other store out of this file.
+    scores = worklist if worklist is not None else WorklistService(crawl_service.settings)
+    scores.initialize()
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
@@ -280,6 +288,20 @@ def create_app(
             # GET and nothing else, deliberately. See `routes.maintenance`: the
             # page prints the command and never runs it, and the absence of a
             # POST route here is where that promise is kept.
+            Route("/musescore", routes.musescore, methods=["GET"], name="musescore"),
+            Route("/musescore", routes.queue_scores, methods=["POST"], name="queue_scores"),
+            Route(
+                "/musescore/{request_id}/store",
+                routes.store_arrival,
+                methods=["POST"],
+                name="store_arrival",
+            ),
+            Route(
+                "/musescore/{request_id}/drop",
+                routes.drop_request,
+                methods=["POST"],
+                name="drop_request",
+            ),
             Route("/maintenance", routes.maintenance, methods=["GET"], name="maintenance"),
             Route("/settings", routes.settings, methods=["GET"], name="settings"),
             Route("/health", health, methods=["GET"], name="health"),
@@ -295,6 +317,7 @@ def create_app(
     application.state.downloads = transfers
     application.state.library = shelf
     application.state.discovery = findings
+    application.state.worklist = scores
     application.state.config_path = source
     return application
 

@@ -51,11 +51,13 @@ from maxicrawler.app import (
     TargetKind,
 )
 from maxicrawler.app.maintenance import MaintenanceRun, Toolbox
+from maxicrawler.app.musescore import Match, Today
 from maxicrawler.app.thumbnails import CacheUsage
 from maxicrawler.app.viewing import MediaKind
 from maxicrawler.config import Settings
 from maxicrawler.crawler import PluginUsage
 from maxicrawler.database import StoredCrawl
+from maxicrawler.database.musescore import StoredRequest
 from maxicrawler.domain import DownloadStatus, ReviewVerdict
 from maxicrawler.plugins.generic import GENERIC_PLUGIN_NAME
 from maxicrawler.utils import elide_middle, format_size, strip_fragment
@@ -2546,4 +2548,53 @@ def cache_view(usage: CacheUsage, *, available: bool) -> dict[str, Any]:
         "size": format_size(usage.total_bytes),
         "empty": usage.count == 0,
         "available": available,
+    }
+
+
+def worklist_view(today: Today, matches: Iterable[Match], *, folder: str) -> dict[str, Any]:
+    """Return the MuseScore worklist as a page can render it.
+
+    Two lists side by side, and the page is the join between them: what is
+    owed today, and what has appeared in the download folder. A match is a
+    suggestion the page offers with a button; an unmatched arrival keeps the
+    reason it could not be placed, because "MaxiCrawler ignored my file" is a
+    worse page than "two lines could be this PDF".
+    """
+    return {
+        "budget": {
+            "day": today.budget.day,
+            "limit": format_number(today.budget.limit),
+            "spent": format_number(today.budget.spent),
+            "remaining": format_number(today.budget.remaining),
+            "exhausted": today.budget.exhausted,
+        },
+        "offered": tuple(_worklist_row(request) for request in today.offered),
+        "waiting": format_number(today.waiting),
+        "returned": format_number(today.returned),
+        "arrivals": tuple(_arrival_row(match) for match in matches),
+        "folder": folder,
+    }
+
+
+def _worklist_row(request: StoredRequest) -> dict[str, Any]:
+    """Return one line of today's list, ready to be clicked."""
+    return {
+        "id": request.request_id,
+        "label": request.label,
+        "format": request.format,
+        "score_id": request.score_id,
+        "url": request.score_url,
+    }
+
+
+def _arrival_row(match: Match) -> dict[str, Any]:
+    """Return one file found in the download folder, with what it might settle."""
+    return {
+        "name": match.arrival.path.name,
+        "path": match.arrival.path.as_posix(),
+        "size": format_size(match.arrival.size),
+        "format": match.arrival.format,
+        "request_id": None if match.request is None else match.request.request_id,
+        "suggests": None if match.request is None else match.request.label,
+        "reason": match.reason,
     }

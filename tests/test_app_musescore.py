@@ -14,7 +14,13 @@ from pathlib import Path
 
 import pytest
 
-from maxicrawler.app.musescore import Arrival, WorklistService, day_of
+from maxicrawler.app.musescore import (
+    Arrival,
+    ArrivalRefusedError,
+    OutsideDownloadsError,
+    WorklistService,
+    day_of,
+)
 from maxicrawler.config import Settings
 from maxicrawler.database import SQLiteDatabase, SQLiteRequestQueue
 from maxicrawler.database.musescore import RequestState, StoredRequest
@@ -383,7 +389,12 @@ def test_the_stored_entry_is_indistinguishable_from_a_fetched_one(
 
 
 def test_a_file_under_the_floor_is_not_stored(tmp_path: Path) -> None:
-    """The same refusal a transfer gets, for the same reason."""
+    """The same refusal a transfer gets, in this service's own words.
+
+    The downloader's exception does not travel: a client of this service must
+    not have to name one to handle one, and the web interface is forbidden
+    from importing that package at all.
+    """
     downloads = tmp_path / "Downloads"
     downloads.mkdir()
     settings = Settings(
@@ -401,10 +412,49 @@ def test_a_file_under_the_floor_is_not_stored(tmp_path: Path) -> None:
     today = worklist.today(now=MONDAY)
     path = drop_file(downloads, "tiny.pdf", b"nope")
 
-    from maxicrawler.downloader.errors import DownloadRefusedError
-
-    with pytest.raises(DownloadRefusedError):
+    with pytest.raises(ArrivalRefusedError, match="minimum download size"):
         worklist.store(today.offered[0].request_id, path, now=MONDAY)
+
+
+def test_a_file_outside_the_download_folder_is_refused(
+    workspace: tuple[WorklistService, SQLiteRequestQueue, Path], tmp_path: Path
+) -> None:
+    """The page that settles a line names a file, and the page has no sign-in.
+
+    Without this, anybody who can reach the port could copy any readable file
+    on the machine into the library. The download folder is the whole of what
+    this feature needs to read, so it is the whole of what it may read.
+    """
+    worklist = service(workspace)
+    worklist.add([SCORE], now=MONDAY)
+    today = worklist.today(now=MONDAY)
+    elsewhere = tmp_path / "private.pdf"
+    elsewhere.write_bytes(PDF)
+
+    with pytest.raises(OutsideDownloadsError):
+        worklist.store(today.offered[0].request_id, elsewhere, now=MONDAY)
+
+
+def test_a_path_walking_out_of_the_folder_is_refused(
+    workspace: tuple[WorklistService, SQLiteRequestQueue, Path], tmp_path: Path
+) -> None:
+    """Judged by where it lands, not by how it was spelled."""
+    worklist, _, downloads = workspace
+    elsewhere = tmp_path / "private.pdf"
+    elsewhere.write_bytes(PDF)
+
+    with pytest.raises(OutsideDownloadsError):
+        worklist.require_arrival(downloads / ".." / "private.pdf")
+
+
+def test_a_folder_is_not_a_file(
+    workspace: tuple[WorklistService, SQLiteRequestQueue, Path],
+) -> None:
+    worklist, _, downloads = workspace
+    (downloads / "a-folder.pdf").mkdir()
+
+    with pytest.raises(OutsideDownloadsError):
+        worklist.require_arrival(downloads / "a-folder.pdf")
 
 
 def test_an_unknown_line_cannot_be_stored(

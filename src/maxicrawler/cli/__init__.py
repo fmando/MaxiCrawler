@@ -10,7 +10,8 @@ import typer
 
 from maxicrawler import __version__
 from maxicrawler.api.errors import MISSING_EXTRA, WebDependencyError
-from maxicrawler.app import CrawlService, DownloadService
+from maxicrawler.app import CrawlService, DownloadService, WorklistService
+from maxicrawler.app.musescore import WorklistError
 from maxicrawler.cli.crawling import (
     EXIT_FETCH_FAILED,
     EXIT_NOT_A_PAGE,
@@ -33,6 +34,7 @@ from maxicrawler.cli.inspection import (
     render_inspection,
     render_json,
 )
+from maxicrawler.cli.musescore import render_added, render_today
 from maxicrawler.cli.serving import (
     EXIT_WEB_UNAVAILABLE,
     banner,
@@ -510,3 +512,89 @@ def main() -> None:
     """Run the command-line interface."""
     configure_logging()
     app()
+
+
+@app.command()
+def musescore(
+    add: Annotated[
+        list[str] | None,
+        typer.Option("--add", help="Score address to put on the backlog. May be repeated."),
+    ] = None,
+    from_file: Annotated[
+        Path | None,
+        typer.Option("--from", help="File to read score addresses out of, one per line."),
+    ] = None,
+    keep: Annotated[
+        str | None,
+        typer.Option("--keep", help="Request id whose arrived file should go into the library."),
+    ] = None,
+    path: Annotated[
+        Path | None,
+        typer.Option("--path", help="Which arrived file to keep. Guessed when unambiguous."),
+    ] = None,
+    config_path: Annotated[
+        Path, typer.Option("--config", help="TOML configuration file to use.")
+    ] = DEFAULT_CONFIG_PATH,
+) -> None:
+    """Show today's MuseScore worklist, add to it, or keep what arrived.
+
+    MaxiCrawler cannot fetch from this host: a bot check answers a score page
+    rather than the page, and answering one is not something it does. What it
+    does is keep the list — which ones today, what came back, what is still
+    owed — while the downloading happens in a browser.
+
+    With no options this prints the list and stops, which is the thing to run
+    in the morning.
+    """
+    settings = Settings.from_toml(config_path)
+    service = WorklistService(settings)
+    service.initialize()
+    now = datetime.now(UTC)
+    addresses = list(add or [])
+    if from_file is not None:
+        if not from_file.exists():
+            raise typer.BadParameter(f"path does not exist: {from_file}")
+        addresses.extend(from_file.read_text(encoding="utf-8").split())
+    if addresses:
+        queued = service.add(addresses, now=now)
+        typer.echo(render_added(len(queued), formats=settings.musescore_formats))
+    if keep is not None:
+        _keep_arrival(service, keep, path, now=now)
+        return
+    today = service.today(now=now)
+    since = min((offer.offered_at for offer in today.offered if offer.offered_at), default=None)
+    matches = service.match(service.arrivals(since=since), today.offered)
+    typer.echo(render_today(today, matches, folder=service.downloads.as_posix()))
+
+
+def _keep_arrival(
+    service: WorklistService, request_id: str, path: Path | None, *, now: datetime
+) -> None:
+    """Put one arrived file into the library, working out which when it can.
+
+    A named path is taken as given. Without one, the folder is matched against
+    what is owed and the file is kept only when exactly one candidate answers —
+    guessing here would file music under the wrong name in a library meant to
+    be kept.
+    """
+    chosen = path
+    if chosen is None:
+        today = service.today(now=now)
+        candidates = [
+            match
+            for match in service.match(service.arrivals(), today.offered)
+            if match.request is not None and match.request.request_id == request_id
+        ]
+        if len(candidates) != 1:
+            raise typer.BadParameter(
+                "no single arrived file matches that request; name one with --path"
+            )
+        chosen = candidates[0].arrival.path
+    try:
+        stored = service.store(request_id, chosen, now=now)
+    except WorklistError as error:
+        raise typer.BadParameter(str(error)) from error
+    if stored is None:
+        typer.echo("Nothing to do — that line is unknown or already settled.")
+        return
+    typer.echo(f"Kept {stored.label}.")
