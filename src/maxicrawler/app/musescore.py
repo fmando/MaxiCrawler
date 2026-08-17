@@ -59,6 +59,24 @@ from maxicrawler.providers.musescore import MUSESCORE_PROVIDER_NAME
 READ_CHUNK = 1024 * 1024
 """How much of an arrived file is held at once while it is copied in."""
 
+MINIMUM_ARRIVAL = 1024
+"""Smallest arrived file worth keeping, in bytes.
+
+**Deliberately not** ``min_download_size``, and the reason is that the two
+answer different questions. That setting exists against bulk junk nobody chose
+— "a crawl of an image directory returns a thumbnail, a sprite and an icon for
+every picture worth having" — and its docstring argues for one rule on the
+grounds that the sink cannot know who asked. Here somebody does know: a person
+picked this file in their own browser, so the question *"is this worth
+keeping?"* has already been answered by the only party able to answer it.
+
+What is left to check is only *"is this a file at all"*, which a kilobyte
+settles. The number matters because sheet music is small: measured against a
+real download folder, a two-page score is a 36 kB PDF and its MSCZ is 19 kB.
+The shipped 100 kB floor would have refused every one of them, which is what
+happens when a floor is guessed at instead of measured.
+"""
+
 
 class WorklistError(RuntimeError):
     """Base class for everything a client of this service has to handle.
@@ -148,6 +166,20 @@ class Match:
     request: StoredRequest | None
     reason: str = ""
     """Why no pairing was made, for a page that has to explain itself."""
+
+
+@dataclass(frozen=True, slots=True)
+class Review:
+    """Today's list beside whatever has come back for it.
+
+    The two belong together and are asked for together, because working out
+    *which* files count as having come back needs today's offers to compare
+    against. Both clients had that calculation written out separately once, and
+    both had the same bug in it.
+    """
+
+    today: Today
+    matches: tuple[Match, ...]
 
 
 def day_of(moment: datetime, *, reset_hour: int) -> str:
@@ -260,6 +292,24 @@ class WorklistService:
             returned=returned,
         )
 
+    def review(self, *, now: datetime) -> Review:
+        """Return today's list and the files that could settle a line on it.
+
+        **Nothing owed means nothing to report**, and that is the whole of the
+        fix this method exists for. Working out which files count as arrivals
+        needs a moment to compare against — the earliest of today's offers — and
+        with no offers there is no such moment. Both clients used to fall back
+        to *no filter at all*, which turned an empty worklist into a listing of
+        every PDF a person owns: a download folder holds years of invoices and
+        magazines, and none of it is sheet music. The empty state is exactly
+        where a page is most likely to be read for the first time.
+        """
+        today = self.today(now=now)
+        if not today.offered:
+            return Review(today=today, matches=())
+        since = min((offer.offered_at for offer in today.offered if offer.offered_at), default=None)
+        return Review(today=today, matches=self.match(self.arrivals(since=since), today.offered))
+
     # --- what arrived --------------------------------------------------------
 
     def arrivals(self, *, since: datetime | None = None) -> tuple[Arrival, ...]:
@@ -365,7 +415,7 @@ class WorklistService:
         # have to name a downloader exception to handle one, and the web
         # interface is forbidden from importing that package at all.
         try:
-            with LibrarySink(entry, minimum_size=self._settings.min_download_size) as sink:
+            with LibrarySink(entry, minimum_size=MINIMUM_ARRIVAL) as sink:
                 sink.begin(ContentDescriptor(name=filename, size=path.stat().st_size))
                 with path.open("rb") as handle:
                     while chunk := handle.read(READ_CHUNK):

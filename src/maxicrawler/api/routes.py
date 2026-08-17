@@ -1629,11 +1629,8 @@ def worklist_of(request: Request) -> WorklistService:
 def _worklist_page(request: Request, *, error: str | None = None, status: int = 200) -> Response:
     """Render the worklist as it stands, with whatever went wrong last."""
     worklist = worklist_of(request)
-    now = datetime.now(UTC)
-    today = worklist.today(now=now)
-    since = min((offer.offered_at for offer in today.offered if offer.offered_at), default=None)
-    matches = worklist.match(worklist.arrivals(since=since), today.offered)
-    view = views.worklist_view(today, matches, folder=worklist.downloads.as_posix())
+    seen = worklist.review(now=datetime.now(UTC))
+    view = views.worklist_view(seen.today, seen.matches, folder=worklist.downloads.as_posix())
     response = page(
         request,
         "musescore.html",

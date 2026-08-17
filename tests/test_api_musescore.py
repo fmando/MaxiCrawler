@@ -21,7 +21,7 @@ from maxicrawler.app import CrawlService
 from maxicrawler.config import Settings
 
 SCORE = "https://musescore.com/user/21965011/scores/4217351"
-PDF = b"%PDF-1.4 a score with enough bytes to be kept\n"
+PDF = b"%PDF-1.4 a score\n" + b"x" * 4096
 
 
 @contextmanager
@@ -33,7 +33,6 @@ def client(tmp_path: Path, **overrides: object) -> Iterator[tuple[TestClient, Pa
         database_path=tmp_path / "urls.db",
         library_path=tmp_path / "library",
         musescore_downloads=str(downloads),
-        min_download_size=0,
         **overrides,  # type: ignore[arg-type]
     )
     application = create_app(service=CrawlService(settings), settings=settings)
