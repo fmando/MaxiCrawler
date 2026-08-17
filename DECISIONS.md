@@ -1548,3 +1548,127 @@ sized to anything measured here. Threads are never retired: a worker costs a
 stack and a wait on a condition, and a queue that has been busy once will be
 busy again. Only as many start as there is work, so a single download queued by
 hand starts one thread rather than five.
+
+## ADR-047: A session the person running MaxiCrawler establishes themselves
+
+MuseScore answers a subscription with twenty downloads a day and shows nothing
+to a reader who is not signed in, so reaching it at all means presenting a
+session. Everything about how that is done here follows from one decision:
+**MaxiCrawler does not log in, and should not learn how.**
+
+**Why it does not.** The account this was built for signs in through Apple, so
+there is no password to type even if typing one were the right idea. It is not
+the right idea: a program that performs a login is a program that holds
+credentials, and that is a different program with obligations — storage,
+rotation, a place to be stolen from — that this one has never taken on. What it
+accepts instead is a session a person exported from their own browser, for
+their own account. A carrier, not an authenticator. It cannot obtain a session,
+refresh one, or notice one has been revoked; it learns that from what the host
+answers, which is the only place the truth lives.
+
+**Confinement is a property of the type, not a habit of its callers.** The jar
+is built *for* a host and answers with the session only when asked about that
+host, so a transport wired to the wrong URL gets nothing rather than leaking an
+account. A lookalike domain that merely ends in the real one is not the real
+one. Plaintext gets nothing at all, because a redirect from `https` to `http`
+is the cheapest way to read a session off the wire; loopback is exempt so tests
+can exercise the real path. The value itself lives in `ResourceSecret`, and
+`tests/test_session_confinement.py` pins the modules allowed to unwrap it and
+those allowed to hold a jar at all — two each, deliberately.
+
+**Extra headers are a function of the URL, and this is the part worth reading
+twice.** `urllib` copies a request's headers onto the request it builds for the
+next redirect hop, stripping only the content ones. For a header that
+*authorises* a request that is not a convenience, it is a credential handed to
+whoever controls the redirect target. So the transport asks again at every hop.
+Confinement had to stop short of breakage in the same breath: this host
+redirects a download to a storage path on its own domain, so a hop that stays
+on the host keeps the header. Both halves have a test, and the second is the
+one that would otherwise be discovered as a bug rather than as a leak.
+
+**The user agent travels with the session.** A bot check binds its cookie to the
+browser that earned it, so replaying that cookie under another name presents it
+in circumstances that no longer match. Reading both from one export is what
+stops them drifting apart. It removes an avoidable mismatch; it is not a way to
+pass a check, and ADR-048 is about what happened when it was tried.
+
+**Not this: a session in the configuration file.** `to_toml` round-trips every
+field it knows, so a session in one would be copied into every backup of the
+configuration. What is configured is a *path*, and the settings page shows the
+path and never the contents.
+
+## ADR-048: The bot check is where this program stops
+
+The plan for 0.17 was a queue that spends twenty downloads a day unattended.
+The first real request settled it differently, and the shape of the feature
+changed rather than the boundary.
+
+**What happened.** With the session presented correctly — all of it, under the
+user agent it was issued to, from the address it was issued to — the host
+answered a score page with `403`, `server: cloudflare`, `cf-mitigated:
+challenge`. Not the download: the *page*, so nothing could even be read. The
+clearance a browser earns is bound to the TLS fingerprint of the client as well
+as to its address, which is why a correct session in a different client is
+still a different client. The page had said as much all along, in the `bm_ja3`
+and `bm_ja4` fields it carries.
+
+**Passing it is a non-goal, not an unfinished task.** TLS impersonation, a
+headless browser driven through the interstitial, an anti-detection plugin —
+these exist, and each is a technical means of making automated access look like
+human access to a mechanism whose purpose is to tell them apart. `VISION.md`
+rules out bypassing captchas and protection mechanisms, and that is the clause,
+not a nearby one. So the provider from Sprint 17 keeps its shape and loses its
+job, and this is recorded rather than left as a stub somebody later mistakes
+for an invitation.
+
+**What the feature became is what was actually tedious.** Clicking twenty links
+was never the hard part; the bookkeeping over weeks was — which twenty today,
+what already came back, what is still owed, where a list of three hundred was
+left off eleven days ago. So the fetching stays in a browser, where it has
+always worked and where the host is dealing with the person whose subscription
+it is, and MaxiCrawler keeps the list. Nothing is circumvented, because nothing
+automated is presented to the check at all.
+
+**The limit is kept rather than worked around**, which is the other half of the
+same posture. The allowance is *read* from the page a browser saved rather than
+guessed at, the day's spend is derived from what actually arrived, and a spent
+day offers nothing more. A tool that respects a rule it could technically
+ignore is the point of the exercise.
+
+## ADR-049: One queue that outlives the process, and why only one
+
+ADR-033 refused a download queue that survives a restart, and the refusal
+stands where it was aimed: a half-finished transfer has nothing sensible to come
+back as, and a restored queue offering to start the same files from zero is
+worse than an empty one. What survives in `musescore_requests` is not a
+transfer. It is an **intent** — "fetch the PDF of score 4217351" — which means
+the same thing tomorrow as it did today, and there is no partial file to resume,
+only a line still to be crossed off.
+
+The case for it is arithmetic. Twenty a day against a few hundred pieces is a
+matter of weeks, and a backlog that does not survive a restart is not a backlog.
+Nothing else on the download side has that shape, which is why nothing else gets
+this treatment.
+
+**One table, not two.** The obvious second one is a ledger of days and what each
+spent. It is not needed: a day's spend *is* the number of rows that settled on
+that day, and a derived count cannot drift out of step with the rows it
+describes while a counter kept beside them can. What the rows cannot know is
+where a day begins — a policy about somebody else's reset time — so the day a
+row counts against is written in by the caller. The database stays a record and
+the opinion lives above it.
+
+**Offered is not spent.** A list of twenty that produced fifteen files spent
+fifteen; the five nobody clicked are still owed, so an offer left from an
+earlier day returns to the backlog. Leaving it offered would hide yesterday
+behind today, and counting it as spent would charge somebody for files they
+never got.
+
+**Three ways to be quietly wrong for a fortnight, each closed by a test.**
+Adding the same collection twice does nothing, because pasting a list again is
+how people add to one — and it must not resurrect what was dropped on purpose
+or re-offer what already arrived. The identity is the score and the rendering
+rather than the URL, because the same score is reachable under a vanity profile
+and would otherwise cost two days for one file. And a request that has settled
+cannot settle again, because a folder scanned twice reports one arrival more
+than once. None of the three announces itself when it goes wrong.

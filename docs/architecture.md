@@ -1871,6 +1871,73 @@ link.
 - **No per-entry locking.** A download and a judgement landing together can lose
   one write, and disjoint members are what bounds the damage.
 
+## A worklist for a host that counts
+
+The sprint that added MuseScore planned an unattended queue and did not get
+one. The design that resulted is shaped by the refusal rather than around it,
+so the seams are worth reading in that order.
+
+### The provider that cannot be reached
+
+`plugins/musescore` and `providers/musescore` are the ordinary way a host is
+added, and they work: a score page classifies as a *container*, because one page
+is one piece of music in several renderings, and the existing planner already
+turns a container into several jobs. Inspection reads the page's own starting
+state — a `data-<digest>` attribute holding HTML-escaped JSON — which names the
+download URLs outright and states the daily allowance, so the allowance is
+*asked for* rather than guessed at. The attribute is found by shape and not by
+name, because the digest changes between deployments.
+
+None of it can run. The host answers the page with a bot check (ADR-048). The
+package stays because its state reader works on a page saved from a browser,
+and because the next authenticated host is then a registration rather than a
+design.
+
+### A session is carried, never obtained
+
+`web/cookies.py` holds a session a person exported from their own browser. It
+is a carrier: it cannot acquire one, refresh one, or tell that one was revoked.
+Confinement is a property of the type rather than a habit of its callers — a jar
+is built *for* a host, answers only about that host, and answers nothing over
+plaintext. Two modules may hold one and two may unwrap a `ResourceSecret`, and
+`tests/test_session_confinement.py` pins both sets exactly.
+
+### Extra headers are a function of the URL
+
+`FileTransport` takes a `HeaderSource`, which is a function from a URL to
+headers rather than a fixed mapping, and `GuardedRedirectHandler` calls it again
+at **every hop**. `urllib` otherwise copies a request's headers onto the request
+it builds for the next hop, stripping only the content ones — for a header that
+authorises a request, that is a credential handed to whoever controls the
+redirect target. A hop that stays on the host keeps the header, because this
+host redirects a download to its own storage path and a handler that stripped
+everything would break the ordinary case while fixing the dangerous one.
+
+### An intent survives; a transfer still does not
+
+`musescore_requests` is the one persisted queue, and ADR-049 says why only one.
+What outlives the process is an intent — "fetch the PDF of score 4217351" —
+which means the same thing tomorrow, so ADR-033's objection does not reach it.
+One table: a day's spend *is* the rows that settled on that day, and a derived
+count cannot drift from what it describes. The day a row counts against is
+written in by the caller, because where a day begins is a policy about somebody
+else's reset time and a database is the wrong place to hold an opinion.
+
+### The service owns the folder, and the rule about it
+
+`app/musescore.py` reads the download folder and never writes to it. It raises
+its own errors — `WorklistError` and below — rather than the downloader's and
+the library's, because the web interface may import neither package and a
+handler that caught `DownloadRefusedError` would be importing one to name it.
+It assembles its own store from the settings when none is handed in, for the
+same reason: `app` is the composition root and its clients are not.
+
+`require_arrival` is the load-bearing check. The page takes a *file path* from a
+form on an interface with no sign-in, so without it that page would copy any
+readable file on the machine into the library. Both sides are resolved before
+comparing, which judges a path by where it lands rather than by how it was
+spelled.
+
 ## Design rules
 
 1. Keep public interfaces typed and small.
@@ -1963,3 +2030,15 @@ link.
     library.
 49. An unsafe method is accepted only from a page of ours, decided from a header
     the browser sets. It is not authentication and must not be described as any.
+50. A credential is decided per URL, at the moment the URL is known, and
+    decided again at every redirect hop. A header that authorises a request is
+    never carried to a host that was not asked about.
+51. A service raises its own errors. A client that must name another package's
+    exception to handle one is a boundary already broken.
+52. A queue survives a restart only when what it holds is an intent. A transfer
+    is not one.
+53. A path that arrives from a request is judged by where it resolves, never by
+    how it was written, and only inside the one directory the feature needs.
+54. Terminal output is ASCII. Prose in a docstring is not.
+55. Place an arrival against a line only when it is certain. An ambiguity is
+    reported with its reason, never resolved by guessing.

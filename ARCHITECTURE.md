@@ -278,6 +278,41 @@ weil `back` eine andere Frage beantwortet, und der Nachfolger wird **vor** dem
 Schreiben ermittelt — sonst überspringt jeder Klick unter dem Filter
 „ungesichtet" genau eine Datei (ADR-040).
 
+## Eine Arbeitsliste für einen Host, der zählt
+
+MuseScore gibt einem Abo zwanzig Downloads am Tag. Bei ein paar hundert Stücken
+ist das keine Sitzung mehr, sondern ein Vorgang über Wochen — und alles, was
+MaxiCrawler auf der Download-Seite besitzt, ist für eine Sitzung gebaut.
+
+**MaxiCrawler holt von diesem Host nichts und soll es nicht lernen.** Mit
+korrekt vorgelegter Sitzung — vollständig, unter dem User-Agent, für den sie
+ausgestellt wurde, von der zugehörigen Adresse — antwortet der Host auf die
+Score-*Seite* mit einem Bot-Check statt mit der Seite. Ihn zu bestehen hieße,
+automatisierten Zugriff mit technischen Mitteln wie menschlichen aussehen zu
+lassen, gegenüber einem Mechanismus, dessen Zweck genau die Unterscheidung ist.
+Das schließt [VISION.md](VISION.md) aus; festgehalten in ADR-048.
+
+Geladen wird deshalb dort, wo es immer funktioniert hat: im Browser, durch die
+Person, deren Abo es ist. Mühsam war nie das Klicken, sondern die Buchführung
+über Wochen. Die übernimmt MaxiCrawler.
+
+| Bestandteil | Aufgabe |
+| --- | --- |
+| `web/cookies.py` | trägt eine Sitzung, beschafft nie eine |
+| `plugins/musescore` | erkennt eine Score-Adresse, ohne zu fragen |
+| `providers/musescore` | liest den Seitenzustand; unerreichbar, aber lauffähig |
+| `database/musescore.py` | die eine Queue, die einen Neustart überlebt |
+| `app/musescore.py` | Tageskontingent, Ankünfte, Aufnahme in die Library |
+
+Drei Grenzen tragen den Entwurf. Zusatz-Header sind eine **Funktion der URL**
+und werden bei jeder Weiterleitung neu bestimmt, sonst folgt eine
+Zugangsberechtigung einer Umleitung auf einen fremden Host. Der Dienst wirft
+**eigene Fehler**, weil die Weboberfläche weder `downloader` noch `library`
+importieren darf. Und `require_arrival` löst Pfade auf, bevor es vergleicht:
+Die Seite nimmt einen Dateipfad aus einem Formular entgegen, und die Oberfläche
+hat keine Anmeldung — ohne diese Prüfung wäre sie ein Weg, beliebige lesbare
+Dateien der Maschine in die Library zu kopieren.
+
 ## Ausblick: Crawl Jobs
 
 Eine `CrawlSession` beschreibt heute genau einen Crawl-Lauf. Die Weboberfläche
