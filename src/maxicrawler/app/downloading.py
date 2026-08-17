@@ -39,7 +39,7 @@ of documents, which is right for a command line and would be a way to make the
 server read its own disk on somebody else's click.
 """
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -60,6 +60,7 @@ from maxicrawler.downloader import (
 )
 from maxicrawler.library import Library, provider_directory, resource_key
 from maxicrawler.plugins import PluginResolver, create_default_registry
+from maxicrawler.plugins.musescore import MUSESCORE_DOMAIN
 from maxicrawler.providers import (
     DIRECT_PROVIDER_NAME,
     ProviderRegistry,
@@ -71,6 +72,7 @@ from maxicrawler.providers import (
 )
 from maxicrawler.utils import normalize_url, strip_fragment
 from maxicrawler.utils.addresses import PrivateNetworkRule
+from maxicrawler.web.cookies import CookieJar
 
 ProgressListener = Callable[["DownloadProgress"], None]
 """Called on the thread performing the transfer, so it must not block.
@@ -390,12 +392,53 @@ class DownloadService:
             )
             if settings.direct_downloads
             else None,
+            musescore_files=self._musescore_transport(),
+            musescore_formats=settings.musescore_formats,
             retry=RetryPolicy(max_attempts=settings.network_retries),
             max_entries=max_entries if max_entries is not None else settings.max_entries,
         )
         if max_entries is None:
             self._cached_providers = registry
         return registry
+
+    def _musescore_transport(self) -> UrllibFileTransport | None:
+        """Return a transport carrying the configured MuseScore session, if any.
+
+        This is the one place a session is read off disk, and the seam it
+        crosses is deliberately narrow: what reaches the transport is a
+        function from a URL to headers, so the transport learns header names
+        and nothing about where they came from, and a redirect off the host
+        gets no headers at all.
+
+        A configured file that cannot be read is a **refusal, not a warning**.
+        The alternative is an installation that looks configured, downloads
+        nothing, and reports twenty ordinary-looking failures before anybody
+        looks at the file.
+        """
+        settings = self._settings
+        if not settings.musescore_cookies:
+            return None
+        jar = CookieJar.from_file(Path(settings.musescore_cookies), domain=MUSESCORE_DOMAIN)
+
+        def headers(url: str) -> Mapping[str, str]:
+            value = jar.header_for(url)
+            return {} if value is None else {"Cookie": value}
+
+        return UrllibFileTransport(
+            # The session file's own user agent comes before this program's,
+            # because a session and the browser it was issued to are one fact:
+            # a check that bound its cookie to a browser is being shown that
+            # cookie under a different name otherwise. The setting still wins,
+            # for the installation that knows better than its export.
+            user_agent=settings.musescore_user_agent or jar.user_agent or settings.user_agent,
+            timeout=settings.network_timeout,
+            max_redirects=settings.max_redirects,
+            rule=PrivateNetworkRule(
+                allow=settings.private_network_allowlist,
+                allow_private=settings.allow_private_networks,
+            ),
+            extra_headers=headers,
+        )
 
 
 class _ListenerReporter:

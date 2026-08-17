@@ -1,0 +1,135 @@
+{#
+  The one page where MaxiCrawler is not the thing doing the fetching.
+
+  A bot check answers a score page rather than the page, and answering one is a
+  non-goal, so the clicking happens in a browser. What is offered here is the
+  part that was always tedious: which ones today, what came back, what is left.
+
+  Two lists, and the page is the join between them. A file the worklist can
+  place gets a button; one it cannot keeps the reason, because "it ignored my
+  file" reads worse than "two lines could be this PDF".
+#}
+{% extends "base.html" %}
+{% block title %}MuseScore · MaxiCrawler{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <h2>Today</h2>
+  <div class="body">
+    {% if worklist.error %}
+      <p class="note">{{ worklist.error }}</p>
+    {% endif %}
+    <p class="facts">
+      <span><b class="num">{{ worklist.budget.spent }}</b> of {{ worklist.budget.limit }} taken</span>
+      <span><b class="num">{{ worklist.budget.remaining }}</b> left today</span>
+      <span><b class="num">{{ worklist.waiting }}</b> still in the backlog</span>
+      <span class="muted">allowance for {{ worklist.budget.day }}</span>
+    </p>
+    {% if worklist.returned != "0" %}
+      <p class="muted">
+        {{ worklist.returned }} from an earlier day went back to the backlog.
+        Nothing was lost — they were offered and not clicked.
+      </p>
+    {% endif %}
+    <p class="muted">
+      MaxiCrawler cannot fetch from this host: a bot check answers a score page
+      rather than the page, and answering one is not something this program
+      does. Open each line below, download it in your browser, and it will
+      appear under <b>What arrived</b>.
+    </p>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>To do</h2>
+  <div class="body">
+    {% if worklist.budget.exhausted %}
+      <p class="note">
+        Today's allowance is spent. The rest is waiting and will be offered
+        after {{ worklist.budget.day }}.
+      </p>
+    {% elif not worklist.offered %}
+      <p class="muted">Nothing on the list. Add some score addresses below.</p>
+    {% endif %}
+    {% if worklist.offered %}
+      <table class="listing">
+        <thead>
+          <tr><th>Score</th><th>Format</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for line in worklist.offered %}
+            <tr>
+              <td><a href="{{ line.url }}" rel="noreferrer noopener" target="_blank">{{ line.label }}</a></td>
+              <td>{{ line.format }}</td>
+              <td class="actions">
+                <form method="post" action="/musescore/{{ line.id }}/drop">
+                  <button type="submit" class="quiet">Not this one</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </div>
+</section>
+
+<section class="panel">
+  <h2>What arrived</h2>
+  <div class="body">
+    <p class="muted">
+      Read from <b>{{ worklist.folder }}</b>. Nothing there is moved, renamed or
+      deleted — a file is copied into the library and stays where your browser
+      put it.
+    </p>
+    {% if not worklist.arrivals %}
+      <p class="muted">Nothing new in that folder yet.</p>
+    {% else %}
+      <table class="listing">
+        <thead>
+          <tr><th>File</th><th>Size</th><th>Belongs to</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for arrival in worklist.arrivals %}
+            <tr>
+              <td>{{ arrival.name }}</td>
+              <td class="num">{{ arrival.size }}</td>
+              <td>
+                {% if arrival.suggests %}
+                  {{ arrival.suggests }}
+                {% else %}
+                  <span class="muted">{{ arrival.reason }}</span>
+                {% endif %}
+              </td>
+              <td class="actions">
+                {% if arrival.request_id %}
+                  <form method="post" action="/musescore/{{ arrival.request_id }}/store">
+                    <input type="hidden" name="path" value="{{ arrival.path }}">
+                    <button type="submit">Keep it</button>
+                  </form>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Add scores</h2>
+  <div class="body">
+    <p class="muted">
+      Paste score addresses, one per line. Anything that is not one is ignored,
+      so a whole saved page of links is fine. Each score becomes one line per
+      format you keep.
+    </p>
+    <form method="post" action="/musescore">
+      <textarea name="urls" rows="6" spellcheck="false"
+                placeholder="https://musescore.com/user/21965011/scores/4217351"></textarea>
+      <button type="submit">Add to the backlog</button>
+    </form>
+  </div>
+</section>
+{% endblock %}

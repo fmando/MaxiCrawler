@@ -12,6 +12,7 @@ to put on such a page.
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -51,6 +52,7 @@ from maxicrawler.app import (
     parse_verdict,
 )
 from maxicrawler.app.maintenance import RUNS, toolbox
+from maxicrawler.app.musescore import WorklistError, WorklistService
 from maxicrawler.app.thumbnails import AVAILABLE as THUMBNAILS_AVAILABLE
 from maxicrawler.app.thumbnails import CONTENT_TYPE as THUMBNAIL_CONTENT_TYPE
 from maxicrawler.app.viewing import DOWNLOAD_CONTENT_TYPE, MediaKind
@@ -79,14 +81,21 @@ SECTIONS = (
     Section("crawls", "Crawls", "crawls"),
     Section("downloads", "Downloads", "downloads"),
     Section("library", "Library", "library"),
+    Section("musescore", "MuseScore", "musescore"),
     Section("maintenance", "Maintenance", "maintenance"),
     Section("settings", "Settings", "settings"),
 )
-"""The six areas, in the order the chain runs through them.
+"""The seven areas, in the order the chain runs through them.
 
 Downloads became one of them in Sprint 15. Before the queue there was nothing to
 put on such a page — a transfer had its own page and there was only ever one —
 and a section for it would have been a heading over a single link.
+
+MuseScore is a section of its own rather than a corner of downloads, because it
+is the one place the program is *not* the thing doing the fetching. A bot check
+answers a score page rather than the page, so what is offered there is a list to
+work through in a browser and somewhere to say what came back. Putting that
+beside transfers would suggest it is one.
 
 Maintenance sits beside settings rather than under the library, because what it
 describes is run against the whole installation and one of the runs sets the
@@ -1609,3 +1618,78 @@ def _navigation(request: Request, active: str) -> tuple[dict[str, Any], ...]:
         }
         for section in SECTIONS
     )
+
+
+def worklist_of(request: Request) -> WorklistService:
+    """Return the service this application keeps its MuseScore worklist in."""
+    service: WorklistService = request.app.state.worklist
+    return service
+
+
+def _worklist_page(request: Request, *, error: str | None = None, status: int = 200) -> Response:
+    """Render the worklist as it stands, with whatever went wrong last."""
+    worklist = worklist_of(request)
+    now = datetime.now(UTC)
+    today = worklist.today(now=now)
+    since = min((offer.offered_at for offer in today.offered if offer.offered_at), default=None)
+    matches = worklist.match(worklist.arrivals(since=since), today.offered)
+    view = views.worklist_view(today, matches, folder=worklist.downloads.as_posix())
+    response = page(
+        request,
+        "musescore.html",
+        {"worklist": {**view, "error": error}},
+        section="musescore",
+    )
+    response.status_code = status
+    return response
+
+
+async def musescore(request: Request) -> Response:
+    """Show what is owed today, and what has appeared in the download folder.
+
+    The page is the join between the two. MaxiCrawler cannot fetch from this
+    host — a bot check answers a score page rather than the page — so what it
+    offers is the list, the allowance, and somewhere to say "this file is that
+    line".
+    """
+    return _worklist_page(request)
+
+
+async def queue_scores(request: Request) -> Response:
+    """Add every score address in the pasted text to the worklist."""
+    form = await read_form(request)
+    pasted = form.get("urls", "")
+    added = worklist_of(request).add(pasted.split(), now=datetime.now(UTC))
+    if not added and pasted.strip():
+        return _worklist_page(
+            request,
+            error="Nothing in that was a score address this worklist did not already hold.",
+            status=400,
+        )
+    return RedirectResponse(url="/musescore", status_code=303)
+
+
+async def store_arrival(request: Request) -> Response:
+    """Take one file from the download folder into the library."""
+    form = await read_form(request)
+    worklist = worklist_of(request)
+    try:
+        worklist.store(
+            request.path_params["request_id"],
+            Path(form.get("path", "")),
+            now=datetime.now(UTC),
+        )
+    except WorklistError as error:
+        return _worklist_page(request, error=str(error), status=400)
+    return RedirectResponse(url="/musescore", status_code=303)
+
+
+async def drop_request(request: Request) -> Response:
+    """Take one line off the worklist without spending anything on it."""
+    form = await read_form(request)
+    worklist_of(request).drop(
+        request.path_params["request_id"],
+        now=datetime.now(UTC),
+        note=form.get("note", ""),
+    )
+    return RedirectResponse(url="/musescore", status_code=303)

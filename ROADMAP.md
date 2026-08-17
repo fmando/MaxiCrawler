@@ -44,7 +44,14 @@ The mission, core principles, and non-goals are described in
     on a real library: a tile of photographs was 3.3 GB of bitmap a page, and
     the byte limit could not fix it because it measures what is sent rather than
     what a browser holds (ADR-044)
--   0.17 Scheduler & Automation
+-   0.17 Scheduler & Automation ✅ — a worklist that outlives the process, a
+    daily budget derived from what actually arrived, and the first host needing
+    a session the person running MaxiCrawler supplies themselves. It did not
+    become the unattended queue the plan described: the host answers a score
+    page with a bot check rather than the page, and passing one is a non-goal
+    (ADR-048), so the fetching stays in a browser and MaxiCrawler keeps the
+    books. What was ever tedious was the bookkeeping over weeks, not the
+    clicking
 -   0.18 REST API
 -   1.0 Stable Release
 
@@ -84,6 +91,27 @@ not change.
 
 ## Next
 
+-   **What is left of the MuseScore provider.** It reads a score page into the
+    two files worth keeping and can transfer either, and it cannot be reached:
+    the host answers with a bot check, and passing one is a non-goal (ADR-048).
+    Kept rather than deleted for two reasons. Its state reader works on a page
+    saved from a browser, which is where a title and a stated allowance could
+    come from — today a worklist line is called "score 4217351" because nothing
+    can fetch its name. And a plugin, a provider and a session-bearing transport
+    are the shape any authenticated host takes, so the next one is a
+    registration rather than a design. What it must not become is a stub
+    somebody mistakes for an invitation to get past the check
+-   **Whether the allowance is spent per file or per score.** The worklist
+    assumes per file, which is the conservative reading: two renderings of one
+    piece cost two of twenty. If the host counts per score, every day is
+    quietly worth twice what is claimed. One afternoon of downloading a PDF and
+    an MSCZ of the same piece and watching the counter settles it, and the
+    answer is a setting rather than a change
+-   **Matching an arrival by reading it.** A file is placed against a line only
+    when that is certain, which leaves a person choosing whenever two PDFs
+    arrive together. An `.mscz` is a zip carrying the score's own metadata, and
+    a PDF carries a title; either would turn most of those guesses into
+    answers. Worth doing once there is enough traffic to be annoyed by it
 -   Pinning the resolved address onto the connection that is opened, which is
     what closes DNS rebinding. The private-network guard raises the cost of
     reaching an internal address and does not make it impossible (ADR-031), and
@@ -98,6 +126,18 @@ not change.
     floor at the other end is `min_download_size`, checked in the sink at both
     the moment a size is announced and the moment the last byte lands (ADR-042),
     and a ceiling is the same two checkpoints with the comparison turned around
+-   Making a thumbnail as soon as the file lands, so the maker stops being
+    something to remember. Nothing produces one inside a request and nothing
+    should (ADR-044) — but a download worker is already in the background with
+    the finished file in its hand, which is a different place entirely. Two
+    findings shape the work and are why it is more than the afternoon it looks
+    like: `DownloadSummary` names a directory and a key only when the link
+    turned out to be a *single* resource, so the case that matters — a share
+    holding two hundred images — needs it to carry the whole list; and the
+    decoding wants one thread of its own rather than the five transfer workers,
+    which would otherwise hold five bitmaps of a large photograph at once. Until
+    then a cron entry on the server runs `make_thumbnails.py`, which is what the
+    maintenance page prints the command for
 -   Parallel thumbnail making. The run is sequential and manages about forty
     photographs a second, which is a couple of minutes for a few thousand
     images and fine as a one-off; a library an order of magnitude larger would

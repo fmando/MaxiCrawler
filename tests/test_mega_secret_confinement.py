@@ -36,11 +36,18 @@ WINDOW = 8
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src" / "maxicrawler"
 
-REVEALING_MODULES = {"providers/mega/provider.py"}
+REVEALING_MODULES = {"providers/mega/provider.py", "web/cookies.py"}
 """The only modules allowed to unwrap a :class:`ResourceSecret`.
 
 This set is deliberately exact. Widening it is a security decision and should
 require editing this test on purpose.
+
+``web/cookies.py`` was added on purpose. A session has to reach the wire to be
+a session at all, so something must unwrap it; the question a review should ask
+is whether that something is small, whether it can be read in one sitting, and
+whether it refuses the hosts it has no business with. It is, it can, and it
+does — see ``tests/test_session_confinement.py``, which holds that module to
+the same standard this file holds the Mega provider to.
 """
 
 

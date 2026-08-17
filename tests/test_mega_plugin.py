@@ -151,9 +151,17 @@ def test_classification_performs_no_network_access(monkeypatch: pytest.MonkeyPat
 
 
 def test_default_registry_contains_mega_above_generic() -> None:
-    registry = create_default_registry()
+    """Host plugins in any order, and the generic fallback last.
 
-    assert [info.name for info in registry.discover()] == ["mega", "generic"]
+    Order among the host plugins carries no meaning — each claims its own
+    domain and no two overlap. What matters is that ``generic`` stays at the
+    bottom, because it claims everything and would otherwise answer first.
+    """
+    registry = create_default_registry()
+    names = [info.name for info in registry.discover()]
+
+    assert set(names) == {"mega", "musescore", "generic"}
+    assert names[-1] == "generic"
 
 
 def test_registry_routes_mega_links_to_the_mega_plugin() -> None:

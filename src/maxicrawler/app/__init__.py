@@ -65,6 +65,15 @@ from maxicrawler.app.library import (
     StoredPayload,
     parse_verdict,
 )
+from maxicrawler.app.musescore import (
+    Arrival,
+    Budget,
+    Match,
+    OutsideDownloadsError,
+    Today,
+    WorklistService,
+    day_of,
+)
 from maxicrawler.app.reports import (
     DEFAULT_PAGES_PER_PAGE,
     MAX_PAGES_PER_PAGE,
@@ -80,6 +89,13 @@ from maxicrawler.app.targets import TARGETS, TargetKind, target_of
 from maxicrawler.app.viewing import DEFAULT_MAX_VIEW_BYTES, Display, MediaVerdict, verdict_for
 
 __all__ = [
+    "day_of",
+    "WorklistService",
+    "Today",
+    "OutsideDownloadsError",
+    "Match",
+    "Budget",
+    "Arrival",
     "DEFAULT_LINKS_PER_PAGE",
     "DEFAULT_MAX_VIEW_BYTES",
     "DEFAULT_PAGES_PER_PAGE",

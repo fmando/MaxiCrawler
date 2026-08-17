@@ -61,6 +61,15 @@ MaxiCrawler should not:
 -   encourage downloading content without authorization,
 -   sacrifice maintainability for short-term convenience.
 
+The third of those has been tested against a real host rather than left as a
+principle. MaxiCrawler carries a session a person exported from their own
+browser, because that is the person's own authorization being used (ADR-047).
+It does not obtain one, and when a bot check answered a page instead of the
+page, the work stopped there and the feature changed shape (ADR-048). TLS
+impersonation, a headless browser driven through an interstitial, and
+anti-detection tooling are all technically available and all excluded by the
+line above.
+
 ------------------------------------------------------------------------
 
 ## Success Criteria

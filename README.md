@@ -862,6 +862,10 @@ fragments would silently lose every one of them.
 - **No JavaScript.** A page that builds its links in the browser will show
   fewer here than a reader sees.
 - **No cookies, no login, no forms, no headless browser.** Static HTML only.
+  This is about the *crawler*, and it still holds. A provider may be handed a
+  session the person running MaxiCrawler exported from their own browser
+  (ADR-047); nothing here ever performs a login, and a crawl carries no
+  credential at all.
 - **No downloads.** `crawl` contacts a web server; it contacts no provider and
   writes no file into the library.
 - **No robots.txt — at the time.** Fetching one page named by its operator is
@@ -1087,7 +1091,9 @@ was told — so that exits 0 and says so in words.
 - **No delay between requests** — the `ThrottledFetcher` seam was documented and
   empty at this point, and filled in Sprint 13.
 - **No parallelism, no downloads, no JavaScript, no cookies, no login.** The
-  crawler discovers; downloading stays a separate pipeline.
+  crawler discovers; downloading stays a separate pipeline. Parallel transfers
+  arrived in Sprint 16 on that other pipeline, and a provider may now be given a
+  session (ADR-047) — the crawler itself still carries none of it.
 
 ### Using the engine from Python
 
@@ -2461,6 +2467,58 @@ A description of a program that lives elsewhere goes stale silently, so nothing
 here is taken on trust: the directory decides which runs exist, in both
 directions, and each script's own `--help` decides whether it is one that
 writes.
+
+## A worklist for a host that counts
+
+MuseScore answers a subscription with twenty downloads a day. Against a
+collection of a few hundred pieces that is not an afternoon, it is a matter of
+weeks — and everything MaxiCrawler owns on the download side is built for an
+afternoon. The queue lives in memory and is emptied on shutdown, deliberately
+(ADR-033).
+
+**MaxiCrawler cannot fetch from this host, and will not learn how.** With a
+session presented correctly — all of it, under the user agent it was issued to,
+from the address it was issued from — the host answers a score *page* with a bot
+check rather than the page. Passing one means making automated access look like
+human access to a mechanism whose whole purpose is telling them apart, which is
+excluded by [VISION.md](VISION.md) and recorded in ADR-048. So the fetching
+stays where it has always worked: in a browser, done by the person whose
+subscription it is.
+
+What was ever tedious was not the clicking. It was knowing which twenty today,
+what already came back, what is still owed, and where a list of three hundred
+was left off eleven days ago. That is what this keeps.
+
+```bash
+maxicrawler musescore --add https://musescore.com/user/21965011/scores/4217351
+maxicrawler musescore
+```
+
+The first puts one line on the backlog per rendering you keep — a PDF to read
+from and an MSCZ to edit, by default. `--from links.txt` takes a whole file, and
+anything in it that is not a score address is ignored, so a page saved from a
+browser works as it stands. The second prints the day: what the allowance is,
+what to open, and what has appeared in your download folder. The same is on
+`/musescore` in the interface, where each line is a link and each arrival has a
+button.
+
+**The download folder is read and never written to.** Nothing there is moved,
+renamed or cleaned up; a file is copied into the library and stays where your
+browser put it. A program that tidied somebody's Downloads folder because it
+thought it recognised a file is a program nobody should run.
+
+**A file is placed against a line only when that is certain.** One arrived PDF
+and one owed PDF belong to each other. Two of each is a guess, and a guess here
+files music under the wrong name in a library meant to be kept — so it is
+reported as a guess, with the reason, and you choose.
+
+**The limit is kept rather than worked around.** The allowance is spent per
+download, so each format you keep is another day's budget on the same music.
+A day's spend is counted from what actually arrived, not from what was offered:
+a list of twenty that produced fifteen files spent fifteen, and the five nobody
+clicked come back tomorrow. What the host resets and when it resets are its
+business — `musescore_reset_hour` is openly a guess at the second, and guessing
+late costs nothing but patience.
 
 ## Documentation
 

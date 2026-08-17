@@ -181,6 +181,90 @@ class Settings:
     network is the private-network rule, which applies either way.
     """
 
+    musescore_cookies: str = ""
+    """Path to a file holding a MuseScore session, or empty for none.
+
+    **A path, never the session.** This field is round-tripped by
+    :meth:`to_toml`, so anything in it is copied into every backup of the
+    configuration; a filename is safe to copy and a set of cookies is not. The
+    file is read once, when the providers are built.
+
+    Empty is the ordinary state and means the MuseScore provider is built
+    without a transport: score pages still classify and still appear in a
+    report, and nothing can be fetched from them. That is a visible answer to
+    *"is this installation signed in?"* rather than a silent one.
+
+    What goes in the file is either a browser extension's ``cookies.txt`` or
+    the one ``Cookie:`` request header the browser's developer tools show —
+    :mod:`maxicrawler.web.cookies` tells the two apart by looking. MaxiCrawler
+    never obtains a session itself and never refreshes one.
+    """
+
+    musescore_user_agent: str = ""
+    """Which browser the MuseScore session claims to come from.
+
+    Empty means :attr:`user_agent`, which is the honest default and the one
+    that will be refused. A session cookie issued by a bot check is bound to
+    the browser that earned it as well as to the address it was earned from, so
+    a session exported from a browser and replayed under another name is a
+    session presented in circumstances that no longer match.
+
+    Setting this to the exact ``User-Agent`` of the browser the session came
+    from removes one of those mismatches. It does not remove the other: the
+    address is still this machine's, and if that machine is a server somewhere
+    else, no string fixes it. This is a way to stop failing for an avoidable
+    reason, not a way to pass a check.
+    """
+
+    musescore_formats: tuple[str, ...] = ("pdf", "mscz")
+    """Which renderings of a score are kept, in the order they are fetched.
+
+    A PDF to read from and an MSCZ to edit. MuseScore spends its daily
+    allowance per download rather than per score, so this is the setting that
+    decides whether a hundred pieces take a week or a month — every format
+    added is another day's budget spent on the same music.
+
+    A rendering a score does not offer is simply absent; asking for ``mp3`` on
+    a score without one is not an error.
+    """
+
+    musescore_daily_limit: int = 20
+    """How many files may be taken from MuseScore in one day.
+
+    Twenty, which is what the host allows a subscription and states in every
+    score page. It is configurable because it is somebody else's number and may
+    change, and because a smaller one is how the whole arrangement is tried out
+    without waiting a week to see it wrap around.
+
+    A limit that is *kept* rather than worked around. Nothing here makes more
+    downloads possible than the host permits; what it does is stop a backlog of
+    three hundred from being attempted in an afternoon and refused.
+    """
+
+    musescore_reset_hour: int = 0
+    """The hour, local time, at which a new day's allowance is assumed to start.
+
+    Assumed, because the host does not say. Midnight is the guess with the
+    fewest surprises; an installation that watches the counter come back at
+    some other hour sets that instead.
+
+    Getting it wrong is not expensive in one direction and is in the other. Too
+    early and a day looks spent when it is not, which costs a day. Too late and
+    nothing is lost at all — the worklist simply waits.
+    """
+
+    musescore_downloads: str = ""
+    """Where the browser puts what you download, or empty for the usual place.
+
+    Empty means ``Downloads`` under the home directory, which is where every
+    browser on every platform this runs on puts things unless told otherwise.
+
+    This folder is **read, never written to and never cleaned up**. Files are
+    copied into the library and left exactly where they were: a program that
+    tidied somebody's Downloads folder because it thought it recognised a file
+    would be a program nobody should run.
+    """
+
     respect_robots: bool = True
     """Whether a crawl obeys the ``/robots.txt`` of the hosts it visits.
 
@@ -305,6 +389,15 @@ class Settings:
         if self.downloads_per_host < 1:
             msg = "downloads_per_host must be at least 1"
             raise ValueError(msg)
+        if self.musescore_daily_limit < 0:
+            msg = "musescore_daily_limit must not be negative"
+            raise ValueError(msg)
+        if not 0 <= self.musescore_reset_hour <= 23:
+            msg = "musescore_reset_hour must be an hour of the day"
+            raise ValueError(msg)
+        if not self.musescore_formats:
+            msg = "musescore_formats must name at least one rendering"
+            raise ValueError(msg)
         if self.crawl_depth < 0:
             msg = "crawl_depth must not be negative"
             raise ValueError(msg)
@@ -368,6 +461,24 @@ class Settings:
             ),
             crawl_below_seed=_bool_value(app_config, "crawl_below_seed", defaults.crawl_below_seed),
             direct_downloads=_bool_value(app_config, "direct_downloads", defaults.direct_downloads),
+            musescore_cookies=_string_value(
+                app_config, "musescore_cookies", defaults.musescore_cookies
+            ),
+            musescore_user_agent=_string_value(
+                app_config, "musescore_user_agent", defaults.musescore_user_agent
+            ),
+            musescore_formats=_string_list_value(
+                app_config, "musescore_formats", defaults.musescore_formats
+            ),
+            musescore_daily_limit=_int_value(
+                app_config, "musescore_daily_limit", defaults.musescore_daily_limit
+            ),
+            musescore_reset_hour=_int_value(
+                app_config, "musescore_reset_hour", defaults.musescore_reset_hour
+            ),
+            musescore_downloads=_string_value(
+                app_config, "musescore_downloads", defaults.musescore_downloads
+            ),
             respect_robots=_bool_value(app_config, "respect_robots", defaults.respect_robots),
             robots_user_agent=_string_value(
                 app_config, "robots_user_agent", defaults.robots_user_agent
@@ -414,6 +525,14 @@ class Settings:
             f"crawl_same_domain = {str(self.crawl_same_domain).lower()}\n"
             f"crawl_below_seed = {str(self.crawl_below_seed).lower()}\n"
             f"direct_downloads = {str(self.direct_downloads).lower()}\n"
+            # The path only. The session itself must never round-trip through a
+            # file that gets copied into every configuration backup.
+            f'musescore_cookies = "{self.musescore_cookies}"\n'
+            f'musescore_user_agent = "{self.musescore_user_agent}"\n'
+            f"musescore_formats = {_toml_array(self.musescore_formats)}\n"
+            f"musescore_daily_limit = {self.musescore_daily_limit}\n"
+            f"musescore_reset_hour = {self.musescore_reset_hour}\n"
+            f'musescore_downloads = "{self.musescore_downloads}"\n'
             f"respect_robots = {str(self.respect_robots).lower()}\n"
             f'robots_user_agent = "{self.robots_user_agent}"\n'
             f"robots_timeout = {self.robots_timeout}\n"
