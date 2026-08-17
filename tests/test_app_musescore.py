@@ -30,7 +30,13 @@ MONDAY = datetime(2026, 8, 17, 10, 0, tzinfo=UTC)
 TUESDAY = datetime(2026, 8, 18, 10, 0, tzinfo=UTC)
 SCORE = "https://musescore.com/user/21965011/scores/4217351"
 OTHER = "https://musescore.com/user/1/scores/999"
-PDF = b"%PDF-1.4 a score with enough bytes to be kept\n"
+PDF = b"%PDF-1.4 a score\n" + b"x" * 4096
+"""A payload the size sheet music actually is.
+
+Measured rather than invented: a two-page score off that host is a 36 kB PDF
+beside a 19 kB MSCZ. A forty-byte fixture would pass every test here and tell
+nobody that the shipped 100 kB floor refuses the real thing.
+"""
 
 
 @pytest.fixture
@@ -43,10 +49,6 @@ def workspace(tmp_path: Path) -> tuple[WorklistService, SQLiteRequestQueue, Path
         musescore_downloads=str(downloads),
         musescore_daily_limit=4,
         musescore_formats=("pdf", "mscz"),
-        # A real score is comfortably over the shipped 100 KB floor; a fixture
-        # is not, and these tests are not about that rule. The one test that is
-        # about it builds its own settings.
-        min_download_size=0,
     )
     library = Library(settings.library_path)
     library.initialize()
@@ -472,3 +474,110 @@ def test_an_arrival_knows_its_own_stem(tmp_path: Path) -> None:
     )
 
     assert arrival.stem == "Study in Four Bars"
+
+
+# --- what a review reports ---------------------------------------------------
+
+
+def test_an_empty_worklist_reports_no_arrivals_at_all(
+    workspace: tuple[WorklistService, SQLiteRequestQueue, Path],
+) -> None:
+    """The bug this method exists for, and the state a page is first read in.
+
+    A download folder holds years of invoices, magazines and tax reports. With
+    nothing owed there is no moment to compare against, and falling back to no
+    filter listed every PDF a person owns -- each one annotated, uselessly, as
+    something no line was waiting for.
+    """
+    worklist, _, downloads = workspace
+    for name in ("invoice-2021.pdf", "magazine.pdf", "tax-return.pdf"):
+        drop_file(downloads, name)
+
+    seen = worklist.review(now=MONDAY)
+
+    assert seen.today.offered == ()
+    assert seen.matches == ()
+
+
+def test_a_review_reports_what_arrived_for_what_is_owed(
+    workspace: tuple[WorklistService, SQLiteRequestQueue, Path],
+) -> None:
+    worklist, _, downloads = workspace
+    worklist.add([SCORE], now=MONDAY)
+    seen = worklist.review(now=MONDAY)
+    stamp(drop_file(downloads, "Hallelujah.pdf"), MONDAY.replace(hour=11))
+
+    seen = worklist.review(now=MONDAY)
+
+    assert len(seen.today.offered) == 2
+    assert [match.arrival.path.name for match in seen.matches] == ["Hallelujah.pdf"]
+
+
+def test_a_review_ignores_files_older_than_the_list(
+    workspace: tuple[WorklistService, SQLiteRequestQueue, Path],
+) -> None:
+    """Years of unrelated downloads sit in that folder and settle nothing."""
+    worklist, _, downloads = workspace
+    stamp(drop_file(downloads, "invoice-2021.pdf"), datetime(2021, 3, 1, tzinfo=UTC))
+    worklist.add([SCORE], now=MONDAY)
+    worklist.review(now=MONDAY)
+
+    seen = worklist.review(now=MONDAY)
+
+    assert seen.matches == ()
+
+
+def test_a_score_sized_file_is_kept_though_it_is_under_the_shipped_floor(
+    tmp_path: Path,
+) -> None:
+    """Sheet music is small, and the global floor was guessed at rather than measured.
+
+    Measured against a real download folder, a two-page score is a 36 kB PDF
+    and its MSCZ is 19 kB. `min_download_size` ships at 100 kB, so honouring it
+    here would have refused every score this feature exists for. That setting
+    answers a different question -- bulk junk nobody chose -- and an arrival was
+    chosen by a person in their own browser.
+    """
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    settings = Settings(
+        library_path=tmp_path / "library",
+        musescore_downloads=str(downloads),
+        musescore_formats=("pdf",),
+    )
+    assert settings.min_download_size == 100_000
+    library = Library(settings.library_path)
+    library.initialize()
+    queue = SQLiteRequestQueue(SQLiteDatabase(tmp_path / "worklist.db"))
+    queue.initialize()
+    worklist = WorklistService(settings, queue, library=library)
+    worklist.add([SCORE], now=MONDAY)
+    today = worklist.today(now=MONDAY)
+    score_sized = drop_file(downloads, "Hallelujah.pdf", b"%PDF-1.4" + b"x" * 36_000)
+
+    stored = worklist.store(today.offered[0].request_id, score_sized, now=MONDAY)
+
+    assert stored is not None
+    assert stored.state is RequestState.STORED
+
+
+def test_an_empty_file_is_still_refused(tmp_path: Path) -> None:
+    """ "Is this worth keeping" is answered by a person; "is this a file" is not."""
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    settings = Settings(
+        library_path=tmp_path / "library",
+        musescore_downloads=str(downloads),
+        musescore_formats=("pdf",),
+    )
+    library = Library(settings.library_path)
+    library.initialize()
+    queue = SQLiteRequestQueue(SQLiteDatabase(tmp_path / "worklist.db"))
+    queue.initialize()
+    worklist = WorklistService(settings, queue, library=library)
+    worklist.add([SCORE], now=MONDAY)
+    today = worklist.today(now=MONDAY)
+    truncated = drop_file(downloads, "Hallelujah.pdf", b"")
+
+    with pytest.raises(ArrivalRefusedError):
+        worklist.store(today.offered[0].request_id, truncated, now=MONDAY)

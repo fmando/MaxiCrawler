@@ -561,10 +561,8 @@ def musescore(
     if keep is not None:
         _keep_arrival(service, keep, path, now=now)
         return
-    today = service.today(now=now)
-    since = min((offer.offered_at for offer in today.offered if offer.offered_at), default=None)
-    matches = service.match(service.arrivals(since=since), today.offered)
-    typer.echo(render_today(today, matches, folder=service.downloads.as_posix()))
+    seen = service.review(now=now)
+    typer.echo(render_today(seen.today, seen.matches, folder=service.downloads.as_posix()))
 
 
 def _keep_arrival(
